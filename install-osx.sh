@@ -33,7 +33,7 @@ find_python() {
 PYTHON_BIN="$(find_python)"
 echo "Using: $($PYTHON_BIN --version)"
 
-if [[ -x .venv/bin/python ]] && ! .venv/bin/python -c 'import sys; raise SystemExit(sys.version_info >= (3, 11))'; then
+if [[ -x .venv/bin/python ]] && .venv/bin/python -c 'import sys; raise SystemExit(sys.version_info < (3, 11))'; then
     echo "Existing .venv uses unsupported Python; recreating it."
     rm -rf .venv
 fi
