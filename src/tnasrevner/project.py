@@ -102,23 +102,35 @@ class ImageAsset:
 
 @dataclass(frozen=True)
 class Pad:
-    """A named board pad positioned in normalized working-image coordinates."""
+    """A named rectangular board pad in normalized image coordinates."""
 
     name: str
     side: str
     x: float
     y: float
     pad_id: str = field(default_factory=lambda: str(uuid4()))
+    width: float = 0.02
+    height: float = 0.02
 
     def __post_init__(self) -> None:
         _required_string(self.name, "pad name")
         _required_string(self.pad_id, "pad id")
         if self.side not in _SIDES:
             raise ProjectFormatError("pad side must be 'top' or 'bottom'")
-        if not all(isinstance(value, (int, float)) for value in (self.x, self.y)):
+        if not all(
+            isinstance(value, (int, float))
+            for value in (self.x, self.y, self.width, self.height)
+        ):
             raise ProjectFormatError("pad coordinates must be numbers")
-        if not 0.0 <= self.x <= 1.0 or not 0.0 <= self.y <= 1.0:
-            raise ProjectFormatError("pad coordinates must be between 0 and 1")
+        if (  # pylint: disable=too-many-boolean-expressions
+            not 0.0 <= self.x < 1.0
+            or not 0.0 <= self.y < 1.0
+            or self.width <= 0
+            or self.height <= 0
+            or self.x + self.width > 1.0
+            or self.y + self.height > 1.0
+        ):
+            raise ProjectFormatError("pad rectangle must fit between 0 and 1")
 
     def to_dict(self) -> dict[str, Any]:
         """Return JSON-compatible pad data."""
@@ -128,6 +140,8 @@ class Pad:
             "side": self.side,
             "x": self.x,
             "y": self.y,
+            "width": self.width,
+            "height": self.height,
         }
 
     @classmethod
@@ -141,6 +155,8 @@ class Pad:
             side=_required_string(data.get("side"), "pad side"),
             x=data.get("x"),
             y=data.get("y"),
+            width=data.get("width", 0.02),
+            height=data.get("height", 0.02),
         )
 
 
@@ -222,9 +238,6 @@ class ProjectDocument:  # pylint: disable=too-many-instance-attributes
         pad_ids = [pad.pad_id for pad in self.pads]
         if len(set(pad_ids)) != len(pad_ids):
             raise ProjectFormatError("pad ids must be unique")
-        pad_names = [(pad.side, pad.name) for pad in self.pads]
-        if len(set(pad_names)) != len(pad_names):
-            raise ProjectFormatError("pad names must be unique per side")
 
     def to_dict(self) -> dict[str, Any]:
         """Return complete JSON-compatible project data."""

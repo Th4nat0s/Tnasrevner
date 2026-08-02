@@ -7,6 +7,7 @@ from __future__ import annotations
 # pylint: disable=no-name-in-module,invalid-name
 # pylint: disable=too-many-lines
 
+from dataclasses import replace
 from pathlib import Path
 import sys
 from time import monotonic
@@ -619,11 +620,13 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         )
 
 
-class ImageView(QScrollArea):
+class ImageView(QScrollArea):  # pylint: disable=too-many-instance-attributes
     """Scrollable image view with mouse-wheel zoom."""
 
     view_changed = Signal()
+    pad_selected = Signal(float, float, float, float)
     pad_clicked = Signal(float, float)
+    pad_context_requested = Signal(float, float)
 
     def __init__(self, empty_text: str) -> None:
         super().__init__()
@@ -632,11 +635,14 @@ class ImageView(QScrollArea):
         self._scale = 1.0
         self._drag_position: QPoint | None = None
         self._pad_placement = False
+        self._pad_start: QPoint | None = None
+        self._click_position: QPoint | None = None
         self._label = QLabel(empty_text)
         self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._label.setMinimumSize(240, 180)
         self._label.installEventFilter(self)
         self.viewport().installEventFilter(self)
+        self._pad_band = QRubberBand(QRubberBand.Shape.Rectangle, self._label)
         self.setWidget(self._label)
         self.setWidgetResizable(False)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -688,29 +694,37 @@ class ImageView(QScrollArea):
             return True
         return super().event(event)
 
-    def eventFilter(self, watched, event) -> bool:  # noqa: N802
+    def eventFilter(  # noqa: N802  # pylint: disable=too-many-return-statements,too-many-branches
+        self, watched, event
+    ) -> bool:
         """Pan image by dragging it with the primary mouse button."""
         if watched not in (self._label, self.viewport()):
             return super().eventFilter(watched, event)
-        if (
-            event.type() == QEvent.Type.MouseButtonPress
-            and event.button() == Qt.MouseButton.LeftButton
-        ):
-            if self._pad_placement and not self._pixmap.isNull():
-                point = event.position().toPoint()
-                if watched is self.viewport():
-                    point = self._label.mapFrom(self.viewport(), point)
-                if self._label.rect().contains(point):
-                    self.pad_clicked.emit(
-                        max(0.0, min(1.0, point.x() / max(1, self._label.width() - 1))),
-                        max(
-                            0.0, min(1.0, point.y() / max(1, self._label.height() - 1))
-                        ),
-                    )
-                    self._pad_placement = False
+        if event.type() == QEvent.Type.MouseButtonPress:
+            point = self._label_point(watched, event.position().toPoint())
+            if event.button() == Qt.MouseButton.RightButton:
+                if not self._pixmap.isNull() and self._label.rect().contains(point):
+                    self.pad_context_requested.emit(*self._normalized_point(point))
                     return True
+                return super().eventFilter(watched, event)
+            if event.button() != Qt.MouseButton.LeftButton:
+                return super().eventFilter(watched, event)
+            if self._pad_placement and not self._pixmap.isNull():
+                if self._label.rect().contains(point):
+                    self._pad_start = point
+                    self._pad_band.setGeometry(QRect(point, point))
+                    self._pad_band.show()
+                    return True
+            self._click_position = point
             self._drag_position = event.globalPosition().toPoint()
             self.setCursor(QCursor(Qt.CursorShape.ClosedHandCursor))
+            return True
+        if event.type() == QEvent.Type.MouseMove and self._pad_start is not None:
+            point = self._clamp_point(
+                self._label_point(watched, event.position().toPoint()),
+                self._label.rect(),
+            )
+            self._pad_band.setGeometry(QRect(self._pad_start, point).normalized())
             return True
         if event.type() == QEvent.Type.MouseMove and self._drag_position is not None:
             current = event.globalPosition().toPoint()
@@ -723,18 +737,54 @@ class ImageView(QScrollArea):
             )
             self._drag_position = current
             return True
-        if (
-            event.type() == QEvent.Type.MouseButtonRelease
-            and self._drag_position is not None
-        ):
-            self._drag_position = None
-            self.unsetCursor()
-            return True
+        if event.type() == QEvent.Type.MouseButtonRelease:
+            point = self._clamp_point(
+                self._label_point(watched, event.position().toPoint()),
+                self._label.rect(),
+            )
+            if self._pad_start is not None:
+                selection = QRect(self._pad_start, point).normalized()
+                self._pad_start = None
+                self._pad_band.hide()
+                self._pad_placement = False
+                if selection.width() >= 2 and selection.height() >= 2:
+                    x, y = self._normalized_point(selection.topLeft())
+                    right, bottom = self._normalized_point(selection.bottomRight())
+                    self.pad_selected.emit(x, y, right - x, bottom - y)
+                return True
+            if self._drag_position is not None and self._click_position is not None:
+                if (point - self._click_position).manhattanLength() <= 3:
+                    self.pad_clicked.emit(*self._normalized_point(point))
+                self._click_position = None
+                self._drag_position = None
+                self.unsetCursor()
+                return True
         return super().eventFilter(watched, event)
 
     def set_pad_placement(self, enabled: bool) -> None:
         """Enable or disable click-to-place mode for a pad."""
         self._pad_placement = enabled
+
+    def _label_point(self, watched, point: QPoint) -> QPoint:
+        """Convert an event point to label coordinates."""
+        if watched is self.viewport():
+            return self._label.mapFrom(self.viewport(), point)
+        return point
+
+    def _normalized_point(self, point: QPoint) -> tuple[float, float]:
+        """Convert label coordinates to normalized image coordinates."""
+        return (
+            max(0.0, min(1.0, point.x() / max(1, self._label.width() - 1))),
+            max(0.0, min(1.0, point.y() / max(1, self._label.height() - 1))),
+        )
+
+    @staticmethod
+    def _clamp_point(point: QPoint, bounds: QRect) -> QPoint:
+        """Constrain a point to the image label."""
+        return QPoint(
+            max(bounds.left(), min(point.x(), bounds.right())),
+            max(bounds.top(), min(point.y(), bounds.bottom())),
+        )
 
     def has_image(self) -> bool:
         """Return whether this view currently contains a decoded image."""
@@ -850,6 +900,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         self._dirty = False
         self._syncing_views = False
         self._pending_pad: Pad | None = None
+        self._selected_pad_name: str | None = None
         self._last_view_key: int | None = None
         self._last_view_time = 0.0
         self.setWindowTitle("Tnasrevner")
@@ -876,7 +927,22 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
             view.view_changed.connect(lambda view=view: self._sync_board_views(view))
         for side, view in self._views.items():
             view.pad_clicked.connect(
-                lambda x, y, side=side: self._place_pad(side, x, y)
+                lambda x, y, side=side: self._select_pad(side, x, y)
+            )
+            view.pad_selected.connect(
+                lambda x, y, width, height, side=side: self._place_pad(
+                    side, x, y, width, height
+                )
+            )
+            view.pad_context_requested.connect(
+                lambda x, y, side=side: self._rename_pad(side, x, y)
+            )
+        for side, view in self._side_views.items():
+            view.pad_clicked.connect(
+                lambda x, y, side=side: self._select_pad(side, x, y)
+            )
+            view.pad_context_requested.connect(
+                lambda x, y, side=side: self._rename_pad(side, x, y)
             )
         self.setCentralWidget(self._tabs)
         self._create_actions()
@@ -985,22 +1051,16 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
             view.center_image()
 
     def create_pad(self) -> None:
-        """Ask for a pad name and start placement on a board side."""
+        """Start rectangle placement with the next automatic pad name."""
         if not self.project:
             QMessageBox.information(
                 self, "No project", "Create or open a project first."
             )
             return
-        name, accepted = QInputDialog.getText(self, "Create pad", "Pad name:")
-        name = name.strip()
-        if not accepted or not name:
-            return
         side = self._choose_image_side()
         if side is None:
             return
-        if any(pad.side == side and pad.name == name for pad in self.project.pads):
-            QMessageBox.warning(self, "Duplicate pad", f"Pad {name!r} already exists.")
-            return
+        name = self._next_pad_name()
         view = self._views[side]
         if not view.has_image():
             QMessageBox.information(self, "No image", f"No {side} image imported.")
@@ -1010,19 +1070,74 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         self._tabs.setCurrentIndex(0 if side == "top" else 1)
         self._pending_pad = Pad(name, side, 0.0, 0.0)
         view.set_pad_placement(True)
-        self.statusBar().showMessage(f"Click on the {side} image to place pad {name}.")
+        self.statusBar().showMessage(
+            f"Draw a rectangle on the {side} image for pad {name}."
+        )
 
-    def _place_pad(self, side: str, x: float, y: float) -> None:
+    def _next_pad_name(self) -> str:
+        """Return the first unused automatic pad name."""
+        names = {pad.name for pad in self.project.pads} if self.project else set()
+        index = 1
+        while f"P{index}" in names:
+            index += 1
+        return f"P{index}"
+
+    def _place_pad(
+        self, side: str, x: float, y: float, width: float, height: float
+    ) -> None:
         """Finish pad placement at normalized image coordinates."""
         pending = self._pending_pad
         if not self.project or pending is None or pending.side != side:
             return
         for view in self._views.values():
             view.set_pad_placement(False)
-        self.project.pads.append(Pad(pending.name, side, x, y, pending.pad_id))
+        self.project.pads.append(
+            Pad(pending.name, side, x, y, pending.pad_id, width, height)
+        )
         self._pending_pad = None
         self._dirty = True
         self.statusBar().clearMessage()
+        self._refresh_views()
+        self._update_title()
+
+    def _pad_at(self, side: str, x: float, y: float) -> Pad | None:
+        """Return the pad containing normalized coordinates, if any."""
+        if not self.project:
+            return None
+        for pad in reversed(self.project.pads):
+            if (
+                pad.side == side
+                and pad.x <= x <= pad.x + pad.width
+                and pad.y <= y <= pad.y + pad.height
+            ):
+                return pad
+        return None
+
+    def _select_pad(self, side: str, x: float, y: float) -> None:
+        """Select a pad name to show its same-name connections."""
+        pad = self._pad_at(side, x, y)
+        self._selected_pad_name = pad.name if pad else None
+        self._refresh_views()
+
+    def _rename_pad(self, side: str, x: float, y: float) -> None:
+        """Rename the pad under a right-click without restricting duplicates."""
+        if not self.project:
+            return
+        pad = self._pad_at(side, x, y)
+        if pad is None:
+            return
+        name, accepted = QInputDialog.getText(
+            self, "Rename pad", "Pad name:", text=pad.name
+        )
+        name = name.strip()
+        if not accepted or not name:
+            return
+        self.project.pads = [
+            replace(item, name=name) if item.pad_id == pad.pad_id else item
+            for item in self.project.pads
+        ]
+        self._selected_pad_name = name
+        self._dirty = True
         self._refresh_views()
         self._update_title()
 
@@ -1430,17 +1545,31 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
             return
         painter = QPainter(pixmap)
         radius = max(5, min(pixmap.width(), pixmap.height()) // 100)
+        pads = [pad for pad in self.project.pads if pad.side == side]
+        if self._selected_pad_name:
+            centers: dict[str, list[QPoint]] = {}
+            for pad in pads:
+                if pad.name != self._selected_pad_name:
+                    continue
+                centers.setdefault(pad.name, []).append(
+                    QPoint(
+                        round((pad.x + pad.width / 2) * (pixmap.width() - 1)),
+                        round((pad.y + pad.height / 2) * (pixmap.height() - 1)),
+                    )
+                )
+            painter.setPen(QPen(Qt.GlobalColor.white, max(2, radius // 2)))
+            for points in centers.values():
+                for start, end in zip(points, points[1:]):
+                    painter.drawLine(start, end)
         painter.setPen(QPen(Qt.GlobalColor.yellow, max(2, radius // 3)))
         painter.setBrush(Qt.GlobalColor.red)
-        for pad in self.project.pads:
-            if pad.side != side:
-                continue
-            center = QPoint(
-                round(pad.x * (pixmap.width() - 1)),
-                round(pad.y * (pixmap.height() - 1)),
-            )
-            painter.drawEllipse(center, radius, radius)
-            painter.drawText(center + QPoint(radius + 3, -radius - 3), pad.name)
+        for pad in pads:
+            left = round(pad.x * (pixmap.width() - 1))
+            top = round(pad.y * (pixmap.height() - 1))
+            right = max(left + 2, round((pad.x + pad.width) * (pixmap.width() - 1)))
+            bottom = max(top + 2, round((pad.y + pad.height) * (pixmap.height() - 1)))
+            painter.drawRect(QRect(left, top, right - left, bottom - top))
+            painter.drawText(QPoint(left + 3, max(12, top - 3)), pad.name)
         painter.end()
 
     def _update_title(self) -> None:
