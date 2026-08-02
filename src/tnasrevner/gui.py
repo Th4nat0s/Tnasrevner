@@ -224,6 +224,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
             ("New project", self.new_project, "Ctrl+N"),
             ("Open project", self.open_project, "Ctrl+O"),
             ("Save project", self.save_project, "Ctrl+S"),
+            ("Close project", self.close_project, "Ctrl+W"),
             ("Import top picture", lambda: self.import_picture("top"), "Ctrl+T"),
             ("Import bottom picture", lambda: self.import_picture("bottom"), "Ctrl+B"),
         ):
@@ -311,6 +312,16 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         self._dirty = False
         self._update_title()
         return True
+
+    def close_project(self) -> None:
+        """Close current project after resolving pending changes."""
+        if not self._confirm_pending_changes():
+            return
+        self.project = None
+        self.store = None
+        self._dirty = False
+        self._refresh_views()
+        self._update_title()
 
     def _confirm_pending_changes(self) -> bool:
         """Ask how to handle unsaved changes before changing project context."""
