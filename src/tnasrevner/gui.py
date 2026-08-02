@@ -1076,12 +1076,8 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         elif self._tabs.currentIndex() == 2:
             views = self._side_views
         else:
-            QMessageBox.information(
-                self,
-                "Select a board view",
-                "Choose Top, Bottom, or Top + bottom before creating a pad.",
-            )
-            return
+            self._tabs.setCurrentIndex(2)
+            views = self._side_views
         if not any(view.has_image() for view in views.values()):
             QMessageBox.information(self, "No image", "Import an image first.")
             return
