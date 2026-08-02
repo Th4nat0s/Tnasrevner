@@ -10,7 +10,7 @@ from pathlib import Path
 import sys
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QPixmap
+from PySide6.QtGui import QAction, QCloseEvent, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -162,6 +162,8 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
 
     def new_project(self) -> None:
         """Create an empty `.revp` project file."""
+        if not self._confirm_pending_changes():
+            return
         dialog = ProjectDetailsDialog(self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
@@ -183,6 +185,8 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
 
     def open_project(self) -> None:
         """Open a `.revp` project file."""
+        if not self._confirm_pending_changes():
+            return
         path, _ = QFileDialog.getOpenFileName(
             self, "Open project", "", "Tnasrevner project (*.revp)"
         )
@@ -198,19 +202,50 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         self._refresh_views()
         self._update_title()
 
-    def save_project(self) -> None:
+    def save_project(self) -> bool:
         """Save project metadata and current display tab."""
         if not self.project or not self.store:
             QMessageBox.information(
                 self, "No project", "Create or open a project first."
             )
-            return
+            return False
         self.project.display.mode = ("top", "bottom", "side_by_side")[
             self._tabs.currentIndex()
         ]
-        self.store.save(self.project)
+        try:
+            self.store.save(self.project)
+        except (OSError, ProjectFormatError) as error:
+            QMessageBox.critical(self, "Save failed", str(error))
+            return False
         self._dirty = False
         self._update_title()
+        return True
+
+    def _confirm_pending_changes(self) -> bool:
+        """Ask how to handle unsaved changes before changing project context."""
+        if not self._dirty:
+            return True
+        answer = QMessageBox.warning(
+            self,
+            "Unsaved changes",
+            "Save changes before continuing?",
+            QMessageBox.StandardButton.Save
+            | QMessageBox.StandardButton.Discard
+            | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Save,
+        )
+        if answer == QMessageBox.StandardButton.Save:
+            return self.save_project()
+        return answer == QMessageBox.StandardButton.Discard
+
+    def closeEvent(
+        self, event: QCloseEvent
+    ) -> None:  # noqa: N802  # pylint: disable=invalid-name
+        """Prevent accidental loss of unsaved project changes."""
+        if self._confirm_pending_changes():
+            event.accept()
+        else:
+            event.ignore()
 
     def import_picture(self, side: str) -> None:
         """Copy a selected picture into project assets and display it."""
