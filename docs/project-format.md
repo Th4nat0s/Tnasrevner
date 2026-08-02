@@ -17,6 +17,9 @@ root, making one `.revp` file sufficient to move or copy a project.
   "images": [
     {"side": "top", "path": "assets/top.png", "original_name": "top.png", "pixels_per_mm": 12.5}
   ],
+  "pads": [
+    {"pad_id": "uuid", "name": "P1", "side": "top", "x": 0.1, "y": 0.2, "width": 0.05, "height": 0.04, "net": "GND"}
+  ],
   "display": {
     "mode": "top",
     "zoom": 1.0,
@@ -37,6 +40,9 @@ horizontally. This is a view preference only; source images remain unchanged.
 
 Imported images store `pixels_per_mm`, measured from the mandatory calibration
 line drawn during import. This value is optional for older projects.
+
+Pads keep a stable unique name such as `P1`. The optional `net` field assigns
+electrical connectivity; pads sharing a net are connected in the workspace.
 
 The ZIP is written atomically through a temporary file. Source pictures are read
 and copied into the archive; original files are never modified.

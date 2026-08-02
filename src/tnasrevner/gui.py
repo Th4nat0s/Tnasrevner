@@ -8,6 +8,8 @@ from __future__ import annotations
 # pylint: disable=too-many-lines
 
 from dataclasses import replace
+import logging
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 import sys
 from time import monotonic
@@ -20,9 +22,11 @@ from PySide6.QtCore import (
     QPoint,
     QPointF,
     QRect,
+    QStandardPaths,
     QTimer,
     Qt,
     Signal,
+    qInstallMessageHandler,
 )
 from PySide6.QtGui import (
     QAction,
@@ -49,6 +53,8 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QScrollArea,
     QTabWidget,
+    QTableWidget,
+    QTableWidgetItem,
     QPushButton,
     QRubberBand,
     QVBoxLayout,
@@ -56,6 +62,51 @@ from PySide6.QtWidgets import (
 )
 
 from .project import ImageAsset, Pad, ProjectDocument, ProjectFormatError, ProjectStore
+
+LOGGER = logging.getLogger("tnasrevner")
+_LOG_PATH: Path | None = None
+
+
+def _qt_message_handler(mode, _context, message) -> None:
+    """Write Qt runtime messages into the application log."""
+    LOGGER.warning("Qt[%s] %s", mode, message)
+
+
+def _configure_logging() -> Path:
+    """Configure rotating application and Qt diagnostics."""
+    global _LOG_PATH  # pylint: disable=global-statement
+    if _LOG_PATH is not None:
+        return _LOG_PATH
+    directory = Path(
+        QStandardPaths.writableLocation(
+            QStandardPaths.StandardLocation.AppLocalDataLocation
+        )
+    )
+    directory.mkdir(parents=True, exist_ok=True)
+    _LOG_PATH = directory / "tnasrevner.log"
+    handler = RotatingFileHandler(
+        _LOG_PATH, maxBytes=2_000_000, backupCount=3, encoding="utf-8"
+    )
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
+    )
+    LOGGER.setLevel(logging.DEBUG)
+    LOGGER.addHandler(handler)
+    LOGGER.propagate = False
+
+    qInstallMessageHandler(_qt_message_handler)
+    previous_hook = sys.excepthook
+
+    def exception_hook(exception_type, value, traceback) -> None:
+        LOGGER.critical(
+            "Unhandled exception",
+            exc_info=(exception_type, value, traceback),
+        )
+        previous_hook(exception_type, value, traceback)
+
+    sys.excepthook = exception_hook
+    LOGGER.info("Tnasrevner logging started: %s", _LOG_PATH)
+    return _LOG_PATH
 
 
 class ProjectDetailsDialog(QDialog):  # pylint: disable=too-few-public-methods
@@ -717,6 +768,7 @@ class ImageView(QScrollArea):  # pylint: disable=too-many-instance-attributes
                     self._pad_start = point
                     self._pad_band.setGeometry(QRect(point, point))
                     self._pad_band.show()
+                    LOGGER.debug("Pad drag started point=(%s,%s)", point.x(), point.y())
                     return True
             self._click_position = point
             self._drag_position = event.globalPosition().toPoint()
@@ -753,6 +805,13 @@ class ImageView(QScrollArea):  # pylint: disable=too-many-instance-attributes
                 if selection.width() >= 2 and selection.height() >= 2:
                     x, y = self._normalized_point(selection.topLeft())
                     right, bottom = self._normalized_point(selection.bottomRight())
+                    LOGGER.debug(
+                        "Pad drag released rect=(%.5f,%.5f,%.5f,%.5f)",
+                        x,
+                        y,
+                        right - x,
+                        bottom - y,
+                    )
                     self.pad_selected.emit(x, y, right - x, bottom - y)
                 return True
             if self._drag_position is not None and self._click_position is not None:
@@ -909,7 +968,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         self._dirty = False
         self._syncing_views = False
         self._pending_pad: Pad | None = None
-        self._selected_pad_name: str | None = None
+        self._selected_net: str | None = None
         self._selected_pad_id: str | None = None
         self._pads_visible = True
         self._pad_refresh_pending = False
@@ -936,6 +995,10 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         self._tabs.addTab(side_by_side, "Top + bottom")
         self._overlay_view = ImageView("No top/bottom images")
         self._tabs.addTab(self._overlay_view, "Both")
+        self._net_table = QTableWidget(0, 2)
+        self._net_table.setHorizontalHeaderLabels(["Pad", "Net"])
+        self._net_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._tabs.addTab(self._net_table, "Nets")
         for view in (*self._views.values(), *self._side_views.values()):
             view.view_changed.connect(lambda view=view: self._sync_board_views(view))
         for side, view in self._views.items():
@@ -948,7 +1011,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
                 )
             )
             view.pad_context_requested.connect(
-                lambda x, y, side=side: self._defer_pad_rename(side, x, y)
+                lambda x, y, side=side: self._defer_pad_net_assignment(side, x, y)
             )
         for side, view in self._side_views.items():
             view.pad_selected.connect(
@@ -960,7 +1023,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
                 lambda x, y, side=side: self._select_pad(side, x, y)
             )
             view.pad_context_requested.connect(
-                lambda x, y, side=side: self._defer_pad_rename(side, x, y)
+                lambda x, y, side=side: self._defer_pad_net_assignment(side, x, y)
             )
         self.setCentralWidget(self._tabs)
         self._create_actions()
@@ -970,7 +1033,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         if show_startup:
             QTimer.singleShot(0, self._startup_choice)
 
-    def _create_tool_palette(self) -> None:
+    def _create_tool_palette(self) -> None:  # pylint: disable=too-many-statements
         """Create the right-side view control palette."""
         dock = QDockWidget("Tools", self)
         dock.setObjectName("toolsDock")
@@ -1011,6 +1074,10 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         show_pads_button.setToolTip("Show or hide pad rectangles and connections")
         show_pads_button.toggled.connect(self._set_pads_visible)
         layout.addWidget(show_pads_button)
+        log_button = QPushButton("Log file", panel)
+        log_button.setToolTip("Show diagnostic log file path")
+        log_button.clicked.connect(self._show_log_path)
+        layout.addWidget(log_button)
         save_button = QPushButton("Save", panel)
         save_button.setToolTip("Save project")
         save_button.clicked.connect(self.save_project)
@@ -1082,6 +1149,9 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
             )
             return
         name = self._next_pad_name()
+        LOGGER.info(
+            "Create pad requested name=%s tab=%s", name, self._tabs.currentIndex()
+        )
         if self._tabs.currentIndex() == 0:
             views = {"top": self._views["top"]}
         elif self._tabs.currentIndex() == 1:
@@ -1100,7 +1170,13 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         for view in views.values():
             if view.has_image():
                 view.set_pad_placement(True)
+        LOGGER.debug("Pad placement armed name=%s views=%s", name, tuple(views))
         self.statusBar().showMessage(f"Draw a rectangle for pad {name}.")
+
+    def _show_log_path(self) -> None:
+        """Display the diagnostic log path for bug reports."""
+        path = _LOG_PATH or _configure_logging()
+        QMessageBox.information(self, "Log file", str(path))
 
     def _next_pad_name(self) -> str:
         """Return the first unused automatic pad name."""
@@ -1116,11 +1192,22 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         """Finish pad placement at normalized image coordinates."""
         pending = self._pending_pad
         if not self.project or pending is None:
+            LOGGER.warning("Ignored pad placement side=%s without pending pad", side)
             return
         for view in (*self._views.values(), *self._side_views.values()):
             view.set_pad_placement(False)
         self.project.pads.append(
             Pad(pending.name, side, x, y, pending.pad_id, width, height)
+        )
+        LOGGER.info(
+            "Pad created id=%s name=%s side=%s rect=(%.5f,%.5f,%.5f,%.5f)",
+            pending.pad_id,
+            pending.name,
+            side,
+            x,
+            y,
+            width,
+            height,
         )
         self._pending_pad = None
         self._dirty = True
@@ -1146,16 +1233,26 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         view_state = self._active_views()[0].view_state()
         pad = self._pad_at(side, x, y)
         if pad and pad.pad_id == self._selected_pad_id:
-            self._selected_pad_name = None
+            self._selected_net = None
             self._selected_pad_id = None
         else:
-            self._selected_pad_name = pad.name if pad else None
+            self._selected_net = pad.net if pad else None
             self._selected_pad_id = pad.pad_id if pad else None
+        LOGGER.info(
+            "Pad click side=%s point=(%.5f,%.5f) pad=%s net=%s selected=%s",
+            side,
+            x,
+            y,
+            pad.pad_id if pad else None,
+            pad.net if pad else None,
+            self._selected_pad_id,
+        )
         self._schedule_pad_refresh(view_state)
 
     def _set_pads_visible(self, visible: bool) -> None:
         """Show or hide pad overlays while preserving the current view."""
         self._pads_visible = visible
+        LOGGER.info("Pad visibility=%s", visible)
         self._schedule_pad_refresh(self._active_views()[0].view_state())
 
     def _schedule_pad_refresh(self, state: tuple[float, float, float]) -> None:
@@ -1164,6 +1261,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         if self._pad_refresh_pending:
             return
         self._pad_refresh_pending = True
+        LOGGER.debug("Pad refresh scheduled state=%s", state)
         QTimer.singleShot(0, self._finish_pad_refresh)
 
     def _finish_pad_refresh(self) -> None:
@@ -1171,6 +1269,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         state = self._pending_pad_view_state
         self._pending_pad_view_state = None
         self._pad_refresh_pending = False
+        LOGGER.debug("Pad refresh started state=%s", state)
         self._refresh_views()
         if state is not None:
             self._apply_active_view_state(state)
@@ -1183,35 +1282,36 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
                 view.apply_view_state(state)
         finally:
             self._syncing_views = False
-        if self._tabs.currentIndex() != 3:
+        if self._tabs.currentIndex() not in (3, 4):
             self._sync_board_views(self._active_views()[0])
 
-    def _rename_pad(self, side: str, x: float, y: float) -> None:
-        """Rename the pad under a right-click without restricting duplicates."""
+    def _connect_pad_to_net(self, side: str, x: float, y: float) -> None:
+        """Assign or clear the electrical net of a right-clicked pad."""
         if not self.project:
             return
         pad = self._pad_at(side, x, y)
         if pad is None:
             return
-        name, accepted = QInputDialog.getText(
-            self, "Rename pad", "Pad name:", text=pad.name
+        net, accepted = QInputDialog.getText(
+            self, "Connect pad to net", "Net name:", text=pad.net or ""
         )
-        name = name.strip()
-        if not accepted or not name:
+        if not accepted:
             return
+        net = net.strip() or None
         self.project.pads = [
-            replace(item, name=name) if item.pad_id == pad.pad_id else item
+            replace(item, net=net) if item.pad_id == pad.pad_id else item
             for item in self.project.pads
         ]
-        self._selected_pad_name = name
+        self._selected_net = net
         self._selected_pad_id = pad.pad_id
+        LOGGER.info("Pad net assigned id=%s pad=%s net=%s", pad.pad_id, pad.name, net)
         self._dirty = True
         self._schedule_pad_refresh(self._active_views()[0].view_state())
         self._update_title()
 
-    def _defer_pad_rename(self, side: str, x: float, y: float) -> None:
-        """Open the rename dialog after returning from the mouse event."""
-        QTimer.singleShot(0, lambda: self._rename_pad(side, x, y))
+    def _defer_pad_net_assignment(self, side: str, x: float, y: float) -> None:
+        """Open net assignment after returning from the mouse event."""
+        QTimer.singleShot(0, lambda: self._connect_pad_to_net(side, x, y))
 
     def _create_actions(self) -> None:
         file_menu = self.menuBar().addMenu("File")
@@ -1299,9 +1399,13 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
                 self, "No project", "Create or open a project first."
             )
             return False
-        self.project.display.mode = ("top", "bottom", "side_by_side", "both")[
-            self._tabs.currentIndex()
-        ]
+        self.project.display.mode = (
+            "top",
+            "bottom",
+            "side_by_side",
+            "both",
+            "nets",
+        )[self._tabs.currentIndex()]
         display_view = self._active_views()[0]
         (
             self.project.display.zoom,
@@ -1532,11 +1636,16 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         self._refresh_overlay()
         for side, view in self._side_views.items():
             view.set_pixmap(self._pixmap_for_asset(side))
+        self._refresh_net_table()
         if self.project:
             self._tabs.setCurrentIndex(
-                {"top": 0, "bottom": 1, "side_by_side": 2, "both": 3}[
-                    self.project.display.mode
-                ]
+                {
+                    "top": 0,
+                    "bottom": 1,
+                    "side_by_side": 2,
+                    "both": 3,
+                    "nets": 4,
+                }[self.project.display.mode]
             )
             state = (
                 self.project.display.zoom,
@@ -1549,10 +1658,20 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
                     view.apply_view_state(state)
             finally:
                 self._syncing_views = False
-            if self._tabs.currentIndex() != 3:
+            if self._tabs.currentIndex() not in (3, 4):
                 self._sync_board_views(self._active_views()[0])
         else:
             self._sync_board_views(self._views["top"])
+
+    def _refresh_net_table(self) -> None:
+        """Show each stable pad name and its assigned electrical net."""
+        pads = (
+            sorted(self.project.pads, key=lambda pad: pad.name) if self.project else []
+        )
+        self._net_table.setRowCount(len(pads))
+        for row, pad in enumerate(pads):
+            self._net_table.setItem(row, 0, QTableWidgetItem(pad.name))
+            self._net_table.setItem(row, 1, QTableWidgetItem(pad.net or ""))
 
     def _refresh_overlay(self) -> None:
         """Compose top and mirrored bottom images into the Both view."""
@@ -1618,14 +1737,14 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         painter = QPainter(pixmap)
         radius = max(5, min(pixmap.width(), pixmap.height()) // 100)
         pads = [pad for pad in self.project.pads if pad.side == side]
-        if self._selected_pad_name:
+        if self._selected_net:
             centers = {
                 pad.pad_id: QPoint(
                     round((pad.x + pad.width / 2) * (pixmap.width() - 1)),
                     round((pad.y + pad.height / 2) * (pixmap.height() - 1)),
                 )
                 for pad in pads
-                if pad.name == self._selected_pad_name
+                if pad.net == self._selected_net
             }
             origin = centers.get(self._selected_pad_id or "")
             if origin is None and centers:
@@ -1663,6 +1782,7 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("Tnasrevner")
     app.setApplicationDisplayName("Tnasrevner")
+    _configure_logging()
     window = MainWindow()
     window.show()
     return app.exec()

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 import json
 from pathlib import Path, PurePosixPath
@@ -14,7 +14,7 @@ CURRENT_FORMAT_VERSION = 1
 PROJECT_FILENAME = "project.json"
 PROJECT_ARCHIVE_SUFFIX = ".revp"
 _SIDES = frozenset({"top", "bottom"})
-_DISPLAY_MODES = frozenset({"top", "bottom", "side_by_side", "both"})
+_DISPLAY_MODES = frozenset({"top", "bottom", "side_by_side", "both", "nets"})
 
 
 class ProjectFormatError(ValueError):
@@ -101,7 +101,7 @@ class ImageAsset:
 
 
 @dataclass(frozen=True)
-class Pad:
+class Pad:  # pylint: disable=too-many-instance-attributes
     """A named rectangular board pad in normalized image coordinates."""
 
     name: str
@@ -111,12 +111,15 @@ class Pad:
     pad_id: str = field(default_factory=lambda: str(uuid4()))
     width: float = 0.02
     height: float = 0.02
+    net: str | None = None
 
     def __post_init__(self) -> None:
         _required_string(self.name, "pad name")
         _required_string(self.pad_id, "pad id")
         if self.side not in _SIDES:
             raise ProjectFormatError("pad side must be 'top' or 'bottom'")
+        if self.net is not None:
+            _required_string(self.net, "pad net")
         if not all(
             isinstance(value, (int, float))
             for value in (self.x, self.y, self.width, self.height)
@@ -142,6 +145,7 @@ class Pad:
             "y": self.y,
             "width": self.width,
             "height": self.height,
+            "net": self.net,
         }
 
     @classmethod
@@ -157,7 +161,28 @@ class Pad:
             y=data.get("y"),
             width=data.get("width", 0.02),
             height=data.get("height", 0.02),
+            net=data.get("net"),
         )
+
+
+def _pads_from_dict(data: list[Any]) -> list[Pad]:
+    """Load pads and migrate legacy duplicate names into shared nets."""
+    pads = [Pad.from_dict(item) for item in data]
+    counts = {pad.name: sum(other.name == pad.name for other in pads) for pad in pads}
+    used_names = {pad.name for pad in pads if counts[pad.name] == 1}
+    next_index = 1
+    migrated: list[Pad] = []
+    for item, pad in zip(data, pads):
+        if counts[pad.name] == 1 or item.get("net") is not None:
+            migrated.append(pad)
+            continue
+        while f"P{next_index}" in used_names:
+            next_index += 1
+        name = f"P{next_index}"
+        next_index += 1
+        used_names.add(name)
+        migrated.append(replace(pad, name=name, net=pad.name))
+    return migrated
 
 
 @dataclass
@@ -238,6 +263,9 @@ class ProjectDocument:  # pylint: disable=too-many-instance-attributes
         pad_ids = [pad.pad_id for pad in self.pads]
         if len(set(pad_ids)) != len(pad_ids):
             raise ProjectFormatError("pad ids must be unique")
+        pad_names = [pad.name for pad in self.pads]
+        if len(set(pad_names)) != len(pad_names):
+            raise ProjectFormatError("pad names must be unique")
 
     def to_dict(self) -> dict[str, Any]:
         """Return complete JSON-compatible project data."""
@@ -275,7 +303,7 @@ class ProjectDocument:  # pylint: disable=too-many-instance-attributes
             created_at=_required_string(data.get("created_at"), "created_at"),
             updated_at=_required_string(data.get("updated_at"), "updated_at"),
             images=[ImageAsset.from_dict(image) for image in images],
-            pads=[Pad.from_dict(pad) for pad in pads],
+            pads=_pads_from_dict(pads),
             display=DisplaySettings.from_dict(data.get("display", {})),
         )
 

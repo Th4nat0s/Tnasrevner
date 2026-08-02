@@ -127,7 +127,7 @@ def test_duplicate_image_sides_are_rejected() -> None:
 
 def test_pad_round_trip_and_validation() -> None:
     """Pads serialize with stable identity and reject invalid coordinates."""
-    pad = Pad("U1.1", "top", 0.25, 0.75, "pad-id")
+    pad = Pad("P1", "top", 0.25, 0.75, "pad-id", net="GND")
     restored = Pad.from_dict(pad.to_dict())
 
     assert restored == pad
@@ -135,15 +135,41 @@ def test_pad_round_trip_and_validation() -> None:
         Pad("bad", "top", 1.1, 0.5)
 
 
-def test_duplicate_pad_names_are_allowed_for_connections() -> None:
-    """Pads sharing a name can represent one connection."""
+def test_pad_names_are_unique_but_nets_can_be_shared() -> None:
+    """Stable pad labels are unique while one net can connect many pads."""
     project = ProjectDocument(
         "Project",
         "Board",
-        pads=[Pad("P1", "top", 0.1, 0.1), Pad("P1", "top", 0.2, 0.2)],
+        pads=[
+            Pad("P1", "top", 0.1, 0.1, net="GND"),
+            Pad("P2", "top", 0.2, 0.2, net="GND"),
+        ],
     )
 
     assert len(project.pads) == 2
+    assert {pad.net for pad in project.pads} == {"GND"}
+    with pytest.raises(ProjectFormatError, match="pad names must be unique"):
+        ProjectDocument(
+            "Project",
+            "Board",
+            pads=[Pad("P1", "top", 0.1, 0.1), Pad("P1", "bottom", 0.2, 0.2)],
+        )
+
+
+def test_legacy_duplicate_pad_names_migrate_to_net() -> None:
+    """Legacy same-name pads become unique pads on one shared net."""
+    data = ProjectDocument("Project", "Board").to_dict()
+    data["pads"] = [
+        Pad("GND", "top", 0.1, 0.1, "one").to_dict(),
+        Pad("GND", "bottom", 0.2, 0.2, "two").to_dict(),
+    ]
+    for pad in data["pads"]:
+        pad.pop("net")
+
+    project = ProjectDocument.from_dict(data)
+
+    assert [pad.name for pad in project.pads] == ["P1", "P2"]
+    assert {pad.net for pad in project.pads} == {"GND"}
 
 
 def test_unsupported_version_and_corrupt_file_are_rejected(tmp_path: Path) -> None:

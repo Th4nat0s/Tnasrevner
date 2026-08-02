@@ -8,5 +8,6 @@
 - Added image replacement/removal controls and clear missing/corrupt asset errors.
 - Completed board picture workspace views with Top, Bottom, side-by-side, Both,
   zoom/pan controls, persisted display state, and saved calibration lines.
-- Added persisted rectangular pad creation from Tools, automatic P-naming, right-click
-  rename, and same-name connection lines.
+- Added persisted rectangular pad creation from Tools, automatic P-naming,
+  right-click net assignment, electrical-net connection lines, and a Nets table.
+- Added rotating application diagnostics available through Tools > Log file.

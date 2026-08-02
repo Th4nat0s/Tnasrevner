@@ -213,8 +213,8 @@ def test_clicking_pad_toggles_links_without_resetting_zoom(
         "Project",
         "Board",
         pads=[
-            Pad("GND", "top", 0.1, 0.1, "one", 0.1, 0.1),
-            Pad("GND", "top", 0.5, 0.5, "two", 0.1, 0.1),
+            Pad("P1", "top", 0.1, 0.1, "one", 0.1, 0.1, "GND"),
+            Pad("P2", "top", 0.5, 0.5, "two", 0.1, 0.1, "GND"),
         ],
     )
     image = QImage(100, 100, QImage.Format.Format_RGB32)
@@ -239,6 +239,27 @@ def test_clicking_pad_toggles_links_without_resetting_zoom(
     QApplication.processEvents()
     assert not window._pads_visible
     assert window._views["top"]._scale == 3.0
+
+
+def test_net_view_and_right_click_assignment(
+    window: MainWindow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Net assignment keeps pad name and appears in the Nets table."""
+    window.project = ProjectDocument(
+        "Project", "Board", pads=[Pad("P1", "top", 0.1, 0.1, "one", 0.1, 0.1)]
+    )
+    monkeypatch.setattr(
+        "tnasrevner.gui.QInputDialog.getText", lambda *_args, **_kwargs: ("GND", True)
+    )
+
+    window._connect_pad_to_net("top", 0.15, 0.15)
+    QApplication.processEvents()
+    window._refresh_net_table()
+
+    assert window.project.pads[0].name == "P1"
+    assert window.project.pads[0].net == "GND"
+    assert window._net_table.item(0, 0).text() == "P1"
+    assert window._net_table.item(0, 1).text() == "GND"
 
 
 def test_pad_mouse_rectangle_releases_placement_mode(
