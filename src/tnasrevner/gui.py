@@ -114,6 +114,7 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         self._display_scale = 1.0
         self._selection_start: QPoint | None = None
         self._selection = None
+        self._resize_edges: set[str] = set()
         self._canvas = QLabel()
         self._canvas.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._canvas.installEventFilter(self)
@@ -189,21 +190,38 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
             event.type() == QEvent.Type.MouseButtonPress
             and event.button() == Qt.MouseButton.LeftButton
         ):
-            self._selection_start = event.position().toPoint()
-            self._selection = None
-            self._rubber_band.hide()
-            self._buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(False)
+            position = event.position().toPoint()
+            self._resize_edges = self._hit_edges(position)
+            self._selection_start = position
+            if not self._resize_edges:
+                self._selection = None
+                self._rubber_band.hide()
+                self._buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(
+                    False
+                )
             return True
         if event.type() == QEvent.Type.MouseMove and self._selection_start is not None:
-            self._set_selection(self._selection_start, event.position().toPoint())
+            position = event.position().toPoint()
+            if self._resize_edges:
+                self._resize_selection(position)
+            else:
+                self._set_selection(self._selection_start, position)
             return True
         if (
             event.type() == QEvent.Type.MouseButtonRelease
             and self._selection_start is not None
         ):
-            self._set_selection(self._selection_start, event.position().toPoint())
+            position = event.position().toPoint()
+            if self._resize_edges:
+                self._resize_selection(position)
+            else:
+                self._set_selection(self._selection_start, position)
             self._selection_start = None
+            self._resize_edges = set()
             return True
+        if event.type() == QEvent.Type.MouseMove:
+            self._set_resize_cursor(event.position().toPoint())
+            return False
         return super().eventFilter(watched, event)
 
     def accept(self) -> None:
@@ -293,12 +311,65 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         bounds = self._canvas.rect()
         start = self._clamp_point(start, bounds)
         end = self._clamp_point(end, bounds)
-        self._selection = QRect(start, end).normalized()
+        self._update_selection(QRect(start, end).normalized())
+
+    def _update_selection(self, selection: QRect) -> None:
+        """Apply selection geometry and update validation state."""
+        self._selection = selection
         self._rubber_band.setGeometry(self._selection)
         self._rubber_band.show()
         self._buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(
             self._selection.width() >= 2 and self._selection.height() >= 2
         )
+
+    def _hit_edges(self, point: QPoint) -> set[str]:
+        """Return selection edges near point for individual edge dragging."""
+        if self._selection is None:
+            return set()
+        margin = 8
+        edges: set[str] = set()
+        if abs(point.x() - self._selection.left()) <= margin:
+            edges.add("left")
+        if abs(point.x() - self._selection.right()) <= margin:
+            edges.add("right")
+        if abs(point.y() - self._selection.top()) <= margin:
+            edges.add("top")
+        if abs(point.y() - self._selection.bottom()) <= margin:
+            edges.add("bottom")
+        expanded = self._selection.adjusted(-margin, -margin, margin, margin)
+        return edges if expanded.contains(point) else set()
+
+    def _resize_selection(self, point: QPoint) -> None:
+        """Move selected rectangle edges to point."""
+        if self._selection is None:
+            return
+        point = self._clamp_point(point, self._canvas.rect())
+        selection = QRect(self._selection)
+        if "left" in self._resize_edges:
+            selection.setLeft(min(point.x(), selection.right() - 2))
+        if "right" in self._resize_edges:
+            selection.setRight(max(point.x(), selection.left() + 2))
+        if "top" in self._resize_edges:
+            selection.setTop(min(point.y(), selection.bottom() - 2))
+        if "bottom" in self._resize_edges:
+            selection.setBottom(max(point.y(), selection.top() + 2))
+        self._update_selection(selection)
+
+    def _set_resize_cursor(self, point: QPoint) -> None:
+        """Show cursor matching resize edge under pointer."""
+        edges = self._hit_edges(point)
+        if edges in ({"left", "right"},):
+            cursor = Qt.CursorShape.SizeHorCursor
+        elif edges in ({"top", "bottom"},):
+            cursor = Qt.CursorShape.SizeVerCursor
+        elif edges in ({"left", "bottom"}, {"right", "top"}):
+            cursor = Qt.CursorShape.SizeBDiagCursor
+        elif edges in ({"left", "top"}, {"right", "bottom"}):
+            cursor = Qt.CursorShape.SizeFDiagCursor
+        else:
+            self._canvas.unsetCursor()
+            return
+        self._canvas.setCursor(QCursor(cursor))
 
     @staticmethod
     def _clamp_point(point: QPoint, bounds: QRect) -> QPoint:
@@ -778,12 +849,16 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         side = self._choose_image_side()
         if side is None:
             return
-        asset = next((image for image in self.project.images if image.side == side), None)
+        asset = next(
+            (image for image in self.project.images if image.side == side), None
+        )
         if asset is None:
             QMessageBox.information(self, "No image", f"No {side} image imported.")
             return
         self.store.remove_asset(asset.path)
-        self.project.images = [image for image in self.project.images if image.side != side]
+        self.project.images = [
+            image for image in self.project.images if image.side != side
+        ]
         self._dirty = True
         self._refresh_views()
         self._update_title()
@@ -835,10 +910,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
 
     def _refresh_overlay(self) -> None:
         """Compose top and mirrored bottom images into the Both view."""
-        images = {
-            side: self._pixmap_for_asset(side)
-            for side in ("top", "bottom")
-        }
+        images = {side: self._pixmap_for_asset(side) for side in ("top", "bottom")}
         top = images["top"]
         bottom = images["bottom"]
         base = top if not top.isNull() else bottom
@@ -871,7 +943,9 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         """Load one project image for overlay composition."""
         if not self.project or not self.store:
             return QPixmap()
-        asset = next((image for image in self.project.images if image.side == side), None)
+        asset = next(
+            (image for image in self.project.images if image.side == side), None
+        )
         if not asset:
             return QPixmap()
         try:

@@ -12,11 +12,17 @@ from types import SimpleNamespace
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
+from PySide6.QtCore import QPoint
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
 
 from tnasrevner.gui import ImageEditDialog, MainWindow
-from tnasrevner.project import ImageAsset, ProjectDocument, ProjectFormatError, ProjectStore
+from tnasrevner.project import (
+    ImageAsset,
+    ProjectDocument,
+    ProjectFormatError,
+    ProjectStore,
+)
 
 
 @pytest.fixture(scope="module")
@@ -152,6 +158,23 @@ def test_import_editor_supports_free_rotation_and_zoom(app: QApplication) -> Non
     assert dialog._angle == 30
     assert dialog._zoom == 2
     assert dialog._source.width() > dialog._source.height()
+    dialog.close()
+
+
+def test_import_editor_adjusts_rectangle_edge(app: QApplication) -> None:
+    """One selection edge can be moved without replacing other edges."""
+    image = QImage(200, 100, QImage.Format.Format_RGB32)
+    image.fill(0xFFFFFF)
+    dialog = ImageEditDialog(QPixmap.fromImage(image))
+    dialog._set_selection(QPoint(10, 10), QPoint(80, 60))
+    dialog._resize_edges = {"right"}
+
+    dialog._resize_selection(QPoint(120, 60))
+
+    assert dialog._selection.left() == 10
+    assert dialog._selection.right() == 120
+    assert dialog._selection.top() == 10
+    assert dialog._selection.bottom() == 60
     dialog.close()
 
 
