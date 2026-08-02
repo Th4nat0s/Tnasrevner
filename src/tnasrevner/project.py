@@ -49,6 +49,7 @@ class ImageAsset:
     original_name: str
     pixels_per_mm: float | None = None
     original_path: str | None = None
+    calibration_line: tuple[float, float, float, float] | None = None
 
     def __post_init__(self) -> None:
         if self.side not in _SIDES:
@@ -59,6 +60,13 @@ class ImageAsset:
             _relative_asset_path(self.original_path)
         if self.pixels_per_mm is not None and self.pixels_per_mm <= 0:
             raise ProjectFormatError("image pixels_per_mm must be positive")
+        if self.calibration_line is not None:
+            if len(self.calibration_line) != 4 or not all(
+                isinstance(value, (int, float)) for value in self.calibration_line
+            ):
+                raise ProjectFormatError(
+                    "image calibration_line must have four numbers"
+                )
 
     def to_dict(self) -> dict[str, Any]:
         """Return JSON-compatible image data."""
@@ -68,6 +76,7 @@ class ImageAsset:
             "original_name": self.original_name,
             "pixels_per_mm": self.pixels_per_mm,
             "original_path": self.original_path,
+            "calibration_line": self.calibration_line,
         }
 
     @classmethod
@@ -83,6 +92,11 @@ class ImageAsset:
             ),
             pixels_per_mm=data.get("pixels_per_mm"),
             original_path=data.get("original_path"),
+            calibration_line=(
+                tuple(data["calibration_line"])
+                if data.get("calibration_line") is not None
+                else None
+            ),
         )
 
 

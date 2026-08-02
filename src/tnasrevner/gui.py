@@ -129,6 +129,7 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         self._calibration_start: QPoint | None = None
         self._calibration_end: QPoint | None = None
         self._calibration_line: tuple[QPointF, QPointF] | None = None
+        self._result_calibration_line: tuple[float, float, float, float] | None = None
         self._edit_mode = "calibration"
         self._canvas = QLabel()
         self._canvas.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -206,15 +207,33 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         self._render()
         QTimer.singleShot(0, self._render)
 
-    def prepare_existing_image(self, pixels_per_mm: float) -> None:
+    def prepare_existing_image(
+        self,
+        pixels_per_mm: float,
+        calibration_line: tuple[float, float, float, float] | None = None,
+    ) -> None:
         """Start editing with the existing crop and scale still valid."""
         if pixels_per_mm <= 0:
             return
         width = max(2, self._canvas.width() - 2)
         height = max(2, self._canvas.height() - 2)
         self._set_selection(QPoint(1, 1), QPoint(width, height))
-        start = QPoint(1, max(1, height // 2))
-        end = QPoint(width, max(1, height // 2))
+        if calibration_line is None:
+            start = QPoint(1, max(1, height // 2))
+            end = QPoint(width, max(1, height // 2))
+        else:
+            start = QPoint(
+                round(calibration_line[0] * self._source.width() * self._display_scale),
+                round(
+                    calibration_line[1] * self._source.height() * self._display_scale
+                ),
+            )
+            end = QPoint(
+                round(calibration_line[2] * self._source.width() * self._display_scale),
+                round(
+                    calibration_line[3] * self._source.height() * self._display_scale
+                ),
+            )
         self._set_calibration_line(start, end)
         self._millimeters.setValue(QLineF(start, end).length() / pixels_per_mm)
         self._update_confirm_state()
@@ -320,6 +339,14 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
             return
         selection = self._selection
         source_rect = self._source_rect(selection)
+        if self._calibration_line is not None:
+            start, end = self._calibration_line
+            self._result_calibration_line = (
+                (start.x() - source_rect.x()) / source_rect.width(),
+                (start.y() - source_rect.y()) / source_rect.height(),
+                (end.x() - source_rect.x()) / source_rect.width(),
+                (end.y() - source_rect.y()) / source_rect.height(),
+            )
         self._source = self._source.copy(source_rect)
         super().accept()
 
@@ -332,6 +359,10 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         if self._calibration_line is None or self._millimeters.value() <= 0:
             return 0.0
         return QLineF(*self._calibration_line).length() / self._millimeters.value()
+
+    def calibration_line(self) -> tuple[float, float, float, float] | None:
+        """Return accepted scale-line coordinates normalized to output image."""
+        return self._result_calibration_line
 
     def _set_edit_mode(self, mode: str) -> None:
         """Switch between scale-line and crop-rectangle drawing."""
@@ -1009,6 +1040,12 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         self.project.display.mode = ("top", "bottom", "side_by_side", "both")[
             self._tabs.currentIndex()
         ]
+        display_view = self._active_views()[0]
+        (
+            self.project.display.zoom,
+            self.project.display.pan_x,
+            self.project.display.pan_y,
+        ) = display_view.view_state()
         try:
             self.store.save(self.project)
         except (OSError, ProjectFormatError) as error:
@@ -1081,7 +1118,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         edited = self._edit_imported_image(QPixmap(str(source_path)))
         if edited is None:
             return
-        edited_image, pixels_per_mm = edited
+        edited_image, pixels_per_mm, calibration_line = edited
         relative_path = f"assets/{side}.png"
         original_path = f"assets/original/{side}{source_path.suffix.lower()}"
         try:
@@ -1100,6 +1137,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
                 source_path.name,
                 pixels_per_mm,
                 original_path,
+                calibration_line,
             )
         )
         self._dirty = True
@@ -1157,10 +1195,12 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         if image.isNull():
             QMessageBox.warning(self, "Edit failed", "Working image is unreadable.")
             return
-        edited = self._edit_imported_image(image, asset.pixels_per_mm)
+        edited = self._edit_imported_image(
+            image, asset.pixels_per_mm, asset.calibration_line
+        )
         if edited is None:
             return
-        edited_image, pixels_per_mm = edited
+        edited_image, pixels_per_mm, calibration_line = edited
         self.store.write_asset(asset.path, self._pixmap_bytes(edited_image))
         self.project.images = [
             (
@@ -1170,6 +1210,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
                     image.original_name,
                     pixels_per_mm,
                     image.original_path,
+                    calibration_line,
                 )
                 if image.side == side
                 else image
@@ -1181,15 +1222,22 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         self._update_title()
 
     def _edit_imported_image(
-        self, image: QPixmap, pixels_per_mm: float | None = None
-    ) -> tuple[QPixmap, float] | None:
+        self,
+        image: QPixmap,
+        pixels_per_mm: float | None = None,
+        calibration_line: tuple[float, float, float, float] | None = None,
+    ) -> tuple[QPixmap, float, tuple[float, float, float, float] | None] | None:
         """Open editor and return image plus scale, or `None` on cancel."""
         dialog = ImageEditDialog(image, self)
         if pixels_per_mm is not None:
-            dialog.prepare_existing_image(pixels_per_mm)
+            dialog.prepare_existing_image(pixels_per_mm, calibration_line)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return None
-        return dialog.result_pixmap(), dialog.pixels_per_mm()
+        return (
+            dialog.result_pixmap(),
+            dialog.pixels_per_mm(),
+            dialog.calibration_line(),
+        )
 
     @staticmethod
     def _pixmap_bytes(image: QPixmap) -> bytes:
@@ -1222,13 +1270,27 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         self._refresh_overlay()
         for side, view in self._side_views.items():
             view.set_pixmap(self._pixmap_for_asset(side))
-        self._sync_board_views(self._views["top"])
         if self.project:
             self._tabs.setCurrentIndex(
                 {"top": 0, "bottom": 1, "side_by_side": 2, "both": 3}[
                     self.project.display.mode
                 ]
             )
+            state = (
+                self.project.display.zoom,
+                self.project.display.pan_x,
+                self.project.display.pan_y,
+            )
+            self._syncing_views = True
+            try:
+                for view in self._active_views():
+                    view.apply_view_state(state)
+            finally:
+                self._syncing_views = False
+            if self._tabs.currentIndex() != 3:
+                self._sync_board_views(self._active_views()[0])
+        else:
+            self._sync_board_views(self._views["top"])
 
     def _refresh_overlay(self) -> None:
         """Compose top and mirrored bottom images into the Both view."""

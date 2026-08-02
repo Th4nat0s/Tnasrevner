@@ -16,7 +16,7 @@ from PySide6.QtCore import QPoint
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import QApplication, QDialog, QDialogButtonBox, QMessageBox
 
-from tnasrevner.gui import ImageEditDialog, MainWindow
+from tnasrevner.gui import ImageEditDialog, ImageView, MainWindow
 from tnasrevner.project import (
     ImageAsset,
     ProjectDocument,
@@ -122,6 +122,44 @@ def test_open_invalid_archive_reports_error(
     assert errors and "cannot read project archive" in errors[0]
 
 
+def test_image_view_displays_and_supports_zoom_pan(app: QApplication) -> None:
+    """Image workspace view renders pixels and exposes zoom/pan state."""
+    view = ImageView("No image")
+    image = QImage(1200, 800, QImage.Format.Format_RGB32)
+    image.fill(0xFFFFFF)
+    view.set_pixmap(QPixmap.fromImage(image))
+    view.resize(320, 240)
+    view.show()
+    app.processEvents()
+
+    view.actual_size()
+    view.horizontalScrollBar().setValue(view.horizontalScrollBar().maximum())
+    view.verticalScrollBar().setValue(view.verticalScrollBar().maximum())
+    state = view.view_state()
+
+    assert not view._label.pixmap().isNull()
+    assert state[0] > 1.0
+    assert state[1] == 1.0
+    assert state[2] == 1.0
+    view.close()
+
+
+def test_save_persists_display_mode_zoom_and_pan(
+    window: MainWindow, tmp_path: Path
+) -> None:
+    """Workspace display state is written to the project metadata."""
+    window.store = ProjectStore(tmp_path / "board.revp")
+    window.project = ProjectDocument("Project", "Board")
+    window._tabs.setCurrentIndex(0)
+    window._views["top"]._scale = 2.5
+    window._views["top"]._render()
+
+    assert window.save_project()
+
+    assert window.project.display.mode == "top"
+    assert window.project.display.zoom == 2.5
+
+
 def test_import_image_stores_selected_side(
     window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -138,7 +176,11 @@ def test_import_image_stores_selected_side(
         lambda *_args: (str(source), ""),
     )
     monkeypatch.setattr(window, "_choose_image_side", lambda: "top")
-    monkeypatch.setattr(window, "_edit_imported_image", lambda image: (image, 10.0))
+    monkeypatch.setattr(
+        window,
+        "_edit_imported_image",
+        lambda image: (image, 10.0, (0.1, 0.2, 0.8, 0.2)),
+    )
 
     window.import_picture()
 
@@ -147,6 +189,7 @@ def test_import_image_stores_selected_side(
     original_path = window.project.images[0].original_path
     assert original_path == "assets/original/top.png"
     assert window.store.read_asset(original_path).startswith(b"\x89PNG")
+    assert window.project.images[0].calibration_line == (0.1, 0.2, 0.8, 0.2)
 
 
 def test_import_editor_supports_free_rotation_and_zoom(app: QApplication) -> None:

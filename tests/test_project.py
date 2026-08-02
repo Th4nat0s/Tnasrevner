@@ -57,6 +57,7 @@ def test_revp_archive_keeps_original_and_working_image(tmp_path: Path) -> None:
                 "photo.jpg",
                 10.0,
                 "assets/original/top.jpg",
+                (0.1, 0.2, 0.8, 0.2),
             )
         ],
     )
@@ -68,6 +69,7 @@ def test_revp_archive_keeps_original_and_working_image(tmp_path: Path) -> None:
     loaded = loaded_store.load()
 
     assert loaded.images[0].original_path == "assets/original/top.jpg"
+    assert loaded.images[0].calibration_line == (0.1, 0.2, 0.8, 0.2)
     assert loaded_store.read_asset("assets/original/top.jpg") == b"original"
 
 
