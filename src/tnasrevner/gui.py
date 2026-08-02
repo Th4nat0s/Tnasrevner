@@ -938,6 +938,11 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
                 lambda x, y, side=side: self._rename_pad(side, x, y)
             )
         for side, view in self._side_views.items():
+            view.pad_selected.connect(
+                lambda x, y, width, height, side=side: self._place_pad(
+                    side, x, y, width, height
+                )
+            )
             view.pad_clicked.connect(
                 lambda x, y, side=side: self._select_pad(side, x, y)
             )
@@ -1051,28 +1056,36 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
             view.center_image()
 
     def create_pad(self) -> None:
-        """Start rectangle placement with the next automatic pad name."""
+        """Start rectangle placement on the currently visible board view."""
         if not self.project:
             QMessageBox.information(
                 self, "No project", "Create or open a project first."
             )
             return
-        side = self._choose_image_side()
-        if side is None:
-            return
         name = self._next_pad_name()
-        view = self._views[side]
-        if not view.has_image():
-            QMessageBox.information(self, "No image", f"No {side} image imported.")
+        if self._tabs.currentIndex() == 0:
+            views = {"top": self._views["top"]}
+        elif self._tabs.currentIndex() == 1:
+            views = {"bottom": self._views["bottom"]}
+        elif self._tabs.currentIndex() == 2:
+            views = self._side_views
+        else:
+            QMessageBox.information(
+                self,
+                "Select a board view",
+                "Choose Top, Bottom, or Top + bottom before creating a pad.",
+            )
             return
-        for candidate in self._views.values():
+        if not any(view.has_image() for view in views.values()):
+            QMessageBox.information(self, "No image", "Import an image first.")
+            return
+        for candidate in (*self._views.values(), *self._side_views.values()):
             candidate.set_pad_placement(False)
-        self._tabs.setCurrentIndex(0 if side == "top" else 1)
-        self._pending_pad = Pad(name, side, 0.0, 0.0)
-        view.set_pad_placement(True)
-        self.statusBar().showMessage(
-            f"Draw a rectangle on the {side} image for pad {name}."
-        )
+        self._pending_pad = Pad(name, "top", 0.0, 0.0)
+        for view in views.values():
+            if view.has_image():
+                view.set_pad_placement(True)
+        self.statusBar().showMessage(f"Draw a rectangle for pad {name}.")
 
     def _next_pad_name(self) -> str:
         """Return the first unused automatic pad name."""
@@ -1087,9 +1100,9 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
     ) -> None:
         """Finish pad placement at normalized image coordinates."""
         pending = self._pending_pad
-        if not self.project or pending is None or pending.side != side:
+        if not self.project or pending is None:
             return
-        for view in self._views.values():
+        for view in (*self._views.values(), *self._side_views.values()):
             view.set_pad_placement(False)
         self.project.pads.append(
             Pad(pending.name, side, x, y, pending.pad_id, width, height)
@@ -1561,6 +1574,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
             for points in centers.values():
                 for start, end in zip(points, points[1:]):
                     painter.drawLine(start, end)
+        painter.setOpacity(0.45)
         painter.setPen(QPen(Qt.GlobalColor.yellow, max(2, radius // 3)))
         painter.setBrush(Qt.GlobalColor.red)
         for pad in pads:
@@ -1569,7 +1583,13 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
             right = max(left + 2, round((pad.x + pad.width) * (pixmap.width() - 1)))
             bottom = max(top + 2, round((pad.y + pad.height) * (pixmap.height() - 1)))
             painter.drawRect(QRect(left, top, right - left, bottom - top))
-            painter.drawText(QPoint(left + 3, max(12, top - 3)), pad.name)
+            painter.setOpacity(1.0)
+            painter.drawText(
+                QRect(left, top, right - left, bottom - top),
+                Qt.AlignmentFlag.AlignCenter,
+                pad.name,
+            )
+            painter.setOpacity(0.45)
         painter.end()
 
     def _update_title(self) -> None:
