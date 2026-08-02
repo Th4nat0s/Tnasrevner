@@ -717,7 +717,6 @@ class ImageView(QScrollArea):  # pylint: disable=too-many-instance-attributes
                     self._pad_start = point
                     self._pad_band.setGeometry(QRect(point, point))
                     self._pad_band.show()
-                    self._label.grabMouse()
                     return True
             self._click_position = point
             self._drag_position = event.globalPosition().toPoint()
@@ -751,7 +750,6 @@ class ImageView(QScrollArea):  # pylint: disable=too-many-instance-attributes
                 self._pad_start = None
                 self._pad_band.hide()
                 self._pad_placement = False
-                self._label.releaseMouse()
                 if selection.width() >= 2 and selection.height() >= 2:
                     x, y = self._normalized_point(selection.topLeft())
                     right, bottom = self._normalized_point(selection.bottomRight())
@@ -772,7 +770,6 @@ class ImageView(QScrollArea):  # pylint: disable=too-many-instance-attributes
         if not enabled:
             self._pad_start = None
             self._pad_band.hide()
-            self._label.releaseMouse()
             self._click_position = None
             self._drag_position = None
             self.unsetCursor()
@@ -914,6 +911,9 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         self._pending_pad: Pad | None = None
         self._selected_pad_name: str | None = None
         self._selected_pad_id: str | None = None
+        self._pads_visible = True
+        self._pad_refresh_pending = False
+        self._pending_pad_view_state: tuple[float, float, float] | None = None
         self._last_view_key: int | None = None
         self._last_view_time = 0.0
         self.setWindowTitle("Tnasrevner")
@@ -948,7 +948,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
                 )
             )
             view.pad_context_requested.connect(
-                lambda x, y, side=side: self._rename_pad(side, x, y)
+                lambda x, y, side=side: self._defer_pad_rename(side, x, y)
             )
         for side, view in self._side_views.items():
             view.pad_selected.connect(
@@ -960,7 +960,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
                 lambda x, y, side=side: self._select_pad(side, x, y)
             )
             view.pad_context_requested.connect(
-                lambda x, y, side=side: self._rename_pad(side, x, y)
+                lambda x, y, side=side: self._defer_pad_rename(side, x, y)
             )
         self.setCentralWidget(self._tabs)
         self._create_actions()
@@ -1005,6 +1005,12 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         pad_button.setToolTip("Create a pad on the Top or Bottom image")
         pad_button.clicked.connect(self.create_pad)
         layout.addWidget(pad_button)
+        show_pads_button = QPushButton("Show pads", panel)
+        show_pads_button.setCheckable(True)
+        show_pads_button.setChecked(True)
+        show_pads_button.setToolTip("Show or hide pad rectangles and connections")
+        show_pads_button.toggled.connect(self._set_pads_visible)
+        layout.addWidget(show_pads_button)
         save_button = QPushButton("Save", panel)
         save_button.setToolTip("Save project")
         save_button.clicked.connect(self.save_project)
@@ -1119,7 +1125,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         self._pending_pad = None
         self._dirty = True
         self.statusBar().clearMessage()
-        self._refresh_views()
+        self._schedule_pad_refresh(self._active_views()[0].view_state())
         self._update_title()
 
     def _pad_at(self, side: str, x: float, y: float) -> Pad | None:
@@ -1145,8 +1151,29 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         else:
             self._selected_pad_name = pad.name if pad else None
             self._selected_pad_id = pad.pad_id if pad else None
+        self._schedule_pad_refresh(view_state)
+
+    def _set_pads_visible(self, visible: bool) -> None:
+        """Show or hide pad overlays while preserving the current view."""
+        self._pads_visible = visible
+        self._schedule_pad_refresh(self._active_views()[0].view_state())
+
+    def _schedule_pad_refresh(self, state: tuple[float, float, float]) -> None:
+        """Refresh pad overlays after the current mouse event has completed."""
+        self._pending_pad_view_state = state
+        if self._pad_refresh_pending:
+            return
+        self._pad_refresh_pending = True
+        QTimer.singleShot(0, self._finish_pad_refresh)
+
+    def _finish_pad_refresh(self) -> None:
+        """Run one coalesced pad refresh outside mouse event handlers."""
+        state = self._pending_pad_view_state
+        self._pending_pad_view_state = None
+        self._pad_refresh_pending = False
         self._refresh_views()
-        self._apply_active_view_state(view_state)
+        if state is not None:
+            self._apply_active_view_state(state)
 
     def _apply_active_view_state(self, state: tuple[float, float, float]) -> None:
         """Restore zoom and pan after refreshing visible pad markers."""
@@ -1179,8 +1206,12 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         self._selected_pad_name = name
         self._selected_pad_id = pad.pad_id
         self._dirty = True
-        self._refresh_views()
+        self._schedule_pad_refresh(self._active_views()[0].view_state())
         self._update_title()
+
+    def _defer_pad_rename(self, side: str, x: float, y: float) -> None:
+        """Open the rename dialog after returning from the mouse event."""
+        QTimer.singleShot(0, lambda: self._rename_pad(side, x, y))
 
     def _create_actions(self) -> None:
         file_menu = self.menuBar().addMenu("File")
@@ -1582,7 +1613,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
 
     def _draw_pads(self, pixmap: QPixmap, side: str) -> None:
         """Draw persisted pad markers over one board-side image."""
-        if not self.project or not self.project.pads:
+        if not self._pads_visible or not self.project or not self.project.pads:
             return
         painter = QPainter(pixmap)
         radius = max(5, min(pixmap.width(), pixmap.height()) // 100)

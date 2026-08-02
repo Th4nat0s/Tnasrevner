@@ -235,6 +235,11 @@ def test_clicking_pad_toggles_links_without_resetting_zoom(
     assert window._selected_pad_id is None
     assert window._views["top"]._scale == 3.0
 
+    window._set_pads_visible(False)
+    QApplication.processEvents()
+    assert not window._pads_visible
+    assert window._views["top"]._scale == 3.0
+
 
 def test_pad_mouse_rectangle_releases_placement_mode(
     window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
