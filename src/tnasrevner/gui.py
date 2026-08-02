@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QDialog,
     QDialogButtonBox,
+    QDockWidget,
     QFileDialog,
     QFormLayout,
     QHBoxLayout,
@@ -25,7 +26,8 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QScrollArea,
     QTabWidget,
-    QToolBar,
+    QPushButton,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -258,21 +260,30 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
 
     def _create_tool_palette(self) -> None:
         """Create the right-side view control palette."""
-        palette = QToolBar("View tools", self)
-        palette.setOrientation(Qt.Orientation.Vertical)
-        palette.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
-        actual_action = palette.addAction("1:1")
-        actual_action.setToolTip("Actual image size")
-        actual_action.triggered.connect(self._actual_size)
-        fit_action = palette.addAction("FIT")
-        fit_action.setToolTip("Fit image in view")
-        fit_action.triggered.connect(self._fit_images)
-        center_action = palette.addAction("◎")
-        center_action.setToolTip("Center image")
-        center_action.triggered.connect(self._center_images)
-        palette.addSeparator()
-        palette.addAction(self._import_action)
-        self.addToolBar(Qt.ToolBarArea.RightToolBarArea, palette)
+        dock = QDockWidget("Tools", self)
+        panel = QWidget(dock)
+        layout = QVBoxLayout(panel)
+        actual_button = QPushButton("1:1", panel)
+        actual_button.setToolTip("Actual image size")
+        actual_button.clicked.connect(self._actual_size)
+        layout.addWidget(actual_button)
+        fit_button = QPushButton("FIT", panel)
+        fit_button.setToolTip("Fit image in view")
+        fit_button.clicked.connect(self._fit_images)
+        layout.addWidget(fit_button)
+        center_button = QPushButton("◎", panel)
+        center_button.setToolTip("Center image")
+        center_button.clicked.connect(self._center_images)
+        layout.addWidget(center_button)
+        layout.addSpacing(12)
+        import_button = QPushButton("Import image", panel)
+        import_button.setToolTip("Import image, then choose Top or Bottom")
+        import_button.clicked.connect(self.import_picture)
+        layout.addWidget(import_button)
+        layout.addStretch()
+        panel.setLayout(layout)
+        dock.setWidget(panel)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
 
     def _startup_choice(self) -> None:
         """Show startup choice and open the selected workflow."""
