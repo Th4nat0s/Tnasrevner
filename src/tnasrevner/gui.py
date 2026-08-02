@@ -383,11 +383,11 @@ class ImageView(QScrollArea):
             event.type() == QEvent.Type.MouseButtonPress
             and event.button() == Qt.MouseButton.LeftButton
         ):
-            self._drag_position = event.position().toPoint()
+            self._drag_position = event.globalPosition().toPoint()
             self.setCursor(QCursor(Qt.CursorShape.ClosedHandCursor))
             return True
         if event.type() == QEvent.Type.MouseMove and self._drag_position is not None:
-            current = event.position().toPoint()
+            current = event.globalPosition().toPoint()
             delta = current - self._drag_position
             self.horizontalScrollBar().setValue(
                 self.horizontalScrollBar().value() - delta.x()
