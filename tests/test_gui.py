@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
 from tnasrevner.gui import ImageEditDialog, ImageView, MainWindow
 from tnasrevner.project import (
     ImageAsset,
+    Pad,
     ProjectDocument,
     ProjectFormatError,
     ProjectStore,
@@ -203,6 +204,38 @@ def test_create_pad_from_tools_places_and_persists_marker(
     assert [pad.name for pad in window.project.pads] == ["P1", "P2"]
 
 
+def test_clicking_pad_toggles_links_without_resetting_zoom(
+    window: MainWindow, tmp_path: Path
+) -> None:
+    """Pad selection preserves zoom and a second click hides connections."""
+    window.store = ProjectStore(tmp_path / "board.revp")
+    window.project = ProjectDocument(
+        "Project",
+        "Board",
+        pads=[
+            Pad("GND", "top", 0.1, 0.1, "one", 0.1, 0.1),
+            Pad("GND", "top", 0.5, 0.5, "two", 0.1, 0.1),
+        ],
+    )
+    image = QImage(100, 100, QImage.Format.Format_RGB32)
+    image.fill(0xFFFFFF)
+    window.store.write_asset(
+        "assets/top.png", window._pixmap_bytes(QPixmap.fromImage(image))
+    )
+    window.project.images.append(ImageAsset("top", "assets/top.png", "top.png"))
+    window._refresh_views()
+    window._views["top"]._scale = 3.0
+    window._views["top"]._render()
+
+    window._select_pad("top", 0.15, 0.15)
+    assert window._selected_pad_id == "one"
+    assert window._views["top"]._scale == 3.0
+
+    window._select_pad("top", 0.15, 0.15)
+    assert window._selected_pad_id is None
+    assert window._views["top"]._scale == 3.0
+
+
 def test_pad_mouse_rectangle_releases_placement_mode(
     window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -230,6 +263,21 @@ def test_pad_mouse_rectangle_releases_placement_mode(
 
     assert len(window.project.pads) == 1
     assert not window._views["top"]._pad_placement
+
+    window.create_pad()
+    QTest.mousePress(
+        window._views["top"]._label,
+        Qt.MouseButton.LeftButton,
+        pos=QPoint(50, 50),
+    )
+    QTest.mouseMove(window._views["top"]._label, QPoint(80, 80))
+    QTest.mouseRelease(
+        window._views["top"]._label,
+        Qt.MouseButton.LeftButton,
+        pos=QPoint(80, 80),
+    )
+
+    assert [pad.name for pad in window.project.pads] == ["P1", "P2"]
 
 
 def test_import_image_stores_selected_side(

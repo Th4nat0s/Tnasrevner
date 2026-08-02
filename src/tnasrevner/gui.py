@@ -717,6 +717,7 @@ class ImageView(QScrollArea):  # pylint: disable=too-many-instance-attributes
                     self._pad_start = point
                     self._pad_band.setGeometry(QRect(point, point))
                     self._pad_band.show()
+                    self._label.grabMouse()
                     return True
             self._click_position = point
             self._drag_position = event.globalPosition().toPoint()
@@ -750,6 +751,7 @@ class ImageView(QScrollArea):  # pylint: disable=too-many-instance-attributes
                 self._pad_start = None
                 self._pad_band.hide()
                 self._pad_placement = False
+                self._label.releaseMouse()
                 if selection.width() >= 2 and selection.height() >= 2:
                     x, y = self._normalized_point(selection.topLeft())
                     right, bottom = self._normalized_point(selection.bottomRight())
@@ -770,6 +772,7 @@ class ImageView(QScrollArea):  # pylint: disable=too-many-instance-attributes
         if not enabled:
             self._pad_start = None
             self._pad_band.hide()
+            self._label.releaseMouse()
             self._click_position = None
             self._drag_position = None
             self.unsetCursor()
@@ -1133,11 +1136,28 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         return None
 
     def _select_pad(self, side: str, x: float, y: float) -> None:
-        """Select a pad name to show its same-name connections."""
+        """Toggle same-name connections without changing the current view."""
+        view_state = self._active_views()[0].view_state()
         pad = self._pad_at(side, x, y)
-        self._selected_pad_name = pad.name if pad else None
-        self._selected_pad_id = pad.pad_id if pad else None
+        if pad and pad.pad_id == self._selected_pad_id:
+            self._selected_pad_name = None
+            self._selected_pad_id = None
+        else:
+            self._selected_pad_name = pad.name if pad else None
+            self._selected_pad_id = pad.pad_id if pad else None
         self._refresh_views()
+        self._apply_active_view_state(view_state)
+
+    def _apply_active_view_state(self, state: tuple[float, float, float]) -> None:
+        """Restore zoom and pan after refreshing visible pad markers."""
+        self._syncing_views = True
+        try:
+            for view in self._active_views():
+                view.apply_view_state(state)
+        finally:
+            self._syncing_views = False
+        if self._tabs.currentIndex() != 3:
+            self._sync_board_views(self._active_views()[0])
 
     def _rename_pad(self, side: str, x: float, y: float) -> None:
         """Rename the pad under a right-click without restricting duplicates."""
@@ -1567,7 +1587,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         painter = QPainter(pixmap)
         radius = max(5, min(pixmap.width(), pixmap.height()) // 100)
         pads = [pad for pad in self.project.pads if pad.side == side]
-        if self._selected_pad_name and self._selected_pad_id:
+        if self._selected_pad_name:
             centers = {
                 pad.pad_id: QPoint(
                     round((pad.x + pad.width / 2) * (pixmap.width() - 1)),
@@ -1576,7 +1596,9 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
                 for pad in pads
                 if pad.name == self._selected_pad_name
             }
-            origin = centers.get(self._selected_pad_id)
+            origin = centers.get(self._selected_pad_id or "")
+            if origin is None and centers:
+                origin = next(iter(centers.values()))
             painter.setPen(QPen(Qt.GlobalColor.white, max(2, radius // 2)))
             if origin is not None:
                 for pad_id, target in centers.items():
