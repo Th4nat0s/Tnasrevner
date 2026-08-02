@@ -7,7 +7,6 @@ from __future__ import annotations
 # pylint: disable=no-name-in-module
 
 from pathlib import Path
-import shutil
 import sys
 
 from PySide6.QtCore import Qt
@@ -75,6 +74,13 @@ class ImageView(QScrollArea):
     def set_image(self, path: Path | None) -> None:
         """Display image at its native scale, or show an empty state."""
         self._pixmap = QPixmap(str(path)) if path else QPixmap()
+        self._scale = 1.0
+        self._render()
+
+    def set_image_data(self, content: bytes) -> None:
+        """Display image bytes loaded from a `.revp` archive."""
+        self._pixmap = QPixmap()
+        self._pixmap.loadFromData(content)
         self._scale = 1.0
         self._render()
 
@@ -155,14 +161,19 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         file_menu.addAction(quit_action)
 
     def new_project(self) -> None:
-        """Create an empty project in a selected directory."""
+        """Create an empty `.revp` project file."""
         dialog = ProjectDetailsDialog(self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        root = QFileDialog.getExistingDirectory(self, "Project directory")
-        if not root:
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Create project", "", "Tnasrevner project (*.revp)"
+        )
+        if not path:
             return
-        self.store = ProjectStore(Path(root))
+        project_path = Path(path)
+        if project_path.suffix.lower() != ".revp":
+            project_path = project_path.with_suffix(".revp")
+        self.store = ProjectStore(project_path)
         self.project = ProjectDocument(
             dialog.project_name.text(), dialog.board_name.text()
         )
@@ -171,12 +182,14 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         self._update_title()
 
     def open_project(self) -> None:
-        """Open a directory containing `project.json`."""
-        root = QFileDialog.getExistingDirectory(self, "Open project")
-        if not root:
+        """Open a `.revp` project file."""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open project", "", "Tnasrevner project (*.revp)"
+        )
+        if not path:
             return
         try:
-            store = ProjectStore(Path(root))
+            store = ProjectStore(Path(path))
             project = store.load()
         except ProjectFormatError as error:
             QMessageBox.critical(self, "Open failed", str(error))
@@ -220,17 +233,15 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
                 self, "Import failed", "Selected file is not a readable image."
             )
             return
-        assets = self.store.root / "assets"
-        assets.mkdir(parents=True, exist_ok=True)
-        destination = assets / f"{side}{source_path.suffix.lower()}"
-        shutil.copy2(source_path, destination)
+        relative_path = f"assets/{side}{source_path.suffix.lower()}"
+        self.store.write_asset(relative_path, source_path.read_bytes())
         self.project.images = [
             image for image in self.project.images if image.side != side
         ]
         self.project.images.append(
             ImageAsset(
                 side,
-                destination.relative_to(self.store.root).as_posix(),
+                relative_path,
                 source_path.name,
             )
         )
@@ -249,8 +260,11 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
                 ),
                 None,
             )
-            path = self.store.root / asset.path if asset and self.store else None
-            view.set_image(path if path and path.is_file() else None)
+            if asset and self.store and self.store.is_archive:
+                view.set_image_data(self.store.read_asset(asset.path))
+            else:
+                path = self.store.root / asset.path if asset and self.store else None
+                view.set_image(path if path and path.is_file() else None)
         if self.project:
             self._tabs.setCurrentIndex(
                 {"top": 0, "bottom": 1, "side_by_side": 2}[self.project.display.mode]

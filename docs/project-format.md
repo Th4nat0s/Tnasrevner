@@ -1,9 +1,8 @@
 # Project format
 
-Minimal projects are directories containing `project.json`. Imported pictures
-are stored later under the same directory, normally in `assets/`; metadata must
-store paths relative to the project root so a complete project directory can be
-moved or copied.
+Projects are single `.revp` ZIP files. Each archive contains `project.json` and
+imported pictures under `assets/`. Metadata stores paths relative to the archive
+root, making one `.revp` file sufficient to move or copy a project.
 
 `format_version` is required. Current version is `1`.
 
@@ -32,3 +31,6 @@ moved or copied.
 must be relative, use `/` separators, and cannot escape the project root.
 Unknown future fields are ignored when reading; unsupported format versions are
 rejected explicitly.
+
+The ZIP is written atomically through a temporary file. Source pictures are read
+and copied into the archive; original files are never modified.

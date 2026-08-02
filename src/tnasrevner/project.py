@@ -8,9 +8,11 @@ import json
 from pathlib import Path, PurePosixPath
 from typing import Any
 from uuid import uuid4
+from zipfile import ZIP_DEFLATED, BadZipFile, ZipFile
 
 CURRENT_FORMAT_VERSION = 1
 PROJECT_FILENAME = "project.json"
+PROJECT_ARCHIVE_SUFFIX = ".revp"
 _SIDES = frozenset({"top", "bottom"})
 _DISPLAY_MODES = frozenset({"top", "bottom", "side_by_side"})
 
@@ -186,20 +188,42 @@ class ProjectDocument:  # pylint: disable=too-many-instance-attributes
 
 
 class ProjectStore:
-    """Read and write one project directory without touching source images."""
+    """Read and write directory projects or single-file `.revp` archives."""
 
-    def __init__(self, root: Path) -> None:
-        self.root = Path(root)
+    def __init__(self, path: Path) -> None:
+        self.path = Path(path)
+        self._assets: dict[str, bytes] = {}
+
+    @property
+    def is_archive(self) -> bool:
+        """Whether this store uses the portable single-file format."""
+        return self.path.suffix.lower() == PROJECT_ARCHIVE_SUFFIX
+
+    @property
+    def root(self) -> Path:
+        """Return directory containing the project or archive."""
+        return self.path.parent if self.is_archive else self.path
 
     @property
     def project_file(self) -> Path:
         """Return project metadata file path."""
-        return self.root / PROJECT_FILENAME
+        return self.path if self.is_archive else self.root / PROJECT_FILENAME
 
     def save(self, project: ProjectDocument) -> None:
-        """Atomically write project metadata to its project directory."""
+        """Atomically write project metadata to a directory or `.revp` archive."""
         self.root.mkdir(parents=True, exist_ok=True)
         project.updated_at = _utc_now()
+        if self.is_archive:
+            temporary = self.project_file.with_suffix(".revp.tmp")
+            with ZipFile(temporary, "w", compression=ZIP_DEFLATED) as archive:
+                archive.writestr(
+                    PROJECT_FILENAME,
+                    json.dumps(project.to_dict(), indent=2, sort_keys=True) + "\n",
+                )
+                for path, content in sorted(self._assets.items()):
+                    archive.writestr(path, content)
+            temporary.replace(self.project_file)
+            return
         temporary = self.project_file.with_suffix(".json.tmp")
         temporary.write_text(
             json.dumps(project.to_dict(), indent=2, sort_keys=True) + "\n",
@@ -209,8 +233,51 @@ class ProjectStore:
 
     def load(self) -> ProjectDocument:
         """Load project metadata, converting file errors to format errors."""
+        if self.is_archive:
+            return self._load_archive()
         try:
             data = json.loads(self.project_file.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, json.JSONDecodeError) as error:
             raise ProjectFormatError(f"cannot read project: {error}") from error
+        return ProjectDocument.from_dict(data)
+
+    def write_asset(self, relative_path: str, content: bytes) -> None:
+        """Store asset bytes in the archive or project directory."""
+        relative_path = _relative_asset_path(relative_path)
+        if not relative_path.startswith("assets/"):
+            raise ProjectFormatError("project assets must be stored under assets/")
+        if self.is_archive:
+            self._assets[relative_path] = content
+            return
+        destination = self.root / relative_path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(content)
+
+    def read_asset(self, relative_path: str) -> bytes:
+        """Read asset bytes from the archive or project directory."""
+        relative_path = _relative_asset_path(relative_path)
+        try:
+            if self.is_archive:
+                return self._assets[relative_path]
+            return (self.root / relative_path).read_bytes()
+        except (KeyError, OSError) as error:
+            raise ProjectFormatError(f"cannot read asset: {relative_path}") from error
+
+    def _load_archive(self) -> ProjectDocument:
+        try:
+            with ZipFile(self.project_file) as archive:
+                data = json.loads(archive.read(PROJECT_FILENAME).decode("utf-8"))
+                self._assets = {
+                    name: archive.read(name)
+                    for name in archive.namelist()
+                    if name.startswith("assets/") and not name.endswith("/")
+                }
+        except (
+            BadZipFile,
+            KeyError,
+            OSError,
+            UnicodeError,
+            json.JSONDecodeError,
+        ) as error:
+            raise ProjectFormatError(f"cannot read project archive: {error}") from error
         return ProjectDocument.from_dict(data)

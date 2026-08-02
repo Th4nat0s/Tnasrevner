@@ -25,6 +25,23 @@ def test_empty_project_round_trip(tmp_path: Path) -> None:
     assert store.project_file.is_file()
 
 
+def test_revp_archive_round_trip_includes_image_bytes(tmp_path: Path) -> None:
+    archive = ProjectStore(tmp_path / "board.revp")
+    project = ProjectDocument(
+        "Project",
+        "Board",
+        images=[ImageAsset("top", "assets/top.png", "top.png")],
+    )
+    archive.write_asset("assets/top.png", b"picture-bytes")
+
+    archive.save(project)
+    loaded_store = ProjectStore(tmp_path / "board.revp")
+    loaded = loaded_store.load()
+
+    assert loaded.to_dict() == project.to_dict()
+    assert loaded_store.read_asset("assets/top.png") == b"picture-bytes"
+
+
 def test_project_with_both_images_and_display_round_trip(tmp_path: Path) -> None:
     project = ProjectDocument(
         "Project",

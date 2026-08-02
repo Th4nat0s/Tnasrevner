@@ -4,6 +4,7 @@ from .project import (
     CURRENT_FORMAT_VERSION,
     DisplaySettings,
     ImageAsset,
+    PROJECT_ARCHIVE_SUFFIX,
     ProjectDocument,
     ProjectFormatError,
     ProjectStore,
