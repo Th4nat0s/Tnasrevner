@@ -206,6 +206,19 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         self._render()
         QTimer.singleShot(0, self._render)
 
+    def prepare_existing_image(self, pixels_per_mm: float) -> None:
+        """Start editing with the existing crop and scale still valid."""
+        if pixels_per_mm <= 0:
+            return
+        width = max(2, self._canvas.width() - 2)
+        height = max(2, self._canvas.height() - 2)
+        self._set_selection(QPoint(1, 1), QPoint(width, height))
+        start = QPoint(1, max(1, height // 2))
+        end = QPoint(width, max(1, height // 2))
+        self._set_calibration_line(start, end)
+        self._millimeters.setValue(QLineF(start, end).length() / pixels_per_mm)
+        self._update_confirm_state()
+
     def eventFilter(
         self, watched, event
     ) -> bool:  # noqa: N802  # pylint: disable=too-many-return-statements
@@ -398,6 +411,7 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
 
     def _zoom_by(self, factor: float, anchor: QPoint | None = None) -> None:
         """Zoom around anchor point, preserving content under cursor."""
+        selection_ratio = self._selection_ratio()
         anchor = anchor or QPoint(
             self._scroll.viewport().width() // 2,
             self._scroll.viewport().height() // 2,
@@ -412,6 +426,7 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         old_vertical = self._scroll.verticalScrollBar().value()
         self._zoom = max(0.1, min(self._zoom * factor, 20.0))
         self._render()
+        self._restore_selection(selection_ratio)
         new_canvas_point = QPoint(
             round(source_point.x() * self._display_scale),
             round(source_point.y() * self._display_scale),
@@ -425,8 +440,10 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
 
     def _fit_view(self) -> None:
         """Reset editor preview zoom to fit."""
+        selection_ratio = self._selection_ratio()
         self._zoom = 1.0
         self._render()
+        self._restore_selection(selection_ratio)
 
     def _render(self) -> None:
         """Fit source image to editor viewport."""
@@ -466,6 +483,35 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         start = self._clamp_point(start, bounds)
         end = self._clamp_point(end, bounds)
         self._update_selection(QRect(start, end).normalized())
+
+    def _selection_ratio(self) -> tuple[float, float, float, float] | None:
+        """Return selection bounds as ratios of the source image."""
+        if self._selection is None:
+            return None
+        source = self._source_rect(self._selection)
+        width, height = self._source.width(), self._source.height()
+        return (
+            source.x() / width,
+            source.y() / height,
+            source.width() / width,
+            source.height() / height,
+        )
+
+    def _restore_selection(
+        self, selection_ratio: tuple[float, float, float, float] | None
+    ) -> None:
+        """Reproject selection bounds after the preview scale changes."""
+        if selection_ratio is None:
+            return
+        width, height = self._source.width(), self._source.height()
+        selection = QRect(
+            round(selection_ratio[0] * width * self._display_scale),
+            round(selection_ratio[1] * height * self._display_scale),
+            round(selection_ratio[2] * width * self._display_scale),
+            round(selection_ratio[3] * height * self._display_scale),
+        ).intersected(self._canvas.rect())
+        if selection.width() >= 2 and selection.height() >= 2:
+            self._update_selection(selection)
 
     def _update_selection(self, selection: QRect) -> None:
         """Apply selection geometry and update validation state."""
@@ -771,12 +817,11 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         self._overlay_view = ImageView("No top/bottom images")
         self._tabs.addTab(self._overlay_view, "Both")
         for view in (*self._views.values(), *self._side_views.values()):
-            view.view_changed.connect(
-                lambda view=view: self._sync_board_views(view)
-            )
+            view.view_changed.connect(lambda view=view: self._sync_board_views(view))
         self.setCentralWidget(self._tabs)
         self._create_actions()
         self._create_tool_palette()
+        self._create_view_menu()
         self._update_title()
         if show_startup:
             QTimer.singleShot(0, self._startup_choice)
@@ -784,6 +829,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
     def _create_tool_palette(self) -> None:
         """Create the right-side view control palette."""
         dock = QDockWidget("Tools", self)
+        dock.setObjectName("toolsDock")
         panel = QWidget(dock)
         layout = QVBoxLayout(panel)
         actual_button = QPushButton("1:1", panel)
@@ -807,6 +853,10 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         remove_button.setToolTip("Remove a Top or Bottom image")
         remove_button.clicked.connect(self.remove_picture)
         layout.addWidget(remove_button)
+        edit_button = QPushButton("Edit image", panel)
+        edit_button.setToolTip("Adjust crop or rotate an imported image")
+        edit_button.clicked.connect(self.edit_picture)
+        layout.addWidget(edit_button)
         save_button = QPushButton("Save", panel)
         save_button.setToolTip("Save project")
         save_button.clicked.connect(self.save_project)
@@ -814,7 +864,15 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         layout.addStretch()
         panel.setLayout(layout)
         dock.setWidget(panel)
+        self._tools_dock = dock
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
+
+    def _create_view_menu(self) -> None:
+        """Create menu actions for restoring optional panels."""
+        view_menu = self.menuBar().addMenu("View")
+        tools_action = self._tools_dock.toggleViewAction()
+        tools_action.setText("Tools")
+        view_menu.addAction(tools_action)
 
     def _startup_choice(self) -> None:
         """Show startup choice and open the selected workflow."""
@@ -1025,6 +1083,12 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
             return
         edited_image, pixels_per_mm = edited
         relative_path = f"assets/{side}.png"
+        original_path = f"assets/original/{side}{source_path.suffix.lower()}"
+        try:
+            self.store.write_asset(original_path, source_path.read_bytes())
+        except OSError as error:
+            QMessageBox.critical(self, "Import failed", str(error))
+            return
         self.store.write_asset(relative_path, self._pixmap_bytes(edited_image))
         self.project.images = [
             image for image in self.project.images if image.side != side
@@ -1035,6 +1099,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
                 relative_path,
                 source_path.name,
                 pixels_per_mm,
+                original_path,
             )
         )
         self._dirty = True
@@ -1058,6 +1123,8 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
             QMessageBox.information(self, "No image", f"No {side} image imported.")
             return
         self.store.remove_asset(asset.path)
+        if asset.original_path:
+            self.store.remove_asset(asset.original_path)
         self.project.images = [
             image for image in self.project.images if image.side != side
         ]
@@ -1065,9 +1132,61 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         self._refresh_views()
         self._update_title()
 
-    def _edit_imported_image(self, image: QPixmap) -> tuple[QPixmap, float] | None:
+    def edit_picture(self) -> None:
+        """Reopen the working image for crop and rotation adjustments."""
+        if not self.project or not self.store:
+            QMessageBox.information(
+                self, "No project", "Create or open a project first."
+            )
+            return
+        side = self._choose_image_side()
+        if side is None:
+            return
+        asset = next(
+            (image for image in self.project.images if image.side == side), None
+        )
+        if asset is None:
+            QMessageBox.information(self, "No image", f"No {side} image imported.")
+            return
+        image = QPixmap()
+        try:
+            image.loadFromData(self.store.read_asset(asset.path))
+        except ProjectFormatError as error:
+            QMessageBox.warning(self, "Edit failed", str(error))
+            return
+        if image.isNull():
+            QMessageBox.warning(self, "Edit failed", "Working image is unreadable.")
+            return
+        edited = self._edit_imported_image(image, asset.pixels_per_mm)
+        if edited is None:
+            return
+        edited_image, pixels_per_mm = edited
+        self.store.write_asset(asset.path, self._pixmap_bytes(edited_image))
+        self.project.images = [
+            (
+                ImageAsset(
+                    image.side,
+                    image.path,
+                    image.original_name,
+                    pixels_per_mm,
+                    image.original_path,
+                )
+                if image.side == side
+                else image
+            )
+            for image in self.project.images
+        ]
+        self._dirty = True
+        self._refresh_views()
+        self._update_title()
+
+    def _edit_imported_image(
+        self, image: QPixmap, pixels_per_mm: float | None = None
+    ) -> tuple[QPixmap, float] | None:
         """Open editor and return image plus scale, or `None` on cancel."""
         dialog = ImageEditDialog(image, self)
+        if pixels_per_mm is not None:
+            dialog.prepare_existing_image(pixels_per_mm)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return None
         return dialog.result_pixmap(), dialog.pixels_per_mm()
@@ -1174,6 +1293,8 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
 def main() -> int:
     """Run Tnasrevner GUI."""
     app = QApplication(sys.argv)
+    app.setApplicationName("Tnasrevner")
+    app.setApplicationDisplayName("Tnasrevner")
     window = MainWindow()
     window.show()
     return app.exec()

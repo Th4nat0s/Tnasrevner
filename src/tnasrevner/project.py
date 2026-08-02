@@ -42,18 +42,21 @@ def _relative_asset_path(value: Any) -> str:
 
 @dataclass(frozen=True)
 class ImageAsset:
-    """An imported external-side image referenced by a project-relative path."""
+    """An imported image with original and lightweight working versions."""
 
     side: str
     path: str
     original_name: str
     pixels_per_mm: float | None = None
+    original_path: str | None = None
 
     def __post_init__(self) -> None:
         if self.side not in _SIDES:
             raise ProjectFormatError("image side must be 'top' or 'bottom'")
         _relative_asset_path(self.path)
         _required_string(self.original_name, "image original_name")
+        if self.original_path is not None:
+            _relative_asset_path(self.original_path)
         if self.pixels_per_mm is not None and self.pixels_per_mm <= 0:
             raise ProjectFormatError("image pixels_per_mm must be positive")
 
@@ -64,6 +67,7 @@ class ImageAsset:
             "path": self.path,
             "original_name": self.original_name,
             "pixels_per_mm": self.pixels_per_mm,
+            "original_path": self.original_path,
         }
 
     @classmethod
@@ -78,6 +82,7 @@ class ImageAsset:
                 data.get("original_name"), "image original_name"
             ),
             pixels_per_mm=data.get("pixels_per_mm"),
+            original_path=data.get("original_path"),
         )
 
 
@@ -284,13 +289,14 @@ class ProjectStore:
     def _validate_assets(self, project: ProjectDocument) -> None:
         """Reject projects referencing missing or empty image assets."""
         for image in project.images:
-            try:
-                if not self.read_asset(image.path):
-                    raise ProjectFormatError(f"image asset is empty: {image.path}")
-            except ProjectFormatError as error:
-                raise ProjectFormatError(
-                    f"missing or unreadable image asset: {image.path}"
-                ) from error
+            for path in filter(None, (image.path, image.original_path)):
+                try:
+                    if not self.read_asset(path):
+                        raise ProjectFormatError(f"image asset is empty: {path}")
+                except ProjectFormatError as error:
+                    raise ProjectFormatError(
+                        f"missing or unreadable image asset: {path}"
+                    ) from error
 
     def _load_archive(self) -> ProjectDocument:
         try:

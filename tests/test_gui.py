@@ -144,6 +144,9 @@ def test_import_image_stores_selected_side(
 
     assert window.project.images[0].side == "top"
     assert window.store.read_asset("assets/top.png").startswith(b"\x89PNG")
+    original_path = window.project.images[0].original_path
+    assert original_path == "assets/original/top.png"
+    assert window.store.read_asset(original_path).startswith(b"\x89PNG")
 
 
 def test_import_editor_supports_free_rotation_and_zoom(app: QApplication) -> None:
@@ -160,6 +163,24 @@ def test_import_editor_supports_free_rotation_and_zoom(app: QApplication) -> Non
     assert dialog._zoom == 2
     assert dialog._selection is not None
     assert dialog._source.width() > dialog._source.height()
+    dialog.close()
+
+
+def test_import_editor_keeps_selection_with_zoom(app: QApplication) -> None:
+    """Zooming the editor keeps the crop on the same source pixels."""
+    image = QImage(200, 100, QImage.Format.Format_RGB32)
+    image.fill(0xFFFFFF)
+    dialog = ImageEditDialog(QPixmap.fromImage(image))
+    dialog._set_selection(QPoint(20, 10), QPoint(120, 70))
+    before = dialog._source_rect(dialog._selection)
+
+    dialog._zoom_by(2)
+
+    after = dialog._source_rect(dialog._selection)
+    assert abs(after.x() - before.x()) <= 1
+    assert abs(after.y() - before.y()) <= 1
+    assert abs(after.width() - before.width()) <= 1
+    assert abs(after.height() - before.height()) <= 1
     dialog.close()
 
 

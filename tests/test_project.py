@@ -45,6 +45,32 @@ def test_revp_archive_round_trip_includes_image_bytes(tmp_path: Path) -> None:
     assert loaded_store.read_asset("assets/top.png") == b"picture-bytes"
 
 
+def test_revp_archive_keeps_original_and_working_image(tmp_path: Path) -> None:
+    archive = ProjectStore(tmp_path / "board.revp")
+    project = ProjectDocument(
+        "Project",
+        "Board",
+        images=[
+            ImageAsset(
+                "top",
+                "assets/top.png",
+                "photo.jpg",
+                10.0,
+                "assets/original/top.jpg",
+            )
+        ],
+    )
+    archive.write_asset("assets/top.png", b"cropped")
+    archive.write_asset("assets/original/top.jpg", b"original")
+
+    archive.save(project)
+    loaded_store = ProjectStore(tmp_path / "board.revp")
+    loaded = loaded_store.load()
+
+    assert loaded.images[0].original_path == "assets/original/top.jpg"
+    assert loaded_store.read_asset("assets/original/top.jpg") == b"original"
+
+
 def test_missing_archive_asset_is_rejected(tmp_path: Path) -> None:
     store = ProjectStore(tmp_path / "board.revp")
     project = ProjectDocument(
