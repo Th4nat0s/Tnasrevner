@@ -10,7 +10,16 @@ from pathlib import Path
 import sys
 from time import monotonic
 
-from PySide6.QtCore import QBuffer, QEvent, QIODevice, QPoint, QRect, QTimer, Qt
+from PySide6.QtCore import (
+    QBuffer,
+    QEvent,
+    QIODevice,
+    QPoint,
+    QPointF,
+    QRect,
+    QTimer,
+    Qt,
+)
 from PySide6.QtGui import QAction, QCloseEvent, QCursor, QPixmap, QTransform
 from PySide6.QtWidgets import (
     QApplication,
@@ -162,7 +171,13 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         if watched is not self._canvas:
             return super().eventFilter(watched, event)
         if event.type() == QEvent.Type.Wheel:
-            self._zoom_by(1.2 if event.angleDelta().y() > 0 else 1 / 1.2)
+            anchor = self._canvas.mapTo(
+                self._scroll.viewport(), event.position().toPoint()
+            )
+            self._zoom_by(
+                1.2 if event.angleDelta().y() > 0 else 1 / 1.2,
+                anchor,
+            )
             return True
         if (
             event.type() == QEvent.Type.NativeGesture
@@ -227,10 +242,32 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         self._buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(False)
         self._render()
 
-    def _zoom_by(self, factor: float) -> None:
-        """Apply zoom factor to editor preview."""
+    def _zoom_by(self, factor: float, anchor: QPoint | None = None) -> None:
+        """Zoom around anchor point, preserving content under cursor."""
+        anchor = anchor or QPoint(
+            self._scroll.viewport().width() // 2,
+            self._scroll.viewport().height() // 2,
+        )
+        old_effective = self._display_scale
+        old_canvas_point = self._canvas.mapFrom(self._scroll.viewport(), anchor)
+        source_point = QPointF(
+            old_canvas_point.x() / old_effective,
+            old_canvas_point.y() / old_effective,
+        )
+        old_horizontal = self._scroll.horizontalScrollBar().value()
+        old_vertical = self._scroll.verticalScrollBar().value()
         self._zoom = max(0.1, min(self._zoom * factor, 20.0))
         self._render()
+        new_canvas_point = QPoint(
+            round(source_point.x() * self._display_scale),
+            round(source_point.y() * self._display_scale),
+        )
+        self._scroll.horizontalScrollBar().setValue(
+            old_horizontal + new_canvas_point.x() - old_canvas_point.x()
+        )
+        self._scroll.verticalScrollBar().setValue(
+            old_vertical + new_canvas_point.y() - old_canvas_point.y()
+        )
 
     def _fit_view(self) -> None:
         """Reset editor preview zoom to fit."""
@@ -318,7 +355,11 @@ class ImageView(QScrollArea):
             event.modifiers() & Qt.KeyboardModifier.ControlModifier
             and not self._pixmap.isNull()
         ):
-            self._zoom_by(1.2 if event.angleDelta().y() > 0 else 1 / 1.2)
+            anchor = self.viewport().mapFrom(self, event.position().toPoint())
+            self._zoom_by(
+                1.2 if event.angleDelta().y() > 0 else 1 / 1.2,
+                anchor,
+            )
             event.accept()
             return
         super().wheelEvent(event)
@@ -365,10 +406,34 @@ class ImageView(QScrollArea):
             return True
         return super().eventFilter(watched, event)
 
-    def _zoom_by(self, factor: float) -> None:
-        """Apply zoom factor and keep it in a usable range."""
+    def _zoom_by(self, factor: float, anchor: QPoint | None = None) -> None:
+        """Zoom around anchor point, preserving content under cursor."""
+        if self._pixmap.isNull():
+            return
+        anchor = anchor or QPoint(
+            self.viewport().width() // 2, self.viewport().height() // 2
+        )
+        old_effective = self._fit_scale() * self._scale
+        old_label_point = self._label.mapFrom(self.viewport(), anchor)
+        source_point = QPointF(
+            old_label_point.x() / old_effective,
+            old_label_point.y() / old_effective,
+        )
+        old_horizontal = self.horizontalScrollBar().value()
+        old_vertical = self.verticalScrollBar().value()
         self._scale = max(0.1, min(self._scale * factor, 20.0))
         self._render()
+        new_effective = self._fit_scale() * self._scale
+        new_label_point = QPoint(
+            round(source_point.x() * new_effective),
+            round(source_point.y() * new_effective),
+        )
+        self.horizontalScrollBar().setValue(
+            old_horizontal + new_label_point.x() - old_label_point.x()
+        )
+        self.verticalScrollBar().setValue(
+            old_vertical + new_label_point.y() - old_label_point.y()
+        )
 
     def _render(self) -> None:
         if self._pixmap.isNull():
