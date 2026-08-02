@@ -12,8 +12,9 @@ from types import SimpleNamespace
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtCore import QPoint
+from PySide6.QtCore import QPoint, Qt
 from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -200,6 +201,35 @@ def test_create_pad_from_tools_places_and_persists_marker(
     window._views["top"].pad_selected.emit(0.6, 0.2, 0.15, 0.15)
 
     assert [pad.name for pad in window.project.pads] == ["P1", "P2"]
+
+
+def test_pad_mouse_rectangle_releases_placement_mode(
+    window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real drag releases placement so the next pad can be started."""
+    window.store = ProjectStore(tmp_path / "board.revp")
+    window.project = ProjectDocument("Project", "Board")
+    image = QImage(100, 100, QImage.Format.Format_RGB32)
+    image.fill(0xFFFFFF)
+    window.store.write_asset(
+        "assets/top.png", window._pixmap_bytes(QPixmap.fromImage(image))
+    )
+    window.project.images.append(ImageAsset("top", "assets/top.png", "top.png"))
+    window._views["top"].set_pixmap(QPixmap.fromImage(image))
+    window._views["top"].show()
+    monkeypatch.setattr(window, "_choose_image_side", lambda: "top")
+
+    window.create_pad()
+    QTest.mousePress(
+        window._views["top"]._label, Qt.MouseButton.LeftButton, pos=QPoint(10, 10)
+    )
+    QTest.mouseMove(window._views["top"]._label, QPoint(40, 40))
+    QTest.mouseRelease(
+        window._views["top"]._label, Qt.MouseButton.LeftButton, pos=QPoint(40, 40)
+    )
+
+    assert len(window.project.pads) == 1
+    assert not window._views["top"]._pad_placement
 
 
 def test_import_image_stores_selected_side(

@@ -643,6 +643,9 @@ class ImageView(QScrollArea):  # pylint: disable=too-many-instance-attributes
         self._label.installEventFilter(self)
         self.viewport().installEventFilter(self)
         self._pad_band = QRubberBand(QRubberBand.Shape.Rectangle, self._label)
+        self._pad_band.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents, True
+        )
         self.setWidget(self._label)
         self.setWidgetResizable(False)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
