@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import sys
+from time import monotonic
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QCloseEvent, QPixmap
@@ -24,7 +25,6 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QScrollArea,
     QTabWidget,
-    QVBoxLayout,
     QWidget,
 )
 
@@ -130,6 +130,8 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         self.project: ProjectDocument | None = None
         self.store: ProjectStore | None = None
         self._dirty = False
+        self._last_view_key: int | None = None
+        self._last_view_time = 0.0
         self.setWindowTitle("Tnasrevner")
         self.resize(1100, 700)
         self._views = {
@@ -169,6 +171,21 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         quit_action = QAction("Quit", self)
         quit_action.triggered.connect(self.close)
         file_menu.addAction(quit_action)
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        """Switch board view with `T`, `B`, or a double press."""
+        key = event.key()
+        if key not in (Qt.Key.Key_T, Qt.Key.Key_B):
+            super().keyPressEvent(event)
+            return
+        now = monotonic()
+        is_double = key == self._last_view_key and now - self._last_view_time < 0.4
+        self._tabs.setCurrentIndex(
+            2 if is_double else (0 if key == Qt.Key.Key_T else 1)
+        )
+        self._last_view_key = None if is_double else key
+        self._last_view_time = now
+        event.accept()
 
     def new_project(self) -> None:
         """Create an empty `.revp` project file."""
