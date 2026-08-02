@@ -14,7 +14,13 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 from PySide6.QtCore import QPoint
 from PySide6.QtGui import QImage, QPixmap
-from PySide6.QtWidgets import QApplication, QDialog, QDialogButtonBox, QMessageBox
+from PySide6.QtWidgets import (
+    QApplication,
+    QDialog,
+    QDialogButtonBox,
+    QMessageBox,
+    QPushButton,
+)
 
 from tnasrevner.gui import ImageEditDialog, ImageView, MainWindow
 from tnasrevner.project import (
@@ -158,6 +164,34 @@ def test_save_persists_display_mode_zoom_and_pan(
 
     assert window.project.display.mode == "top"
     assert window.project.display.zoom == 2.5
+
+
+def test_create_pad_from_tools_places_and_persists_marker(
+    window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Tools pad action places a marker on the selected image."""
+    archive = tmp_path / "board.revp"
+    window.store = ProjectStore(archive)
+    window.project = ProjectDocument("Project", "Board")
+    image = QImage(100, 100, QImage.Format.Format_RGB32)
+    image.fill(0xFFFFFF)
+    window._views["top"].set_pixmap(QPixmap.fromImage(image))
+    monkeypatch.setattr(
+        "tnasrevner.gui.QInputDialog.getText", lambda *_args: ("P1", True)
+    )
+    monkeypatch.setattr(window, "_choose_image_side", lambda: "top")
+
+    window.create_pad()
+    window._views["top"].pad_clicked.emit(0.25, 0.75)
+
+    assert len(window.project.pads) == 1
+    assert window.project.pads[0].name == "P1"
+    assert window.project.pads[0].x == 0.25
+    assert window.project.pads[0].y == 0.75
+    assert any(
+        action.text() == "Create pad"
+        for action in window._tools_dock.widget().findChildren(QPushButton)
+    )
 
 
 def test_import_image_stores_selected_side(

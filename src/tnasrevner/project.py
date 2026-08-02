@@ -100,6 +100,50 @@ class ImageAsset:
         )
 
 
+@dataclass(frozen=True)
+class Pad:
+    """A named board pad positioned in normalized working-image coordinates."""
+
+    name: str
+    side: str
+    x: float
+    y: float
+    pad_id: str = field(default_factory=lambda: str(uuid4()))
+
+    def __post_init__(self) -> None:
+        _required_string(self.name, "pad name")
+        _required_string(self.pad_id, "pad id")
+        if self.side not in _SIDES:
+            raise ProjectFormatError("pad side must be 'top' or 'bottom'")
+        if not all(isinstance(value, (int, float)) for value in (self.x, self.y)):
+            raise ProjectFormatError("pad coordinates must be numbers")
+        if not 0.0 <= self.x <= 1.0 or not 0.0 <= self.y <= 1.0:
+            raise ProjectFormatError("pad coordinates must be between 0 and 1")
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return JSON-compatible pad data."""
+        return {
+            "pad_id": self.pad_id,
+            "name": self.name,
+            "side": self.side,
+            "x": self.x,
+            "y": self.y,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Any) -> "Pad":
+        """Build a pad from validated JSON-like data."""
+        if not isinstance(data, dict):
+            raise ProjectFormatError("pad must be an object")
+        return cls(
+            pad_id=_required_string(data.get("pad_id"), "pad id"),
+            name=_required_string(data.get("name"), "pad name"),
+            side=_required_string(data.get("side"), "pad side"),
+            x=data.get("x"),
+            y=data.get("y"),
+        )
+
+
 @dataclass
 class DisplaySettings:
     """Display state restored when a project is reopened."""
@@ -157,6 +201,7 @@ class ProjectDocument:  # pylint: disable=too-many-instance-attributes
     updated_at: str = field(default_factory=_utc_now)
     project_id: str = field(default_factory=lambda: str(uuid4()))
     images: list[ImageAsset] = field(default_factory=list)
+    pads: list[Pad] = field(default_factory=list)
     display: DisplaySettings = field(default_factory=DisplaySettings)
     format_version: int = CURRENT_FORMAT_VERSION
 
@@ -174,6 +219,12 @@ class ProjectDocument:  # pylint: disable=too-many-instance-attributes
             self.images
         ):
             raise ProjectFormatError("project may contain at most one image per side")
+        pad_ids = [pad.pad_id for pad in self.pads]
+        if len(set(pad_ids)) != len(pad_ids):
+            raise ProjectFormatError("pad ids must be unique")
+        pad_names = [(pad.side, pad.name) for pad in self.pads]
+        if len(set(pad_names)) != len(pad_names):
+            raise ProjectFormatError("pad names must be unique per side")
 
     def to_dict(self) -> dict[str, Any]:
         """Return complete JSON-compatible project data."""
@@ -185,6 +236,7 @@ class ProjectDocument:  # pylint: disable=too-many-instance-attributes
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "images": [image.to_dict() for image in self.images],
+            "pads": [pad.to_dict() for pad in self.pads],
             "display": self.display.to_dict(),
         }
 
@@ -199,6 +251,9 @@ class ProjectDocument:  # pylint: disable=too-many-instance-attributes
         images = data.get("images", [])
         if not isinstance(images, list):
             raise ProjectFormatError("images must be an array")
+        pads = data.get("pads", [])
+        if not isinstance(pads, list):
+            raise ProjectFormatError("pads must be an array")
         return cls(
             format_version=version,
             project_id=_required_string(data.get("project_id"), "project_id"),
@@ -207,6 +262,7 @@ class ProjectDocument:  # pylint: disable=too-many-instance-attributes
             created_at=_required_string(data.get("created_at"), "created_at"),
             updated_at=_required_string(data.get("updated_at"), "updated_at"),
             images=[ImageAsset.from_dict(image) for image in images],
+            pads=[Pad.from_dict(pad) for pad in pads],
             display=DisplaySettings.from_dict(data.get("display", {})),
         )
 

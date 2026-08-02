@@ -41,6 +41,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -53,7 +54,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .project import ImageAsset, ProjectDocument, ProjectFormatError, ProjectStore
+from .project import ImageAsset, Pad, ProjectDocument, ProjectFormatError, ProjectStore
 
 
 class ProjectDetailsDialog(QDialog):  # pylint: disable=too-few-public-methods
@@ -622,6 +623,7 @@ class ImageView(QScrollArea):
     """Scrollable image view with mouse-wheel zoom."""
 
     view_changed = Signal()
+    pad_clicked = Signal(float, float)
 
     def __init__(self, empty_text: str) -> None:
         super().__init__()
@@ -629,6 +631,7 @@ class ImageView(QScrollArea):
         self._pixmap = QPixmap()
         self._scale = 1.0
         self._drag_position: QPoint | None = None
+        self._pad_placement = False
         self._label = QLabel(empty_text)
         self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._label.setMinimumSize(240, 180)
@@ -693,6 +696,19 @@ class ImageView(QScrollArea):
             event.type() == QEvent.Type.MouseButtonPress
             and event.button() == Qt.MouseButton.LeftButton
         ):
+            if self._pad_placement and not self._pixmap.isNull():
+                point = event.position().toPoint()
+                if watched is self.viewport():
+                    point = self._label.mapFrom(self.viewport(), point)
+                if self._label.rect().contains(point):
+                    self.pad_clicked.emit(
+                        max(0.0, min(1.0, point.x() / max(1, self._label.width() - 1))),
+                        max(
+                            0.0, min(1.0, point.y() / max(1, self._label.height() - 1))
+                        ),
+                    )
+                    self._pad_placement = False
+                    return True
             self._drag_position = event.globalPosition().toPoint()
             self.setCursor(QCursor(Qt.CursorShape.ClosedHandCursor))
             return True
@@ -715,6 +731,14 @@ class ImageView(QScrollArea):
             self.unsetCursor()
             return True
         return super().eventFilter(watched, event)
+
+    def set_pad_placement(self, enabled: bool) -> None:
+        """Enable or disable click-to-place mode for a pad."""
+        self._pad_placement = enabled
+
+    def has_image(self) -> bool:
+        """Return whether this view currently contains a decoded image."""
+        return not self._pixmap.isNull()
 
     def _zoom_by(self, factor: float, anchor: QPoint | None = None) -> None:
         """Zoom around anchor point, preserving content under cursor."""
@@ -825,6 +849,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         self.store: ProjectStore | None = None
         self._dirty = False
         self._syncing_views = False
+        self._pending_pad: Pad | None = None
         self._last_view_key: int | None = None
         self._last_view_time = 0.0
         self.setWindowTitle("Tnasrevner")
@@ -849,6 +874,10 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         self._tabs.addTab(self._overlay_view, "Both")
         for view in (*self._views.values(), *self._side_views.values()):
             view.view_changed.connect(lambda view=view: self._sync_board_views(view))
+        for side, view in self._views.items():
+            view.pad_clicked.connect(
+                lambda x, y, side=side: self._place_pad(side, x, y)
+            )
         self.setCentralWidget(self._tabs)
         self._create_actions()
         self._create_tool_palette()
@@ -888,6 +917,10 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         edit_button.setToolTip("Adjust crop or rotate an imported image")
         edit_button.clicked.connect(self.edit_picture)
         layout.addWidget(edit_button)
+        pad_button = QPushButton("Create pad", panel)
+        pad_button.setToolTip("Create a pad on the Top or Bottom image")
+        pad_button.clicked.connect(self.create_pad)
+        layout.addWidget(pad_button)
         save_button = QPushButton("Save", panel)
         save_button.setToolTip("Save project")
         save_button.clicked.connect(self.save_project)
@@ -950,6 +983,48 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         """Center active image view(s)."""
         for view in self._active_views():
             view.center_image()
+
+    def create_pad(self) -> None:
+        """Ask for a pad name and start placement on a board side."""
+        if not self.project:
+            QMessageBox.information(
+                self, "No project", "Create or open a project first."
+            )
+            return
+        name, accepted = QInputDialog.getText(self, "Create pad", "Pad name:")
+        name = name.strip()
+        if not accepted or not name:
+            return
+        side = self._choose_image_side()
+        if side is None:
+            return
+        if any(pad.side == side and pad.name == name for pad in self.project.pads):
+            QMessageBox.warning(self, "Duplicate pad", f"Pad {name!r} already exists.")
+            return
+        view = self._views[side]
+        if not view.has_image():
+            QMessageBox.information(self, "No image", f"No {side} image imported.")
+            return
+        for candidate in self._views.values():
+            candidate.set_pad_placement(False)
+        self._tabs.setCurrentIndex(0 if side == "top" else 1)
+        self._pending_pad = Pad(name, side, 0.0, 0.0)
+        view.set_pad_placement(True)
+        self.statusBar().showMessage(f"Click on the {side} image to place pad {name}.")
+
+    def _place_pad(self, side: str, x: float, y: float) -> None:
+        """Finish pad placement at normalized image coordinates."""
+        pending = self._pending_pad
+        if not self.project or pending is None or pending.side != side:
+            return
+        for view in self._views.values():
+            view.set_pad_placement(False)
+        self.project.pads.append(Pad(pending.name, side, x, y, pending.pad_id))
+        self._pending_pad = None
+        self._dirty = True
+        self.statusBar().clearMessage()
+        self._refresh_views()
+        self._update_title()
 
     def _create_actions(self) -> None:
         file_menu = self.menuBar().addMenu("File")
@@ -1345,7 +1420,28 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
             QMessageBox.warning(
                 self, "Image unavailable", f"Cannot decode image asset: {asset.path}"
             )
+            return pixmap
+        self._draw_pads(pixmap, side)
         return pixmap
+
+    def _draw_pads(self, pixmap: QPixmap, side: str) -> None:
+        """Draw persisted pad markers over one board-side image."""
+        if not self.project or not self.project.pads:
+            return
+        painter = QPainter(pixmap)
+        radius = max(5, min(pixmap.width(), pixmap.height()) // 100)
+        painter.setPen(QPen(Qt.GlobalColor.yellow, max(2, radius // 3)))
+        painter.setBrush(Qt.GlobalColor.red)
+        for pad in self.project.pads:
+            if pad.side != side:
+                continue
+            center = QPoint(
+                round(pad.x * (pixmap.width() - 1)),
+                round(pad.y * (pixmap.height() - 1)),
+            )
+            painter.drawEllipse(center, radius, radius)
+            painter.drawText(center + QPoint(radius + 3, -radius - 3), pad.name)
+        painter.end()
 
     def _update_title(self) -> None:
         name = self.project.project_name if self.project else "No project"

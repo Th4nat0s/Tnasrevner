@@ -11,6 +11,7 @@ import pytest
 from tnasrevner.project import (
     DisplaySettings,
     ImageAsset,
+    Pad,
     ProjectDocument,
     ProjectFormatError,
     ProjectStore,
@@ -121,6 +122,26 @@ def test_duplicate_image_sides_are_rejected() -> None:
                 ImageAsset("top", "assets/one.png", "one.png"),
                 ImageAsset("top", "assets/two.png", "two.png"),
             ],
+        )
+
+
+def test_pad_round_trip_and_validation() -> None:
+    """Pads serialize with stable identity and reject invalid coordinates."""
+    pad = Pad("U1.1", "top", 0.25, 0.75, "pad-id")
+    restored = Pad.from_dict(pad.to_dict())
+
+    assert restored == pad
+    with pytest.raises(ProjectFormatError, match="between 0 and 1"):
+        Pad("bad", "top", 1.1, 0.5)
+
+
+def test_duplicate_pad_names_are_rejected() -> None:
+    """A side cannot contain two pads with the same name."""
+    with pytest.raises(ProjectFormatError, match="unique per side"):
+        ProjectDocument(
+            "Project",
+            "Board",
+            pads=[Pad("P1", "top", 0.1, 0.1), Pad("P1", "top", 0.2, 0.2)],
         )
 
 
