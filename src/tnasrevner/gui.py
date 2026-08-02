@@ -106,6 +106,7 @@ def _configure_logging() -> Path:
 
     sys.excepthook = exception_hook
     LOGGER.info("Tnasrevner logging started: %s", _LOG_PATH)
+    print(f"Tnasrevner log: {_LOG_PATH}", file=sys.stderr, flush=True)
     return _LOG_PATH
 
 
