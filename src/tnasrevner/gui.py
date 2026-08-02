@@ -10,8 +10,8 @@ from pathlib import Path
 import sys
 from time import monotonic
 
-from PySide6.QtCore import QEvent, Qt
-from PySide6.QtGui import QAction, QCloseEvent, QPixmap
+from PySide6.QtCore import QEvent, QPoint, Qt
+from PySide6.QtGui import QAction, QCloseEvent, QCursor, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -66,9 +66,12 @@ class ImageView(QScrollArea):
         self._empty_text = empty_text
         self._pixmap = QPixmap()
         self._scale = 1.0
+        self._drag_position: QPoint | None = None
         self._label = QLabel(empty_text)
         self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._label.setMinimumSize(240, 180)
+        self._label.installEventFilter(self)
+        self.viewport().installEventFilter(self)
         self.setWidget(self._label)
         self.setWidgetResizable(True)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -107,6 +110,37 @@ class ImageView(QScrollArea):
             self._zoom_by(max(0.01, 1.0 + event.value()))
             return True
         return super().event(event)
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802
+        """Pan image by dragging it with the primary mouse button."""
+        if watched not in (self._label, self.viewport()):
+            return super().eventFilter(watched, event)
+        if (
+            event.type() == QEvent.Type.MouseButtonPress
+            and event.button() == Qt.MouseButton.LeftButton
+        ):
+            self._drag_position = event.position().toPoint()
+            self.setCursor(QCursor(Qt.CursorShape.ClosedHandCursor))
+            return True
+        if event.type() == QEvent.Type.MouseMove and self._drag_position is not None:
+            current = event.position().toPoint()
+            delta = current - self._drag_position
+            self.horizontalScrollBar().setValue(
+                self.horizontalScrollBar().value() - delta.x()
+            )
+            self.verticalScrollBar().setValue(
+                self.verticalScrollBar().value() - delta.y()
+            )
+            self._drag_position = current
+            return True
+        if (
+            event.type() == QEvent.Type.MouseButtonRelease
+            and self._drag_position is not None
+        ):
+            self._drag_position = None
+            self.unsetCursor()
+            return True
+        return super().eventFilter(watched, event)
 
     def _zoom_by(self, factor: float) -> None:
         """Apply zoom factor and keep it in a usable range."""
