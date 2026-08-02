@@ -296,6 +296,33 @@ def test_pad_refresh_reuses_cached_working_image(
     assert reads == 1
 
 
+def test_shift_click_pad_menu_disconnects_and_deletes(window: MainWindow) -> None:
+    """Pad menu exposes net and deletion actions without a modal loop."""
+    window.project = ProjectDocument(
+        "Project",
+        "Board",
+        pads=[Pad("P1", "top", 0.1, 0.1, "one", 0.1, 0.1, "GND")],
+    )
+
+    window._show_pad_menu("top", 0.15, 0.15)
+    assert window._pad_menu is not None
+    actions = {action.text(): action for action in window._pad_menu.actions()}
+    assert set(actions) == {"Delete pad", "Connect to net", "Disconnect"}
+    assert actions["Disconnect"].isEnabled()
+    actions["Disconnect"].trigger()
+    assert window.project.pads[0].net is None
+    if window._pad_menu is not None:
+        window._pad_menu.close()
+
+    window._show_pad_menu("top", 0.15, 0.15)
+    assert window._pad_menu is not None
+    actions = {action.text(): action for action in window._pad_menu.actions()}
+    actions["Delete pad"].trigger()
+    assert not window.project.pads
+    if window._pad_menu is not None:
+        window._pad_menu.close()
+
+
 def test_pad_mouse_rectangle_releases_placement_mode(
     window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

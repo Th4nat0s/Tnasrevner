@@ -51,6 +51,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMainWindow,
     QMessageBox,
+    QMenu,
     QScrollArea,
     QTabWidget,
     QTableWidget,
@@ -679,6 +680,7 @@ class ImageView(QScrollArea):  # pylint: disable=too-many-instance-attributes
     pad_selected = Signal(float, float, float, float)
     pad_clicked = Signal(float, float)
     pad_context_requested = Signal(float, float)
+    pad_menu_requested = Signal(float, float)
 
     def __init__(self, empty_text: str) -> None:
         super().__init__()
@@ -764,6 +766,13 @@ class ImageView(QScrollArea):  # pylint: disable=too-many-instance-attributes
                 return super().eventFilter(watched, event)
             if event.button() != Qt.MouseButton.LeftButton:
                 return super().eventFilter(watched, event)
+            if (
+                event.modifiers() & Qt.KeyboardModifier.ShiftModifier
+                and not self._pixmap.isNull()
+                and self._label.rect().contains(point)
+            ):
+                self.pad_menu_requested.emit(*self._normalized_point(point))
+                return True
             if self._pad_placement and not self._pixmap.isNull():
                 if self._label.rect().contains(point):
                     self._pad_start = point
@@ -978,6 +987,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         self._pending_pad_view_state: tuple[float, float, float] | None = None
         self._image_cache: dict[str, QPixmap] = {}
         self._net_dialog: QInputDialog | None = None
+        self._pad_menu: QMenu | None = None
         self._last_view_key: int | None = None
         self._last_view_time = 0.0
         self.setWindowTitle("Tnasrevner")
@@ -1018,6 +1028,9 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
             view.pad_context_requested.connect(
                 lambda x, y, side=side: self._defer_pad_net_assignment(side, x, y)
             )
+            view.pad_menu_requested.connect(
+                lambda x, y, side=side: self._defer_pad_menu(side, x, y)
+            )
         for side, view in self._side_views.items():
             view.pad_selected.connect(
                 lambda x, y, width, height, side=side: self._place_pad(
@@ -1029,6 +1042,9 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
             )
             view.pad_context_requested.connect(
                 lambda x, y, side=side: self._defer_pad_net_assignment(side, x, y)
+            )
+            view.pad_menu_requested.connect(
+                lambda x, y, side=side: self._defer_pad_menu(side, x, y)
             )
         self.setCentralWidget(self._tabs)
         self._create_actions()
@@ -1350,6 +1366,55 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
     def _defer_pad_net_assignment(self, side: str, x: float, y: float) -> None:
         """Open net assignment after returning from the mouse event."""
         QTimer.singleShot(0, lambda: self._connect_pad_to_net(side, x, y))
+
+    def _defer_pad_menu(self, side: str, x: float, y: float) -> None:
+        """Open the pad action menu after returning from the mouse event."""
+        QTimer.singleShot(0, lambda: self._show_pad_menu(side, x, y))
+
+    def _show_pad_menu(self, side: str, x: float, y: float) -> None:
+        """Show non-blocking actions for the pad under Shift+click."""
+        pad = self._pad_at(side, x, y)
+        if pad is None:
+            return
+        if self._pad_menu is not None:
+            self._pad_menu.close()
+        menu = QMenu(self)
+        delete_action = menu.addAction("Delete pad")
+        connect_action = menu.addAction("Connect to net")
+        disconnect_action = menu.addAction("Disconnect")
+        disconnect_action.setEnabled(pad.net is not None)
+        delete_action.triggered.connect(lambda: self._delete_pad(pad.pad_id))
+        connect_action.triggered.connect(lambda: self._connect_pad_to_net(side, x, y))
+        disconnect_action.triggered.connect(
+            lambda: self._assign_pad_net(pad.pad_id, "")
+        )
+        menu.aboutToHide.connect(lambda menu=menu: self._pad_menu_closed(menu))
+        self._pad_menu = menu
+        LOGGER.info("Pad menu opened id=%s pad=%s", pad.pad_id, pad.name)
+        menu.popup(QCursor.pos())
+
+    def _pad_menu_closed(self, menu: QMenu) -> None:
+        """Release a closed asynchronous pad menu."""
+        if self._pad_menu is menu:
+            self._pad_menu = None
+
+    def _delete_pad(self, pad_id: str) -> None:
+        """Delete one pad selected from the Shift+click menu."""
+        if not self.project:
+            return
+        pad = next((item for item in self.project.pads if item.pad_id == pad_id), None)
+        if pad is None:
+            return
+        self.project.pads = [
+            item for item in self.project.pads if item.pad_id != pad_id
+        ]
+        if self._selected_pad_id == pad_id:
+            self._selected_pad_id = None
+            self._selected_net = None
+        self._dirty = True
+        LOGGER.info("Pad deleted id=%s pad=%s", pad.pad_id, pad.name)
+        self._schedule_pad_refresh(self._active_views()[0].view_state())
+        self._update_title()
 
     def _log_ui_heartbeat(self) -> None:
         """Record that the Qt event loop is still processing events."""
