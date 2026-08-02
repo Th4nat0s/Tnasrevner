@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QScrollArea,
     QTabWidget,
+    QToolBar,
     QWidget,
 )
 
@@ -118,10 +119,7 @@ class ImageView(QScrollArea):
             self._label.setText(self._empty_text)
             return
         self._label.setText("")
-        viewport = self.viewport().size()
-        width_ratio = viewport.width() / self._pixmap.width()
-        height_ratio = viewport.height() / self._pixmap.height()
-        fit_scale = min(1.0, width_ratio, height_ratio)
+        fit_scale = self._fit_scale()
         self._label.setPixmap(
             self._pixmap.scaled(
                 self._pixmap.size() * (fit_scale * self._scale),
@@ -134,6 +132,26 @@ class ImageView(QScrollArea):
         """Keep the image fitted after resizing its view."""
         self._render()
         super().resizeEvent(event)
+
+    def fit_image(self) -> None:
+        """Fit image inside current view."""
+        self._scale = 1.0
+        self._render()
+
+    def actual_size(self) -> None:
+        """Show image at 1:1 source-pixel scale."""
+        fit_scale = self._fit_scale()
+        self._scale = 1.0 / fit_scale if fit_scale else 1.0
+        self._render()
+
+    def _fit_scale(self) -> float:
+        """Calculate scale needed to fit image in viewport."""
+        if self._pixmap.isNull():
+            return 1.0
+        viewport = self.viewport().size()
+        width_ratio = viewport.width() / self._pixmap.width()
+        height_ratio = viewport.height() / self._pixmap.height()
+        return min(1.0, width_ratio, height_ratio)
 
 
 class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
@@ -165,8 +183,40 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         side_layout.addWidget(self._side_views["bottom"])
         self._tabs.addTab(side_by_side, "Top + bottom")
         self.setCentralWidget(self._tabs)
+        self._create_tool_palette()
         self._create_actions()
         self._update_title()
+
+    def _create_tool_palette(self) -> None:
+        """Create the right-side view control palette."""
+        palette = QToolBar("View tools", self)
+        palette.setOrientation(Qt.Orientation.Vertical)
+        palette.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        actual_action = palette.addAction("1:1")
+        actual_action.setToolTip("Actual image size")
+        actual_action.triggered.connect(self._actual_size)
+        fit_action = palette.addAction("FIT")
+        fit_action.setToolTip("Fit image in view")
+        fit_action.triggered.connect(self._fit_images)
+        self.addToolBar(Qt.ToolBarArea.RightToolBarArea, palette)
+
+    def _active_views(self) -> list[ImageView]:
+        """Return image views belonging to current tab."""
+        if self._tabs.currentIndex() == 0:
+            return [self._views["top"]]
+        if self._tabs.currentIndex() == 1:
+            return [self._views["bottom"]]
+        return list(self._side_views.values())
+
+    def _actual_size(self) -> None:
+        """Set active image view(s) to 1:1 scale."""
+        for view in self._active_views():
+            view.actual_size()
+
+    def _fit_images(self) -> None:
+        """Fit active image view(s) to their available space."""
+        for view in self._active_views():
+            view.fit_image()
 
     def _create_actions(self) -> None:
         file_menu = self.menuBar().addMenu("File")
