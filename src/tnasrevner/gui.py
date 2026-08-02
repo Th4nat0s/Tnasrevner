@@ -10,8 +10,8 @@ from pathlib import Path
 import sys
 from time import monotonic
 
-from PySide6.QtCore import QEvent, QPoint, QTimer, Qt
-from PySide6.QtGui import QAction, QCloseEvent, QCursor, QPixmap
+from PySide6.QtCore import QBuffer, QEvent, QIODevice, QPoint, QRect, QTimer, Qt
+from PySide6.QtGui import QAction, QCloseEvent, QCursor, QPixmap, QTransform
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QTabWidget,
     QPushButton,
+    QRubberBand,
     QVBoxLayout,
     QWidget,
 )
@@ -83,6 +84,142 @@ class StartupDialog(QMessageBox):  # pylint: disable=too-few-public-methods
         if self.clickedButton() is self.new_button:
             return "new"
         return None
+
+
+class ImageEditDialog(QDialog):  # pylint: disable=too-many-instance-attributes
+    """Rotate and crop an image before it enters a project archive."""
+
+    def __init__(self, image: QPixmap, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Edit imported image")
+        self.resize(1000, 700)
+        self._source = image
+        self._display_scale = 1.0
+        self._selection_start: QPoint | None = None
+        self._selection = None
+        self._canvas = QLabel()
+        self._canvas.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._canvas.installEventFilter(self)
+        self._rubber_band = QRubberBand(QRubberBand.Shape.Rectangle, self._canvas)
+        self._scroll = QScrollArea()
+        self._scroll.setWidget(self._canvas)
+        self._scroll.setWidgetResizable(False)
+        rotate_left = QPushButton("Rotate left")
+        rotate_left.clicked.connect(lambda: self._rotate(-90))
+        rotate_right = QPushButton("Rotate right")
+        rotate_right.clicked.connect(lambda: self._rotate(90))
+        self._buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        self._buttons.accepted.connect(self.accept)
+        self._buttons.rejected.connect(self.reject)
+        self._buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(False)
+        controls = QHBoxLayout()
+        controls.addWidget(rotate_left)
+        controls.addWidget(rotate_right)
+        controls.addStretch()
+        controls.addWidget(self._buttons)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Drag a rectangle over the board area to import."))
+        layout.addWidget(self._scroll)
+        layout.addLayout(controls)
+        self._render()
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802
+        """Track rectangle selection on the image canvas."""
+        if watched is not self._canvas:
+            return super().eventFilter(watched, event)
+        if (
+            event.type() == QEvent.Type.MouseButtonPress
+            and event.button() == Qt.MouseButton.LeftButton
+        ):
+            self._selection_start = event.position().toPoint()
+            self._selection = None
+            self._rubber_band.hide()
+            self._buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(False)
+            return True
+        if event.type() == QEvent.Type.MouseMove and self._selection_start is not None:
+            self._set_selection(self._selection_start, event.position().toPoint())
+            return True
+        if (
+            event.type() == QEvent.Type.MouseButtonRelease
+            and self._selection_start is not None
+        ):
+            self._set_selection(self._selection_start, event.position().toPoint())
+            self._selection_start = None
+            return True
+        return super().eventFilter(watched, event)
+
+    def accept(self) -> None:
+        """Crop selected area and close editor."""
+        if (
+            self._selection is None
+            or self._selection.width() < 2
+            or self._selection.height() < 2
+        ):
+            QMessageBox.warning(self, "Select area", "Select a rectangle first.")
+            return
+        selection = self._selection
+        source_rect = self._source_rect(selection)
+        self._source = self._source.copy(source_rect)
+        super().accept()
+
+    def result_pixmap(self) -> QPixmap:
+        """Return edited image after accepted dialog."""
+        return self._source
+
+    def _rotate(self, angle: int) -> None:
+        """Rotate source image and clear old selection."""
+        self._source = self._source.transformed(
+            QTransform().rotate(angle), Qt.TransformationMode.SmoothTransformation
+        )
+        self._selection = None
+        self._rubber_band.hide()
+        self._buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(False)
+        self._render()
+
+    def _render(self) -> None:
+        """Fit source image to editor viewport."""
+        viewport = self._scroll.viewport().size()
+        width_ratio = viewport.width() / self._source.width()
+        height_ratio = viewport.height() / self._source.height()
+        self._display_scale = min(1.0, width_ratio, height_ratio)
+        displayed = self._source.scaled(
+            self._source.size() * self._display_scale,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self._canvas.setPixmap(displayed)
+        self._canvas.resize(displayed.size())
+
+    def _set_selection(self, start: QPoint, end: QPoint) -> None:
+        """Update selection rectangle constrained to displayed image."""
+        bounds = self._canvas.rect()
+        start = self._clamp_point(start, bounds)
+        end = self._clamp_point(end, bounds)
+        self._selection = QRect(start, end).normalized()
+        self._rubber_band.setGeometry(self._selection)
+        self._rubber_band.show()
+        self._buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(
+            self._selection.width() >= 2 and self._selection.height() >= 2
+        )
+
+    @staticmethod
+    def _clamp_point(point: QPoint, bounds: QRect) -> QPoint:
+        """Constrain point to image canvas bounds."""
+        return QPoint(
+            max(bounds.left(), min(point.x(), bounds.right())),
+            max(bounds.top(), min(point.y(), bounds.bottom())),
+        )
+
+    def _source_rect(self, selection: QRect) -> QRect:
+        """Convert displayed selection to source-pixel coordinates."""
+        return QRect(
+            int(selection.x() / self._display_scale),
+            int(selection.y() / self._display_scale),
+            int(selection.width() / self._display_scale),
+            int(selection.height() / self._display_scale),
+        )
 
 
 class ImageView(QScrollArea):
@@ -474,8 +611,11 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         side = self._choose_image_side()
         if side is None:
             return
-        relative_path = f"assets/{side}{source_path.suffix.lower()}"
-        self.store.write_asset(relative_path, source_path.read_bytes())
+        edited_image = self._edit_imported_image(QPixmap(str(source_path)))
+        if edited_image is None:
+            return
+        relative_path = f"assets/{side}.png"
+        self.store.write_asset(relative_path, self._pixmap_bytes(edited_image))
         self.project.images = [
             image for image in self.project.images if image.side != side
         ]
@@ -489,6 +629,22 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         self._dirty = True
         self._refresh_views()
         self._update_title()
+
+    def _edit_imported_image(self, image: QPixmap) -> QPixmap | None:
+        """Open image editor and return edited image, or `None` on cancel."""
+        dialog = ImageEditDialog(image, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        return dialog.result_pixmap()
+
+    @staticmethod
+    def _pixmap_bytes(image: QPixmap) -> bytes:
+        """Encode edited image as PNG bytes for archive storage."""
+        buffer = QBuffer()
+        buffer.open(QIODevice.OpenModeFlag.ReadWrite)
+        if not image.save(buffer, "PNG"):
+            raise ProjectFormatError("cannot encode imported image")
+        return bytes(buffer.data())
 
     def _choose_image_side(self) -> str | None:
         """Ask which external board side the selected image represents."""

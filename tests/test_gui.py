@@ -132,8 +132,9 @@ def test_import_image_stores_selected_side(
         lambda *_args: (str(source), ""),
     )
     monkeypatch.setattr(window, "_choose_image_side", lambda: "top")
+    monkeypatch.setattr(window, "_edit_imported_image", lambda image: image)
 
     window.import_picture()
 
     assert window.project.images[0].side == "top"
-    assert window.store.read_asset("assets/top.png") == source.read_bytes()
+    assert window.store.read_asset("assets/top.png").startswith(b"\x89PNG")
