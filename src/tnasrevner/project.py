@@ -68,7 +68,9 @@ class ImageAsset:
         return cls(
             side=_required_string(data.get("side"), "image side"),
             path=_relative_asset_path(data.get("path")),
-            original_name=_required_string(data.get("original_name"), "image original_name"),
+            original_name=_required_string(
+                data.get("original_name"), "image original_name"
+            ),
         )
 
 
@@ -85,7 +87,10 @@ class DisplaySettings:
     def __post_init__(self) -> None:
         if self.mode not in _DISPLAY_MODES:
             raise ProjectFormatError("display mode is invalid")
-        if not all(isinstance(value, (int, float)) for value in (self.zoom, self.pan_x, self.pan_y)):
+        if not all(
+            isinstance(value, (int, float))
+            for value in (self.zoom, self.pan_x, self.pan_y)
+        ):
             raise ProjectFormatError("display coordinates and zoom must be numbers")
         if self.zoom <= 0:
             raise ProjectFormatError("display zoom must be positive")
@@ -117,7 +122,7 @@ class DisplaySettings:
 
 
 @dataclass
-class ProjectDocument:
+class ProjectDocument:  # pylint: disable=too-many-instance-attributes
     """Minimal persisted project state."""
 
     project_name: str
