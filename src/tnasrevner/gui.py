@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QFileDialog,
     QFormLayout,
+    QHBoxLayout,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -139,7 +140,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         self._tabs.addTab(self._views["top"], "Top")
         self._tabs.addTab(self._views["bottom"], "Bottom")
         side_by_side = QWidget()
-        side_layout = QVBoxLayout(side_by_side)
+        side_layout = QHBoxLayout(side_by_side)
         self._side_views = {
             "top": ImageView("No top picture"),
             "bottom": ImageView("No bottom picture"),
