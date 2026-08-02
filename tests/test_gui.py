@@ -12,10 +12,10 @@ from types import SimpleNamespace
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtGui import QImage
+from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
 
-from tnasrevner.gui import MainWindow
+from tnasrevner.gui import ImageEditDialog, MainWindow
 from tnasrevner.project import ProjectDocument, ProjectStore
 
 
@@ -138,3 +138,18 @@ def test_import_image_stores_selected_side(
 
     assert window.project.images[0].side == "top"
     assert window.store.read_asset("assets/top.png").startswith(b"\x89PNG")
+
+
+def test_import_editor_supports_free_rotation_and_zoom(app: QApplication) -> None:
+    """Import editor applies arbitrary angle and preview zoom."""
+    image = QImage(200, 100, QImage.Format.Format_RGB32)
+    image.fill(0xFFFFFF)
+    dialog = ImageEditDialog(QPixmap.fromImage(image))
+
+    dialog._rotate(30)
+    dialog._zoom_by(2)
+
+    assert dialog._angle == 30
+    assert dialog._zoom == 2
+    assert dialog._source.width() > dialog._source.height()
+    dialog.close()

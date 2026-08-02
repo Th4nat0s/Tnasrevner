@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QDockWidget,
+    QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
     QHBoxLayout,
@@ -86,14 +87,21 @@ class StartupDialog(QMessageBox):  # pylint: disable=too-few-public-methods
         return None
 
 
-class ImageEditDialog(QDialog):  # pylint: disable=too-many-instance-attributes
+class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-statements,too-many-return-statements
+    QDialog
+):
     """Rotate and crop an image before it enters a project archive."""
 
-    def __init__(self, image: QPixmap, parent: QWidget | None = None) -> None:
+    def __init__(
+        self, image: QPixmap, parent: QWidget | None = None
+    ) -> None:  # pylint: disable=too-many-statements
         super().__init__(parent)
         self.setWindowTitle("Edit imported image")
         self.resize(1000, 700)
+        self._base_image = image
         self._source = image
+        self._angle = 0.0
+        self._zoom = 1.0
         self._display_scale = 1.0
         self._selection_start: QPoint | None = None
         self._selection = None
@@ -108,6 +116,22 @@ class ImageEditDialog(QDialog):  # pylint: disable=too-many-instance-attributes
         rotate_left.clicked.connect(lambda: self._rotate(-90))
         rotate_right = QPushButton("Rotate right")
         rotate_right.clicked.connect(lambda: self._rotate(90))
+        angle_spin = QDoubleSpinBox()
+        angle_spin.setRange(-180.0, 180.0)
+        angle_spin.setSingleStep(1.0)
+        angle_spin.setSuffix("°")
+        angle_spin.setToolTip("Free rotation angle")
+        angle_spin.valueChanged.connect(self._set_angle)
+        self._angle_spin = angle_spin
+        zoom_out = QPushButton("−")
+        zoom_out.setToolTip("Zoom out")
+        zoom_out.clicked.connect(lambda: self._zoom_by(1 / 1.2))
+        zoom_in = QPushButton("+")
+        zoom_in.setToolTip("Zoom in")
+        zoom_in.clicked.connect(lambda: self._zoom_by(1.2))
+        fit_button = QPushButton("FIT")
+        fit_button.setToolTip("Fit image in editor")
+        fit_button.clicked.connect(self._fit_view)
         self._buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
@@ -117,18 +141,35 @@ class ImageEditDialog(QDialog):  # pylint: disable=too-many-instance-attributes
         controls = QHBoxLayout()
         controls.addWidget(rotate_left)
         controls.addWidget(rotate_right)
+        controls.addWidget(QLabel("Angle"))
+        controls.addWidget(angle_spin)
+        controls.addWidget(zoom_out)
+        controls.addWidget(zoom_in)
+        controls.addWidget(fit_button)
         controls.addStretch()
         controls.addWidget(self._buttons)
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel("Drag a rectangle over the board area to import."))
         layout.addWidget(self._scroll)
         layout.addLayout(controls)
+        self.showMaximized()
         self._render()
 
-    def eventFilter(self, watched, event) -> bool:  # noqa: N802
+    def eventFilter(
+        self, watched, event
+    ) -> bool:  # noqa: N802  # pylint: disable=too-many-return-statements
         """Track rectangle selection on the image canvas."""
         if watched is not self._canvas:
             return super().eventFilter(watched, event)
+        if event.type() == QEvent.Type.Wheel:
+            self._zoom_by(1.2 if event.angleDelta().y() > 0 else 1 / 1.2)
+            return True
+        if (
+            event.type() == QEvent.Type.NativeGesture
+            and event.gestureType() == Qt.NativeGestureType.ZoomNativeGesture
+        ):
+            self._zoom_by(max(0.01, 1.0 + event.value()))
+            return True
         if (
             event.type() == QEvent.Type.MouseButtonPress
             and event.button() == Qt.MouseButton.LeftButton
@@ -170,7 +211,15 @@ class ImageEditDialog(QDialog):  # pylint: disable=too-many-instance-attributes
 
     def _rotate(self, angle: int) -> None:
         """Rotate source image and clear old selection."""
-        self._source = self._source.transformed(
+        self._set_angle(self._angle + angle)
+
+    def _set_angle(self, angle: float) -> None:
+        """Apply free rotation relative to original imported image."""
+        self._angle = angle
+        self._angle_spin.blockSignals(True)
+        self._angle_spin.setValue(angle)
+        self._angle_spin.blockSignals(False)
+        self._source = self._base_image.transformed(
             QTransform().rotate(angle), Qt.TransformationMode.SmoothTransformation
         )
         self._selection = None
@@ -178,12 +227,22 @@ class ImageEditDialog(QDialog):  # pylint: disable=too-many-instance-attributes
         self._buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(False)
         self._render()
 
+    def _zoom_by(self, factor: float) -> None:
+        """Apply zoom factor to editor preview."""
+        self._zoom = max(0.1, min(self._zoom * factor, 20.0))
+        self._render()
+
+    def _fit_view(self) -> None:
+        """Reset editor preview zoom to fit."""
+        self._zoom = 1.0
+        self._render()
+
     def _render(self) -> None:
         """Fit source image to editor viewport."""
         viewport = self._scroll.viewport().size()
         width_ratio = viewport.width() / self._source.width()
         height_ratio = viewport.height() / self._source.height()
-        self._display_scale = min(1.0, width_ratio, height_ratio)
+        self._display_scale = min(1.0, width_ratio, height_ratio) * self._zoom
         displayed = self._source.scaled(
             self._source.size() * self._display_scale,
             Qt.AspectRatioMode.KeepAspectRatio,
