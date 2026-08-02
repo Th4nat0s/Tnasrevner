@@ -231,7 +231,12 @@ def test_clicking_pad_toggles_links_without_resetting_zoom(
     assert window._selected_pad_id == "one"
     assert window._views["top"]._scale == 3.0
 
-    window._select_pad("top", 0.15, 0.15)
+    window._select_pad("top", 0.55, 0.55)
+    assert window._selected_pad_id == "two"
+    assert window._selected_net == "GND"
+    assert window._views["top"]._scale == 3.0
+
+    window._select_pad("top", 0.55, 0.55)
     assert window._selected_pad_id is None
     assert window._views["top"]._scale == 3.0
 
@@ -241,18 +246,12 @@ def test_clicking_pad_toggles_links_without_resetting_zoom(
     assert window._views["top"]._scale == 3.0
 
 
-def test_net_view_and_right_click_assignment(
-    window: MainWindow, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_net_view_and_right_click_assignment(window: MainWindow) -> None:
     """Net assignment keeps pad name and appears in the Nets table."""
     window.project = ProjectDocument(
         "Project", "Board", pads=[Pad("P1", "top", 0.1, 0.1, "one", 0.1, 0.1)]
     )
-    monkeypatch.setattr(
-        "tnasrevner.gui.QInputDialog.getText", lambda *_args, **_kwargs: ("GND", True)
-    )
-
-    window._connect_pad_to_net("top", 0.15, 0.15)
+    window._assign_pad_net("one", "GND")
     QApplication.processEvents()
     window._refresh_net_table()
 
@@ -260,6 +259,12 @@ def test_net_view_and_right_click_assignment(
     assert window.project.pads[0].net == "GND"
     assert window._net_table.item(0, 0).text() == "P1"
     assert window._net_table.item(0, 1).text() == "GND"
+
+    window._connect_pad_to_net("top", 0.15, 0.15)
+    assert window._net_dialog is not None
+    window._net_dialog.reject()
+    QApplication.processEvents()
+    assert window._net_dialog is None
 
 
 def test_pad_refresh_reuses_cached_working_image(

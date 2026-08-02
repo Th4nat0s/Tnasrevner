@@ -962,7 +962,9 @@ class ImageView(QScrollArea):  # pylint: disable=too-many-instance-attributes
 class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
     """Minimal project and board-picture workspace."""
 
-    def __init__(self, show_startup: bool = True) -> None:
+    def __init__(  # pylint: disable=too-many-statements
+        self, show_startup: bool = True
+    ) -> None:
         super().__init__()
         self.project: ProjectDocument | None = None
         self.store: ProjectStore | None = None
@@ -975,6 +977,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         self._pad_refresh_pending = False
         self._pending_pad_view_state: tuple[float, float, float] | None = None
         self._image_cache: dict[str, QPixmap] = {}
+        self._net_dialog: QInputDialog | None = None
         self._last_view_key: int | None = None
         self._last_view_time = 0.0
         self.setWindowTitle("Tnasrevner")
@@ -1032,6 +1035,10 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         self._create_tool_palette()
         self._create_view_menu()
         self._update_title()
+        self._heartbeat_timer = QTimer(self)
+        self._heartbeat_timer.setInterval(5_000)
+        self._heartbeat_timer.timeout.connect(self._log_ui_heartbeat)
+        self._heartbeat_timer.start()
         if show_startup:
             QTimer.singleShot(0, self._startup_choice)
 
@@ -1288,32 +1295,70 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
             self._sync_board_views(self._active_views()[0])
 
     def _connect_pad_to_net(self, side: str, x: float, y: float) -> None:
-        """Assign or clear the electrical net of a right-clicked pad."""
+        """Open non-blocking net assignment for a right-clicked pad."""
         if not self.project:
             return
         pad = self._pad_at(side, x, y)
         if pad is None:
             return
-        net, accepted = QInputDialog.getText(
-            self, "Connect pad to net", "Net name:", text=pad.net or ""
+        if self._net_dialog is not None:
+            self._net_dialog.close()
+        dialog = QInputDialog(self)
+        dialog.setWindowTitle("Connect pad to net")
+        dialog.setLabelText(f"Net for {pad.name}:")
+        dialog.setTextValue(pad.net or "")
+        dialog.setWindowModality(Qt.WindowModality.NonModal)
+        dialog.accepted.connect(
+            lambda pad_id=pad.pad_id, dialog=dialog: self._assign_pad_net(
+                pad_id, dialog.textValue()
+            )
         )
-        if not accepted:
+        dialog.finished.connect(
+            lambda result, dialog=dialog: self._net_dialog_finished(dialog, result)
+        )
+        self._net_dialog = dialog
+        LOGGER.info("Net dialog opened id=%s pad=%s", pad.pad_id, pad.name)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _assign_pad_net(self, pad_id: str, value: str) -> None:
+        """Persist a net value submitted by the asynchronous dialog."""
+        if not self.project:
             return
-        net = net.strip() or None
+        pad = next((item for item in self.project.pads if item.pad_id == pad_id), None)
+        if pad is None:
+            return
+        net = value.strip() or None
         self.project.pads = [
-            replace(item, net=net) if item.pad_id == pad.pad_id else item
+            replace(item, net=net) if item.pad_id == pad_id else item
             for item in self.project.pads
         ]
         self._selected_net = net
-        self._selected_pad_id = pad.pad_id
-        LOGGER.info("Pad net assigned id=%s pad=%s net=%s", pad.pad_id, pad.name, net)
+        self._selected_pad_id = pad_id
+        LOGGER.info("Pad net assigned id=%s pad=%s net=%s", pad_id, pad.name, net)
         self._dirty = True
         self._schedule_pad_refresh(self._active_views()[0].view_state())
         self._update_title()
 
+    def _net_dialog_finished(self, dialog: QInputDialog, _result: int) -> None:
+        """Release the asynchronous net dialog reference."""
+        LOGGER.debug("Net dialog closed")
+        if self._net_dialog is dialog:
+            self._net_dialog = None
+
     def _defer_pad_net_assignment(self, side: str, x: float, y: float) -> None:
         """Open net assignment after returning from the mouse event."""
         QTimer.singleShot(0, lambda: self._connect_pad_to_net(side, x, y))
+
+    def _log_ui_heartbeat(self) -> None:
+        """Record that the Qt event loop is still processing events."""
+        LOGGER.debug(
+            "UI heartbeat pending_pad=%s refresh_pending=%s net_dialog=%s",
+            self._pending_pad.name if self._pending_pad else None,
+            self._pad_refresh_pending,
+            self._net_dialog is not None,
+        )
 
     def _create_actions(self) -> None:
         file_menu = self.menuBar().addMenu("File")
@@ -1756,7 +1801,9 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         )
         return pixmap
 
-    def _draw_pads(self, pixmap: QPixmap, side: str) -> None:
+    def _draw_pads(  # pylint: disable=too-many-locals
+        self, pixmap: QPixmap, side: str
+    ) -> None:
         """Draw persisted pad markers over one board-side image."""
         if not self._pads_visible or not self.project or not self.project.pads:
             return
@@ -1772,18 +1819,34 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
                 for pad in pads
                 if pad.net == self._selected_net
             }
-            origin = centers.get(self._selected_pad_id or "")
-            if origin is None and centers:
-                origin = next(iter(centers.values()))
+            origin_id = (
+                self._selected_pad_id if self._selected_pad_id in centers else None
+            )
+            if origin_id is None and centers:
+                origin_id = next(iter(centers))
+            origin = centers.get(origin_id or "")
             painter.setPen(QPen(Qt.GlobalColor.white, max(2, radius // 2)))
             if origin is not None:
                 for pad_id, target in centers.items():
-                    if pad_id != self._selected_pad_id:
+                    if pad_id != origin_id:
                         painter.drawLine(origin, target)
         painter.setOpacity(0.45)
-        painter.setPen(QPen(Qt.GlobalColor.yellow, max(2, radius // 3)))
         painter.setBrush(Qt.GlobalColor.red)
         for pad in pads:
+            painter.setPen(
+                QPen(
+                    (
+                        Qt.GlobalColor.white
+                        if pad.pad_id == self._selected_pad_id
+                        else Qt.GlobalColor.yellow
+                    ),
+                    (
+                        max(2, radius // 2)
+                        if pad.pad_id == self._selected_pad_id
+                        else max(2, radius // 3)
+                    ),
+                )
+            )
             left = round(pad.x * (pixmap.width() - 1))
             top = round(pad.y * (pixmap.height() - 1))
             right = max(left + 2, round((pad.x + pad.width) * (pixmap.width() - 1)))
