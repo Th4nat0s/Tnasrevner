@@ -21,6 +21,7 @@ from PySide6.QtCore import (
     QRect,
     QTimer,
     Qt,
+    Signal,
 )
 from PySide6.QtGui import (
     QAction,
@@ -515,6 +516,8 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
 class ImageView(QScrollArea):
     """Scrollable image view with mouse-wheel zoom."""
 
+    view_changed = Signal()
+
     def __init__(self, empty_text: str) -> None:
         super().__init__()
         self._empty_text = empty_text
@@ -529,6 +532,8 @@ class ImageView(QScrollArea):
         self.setWidget(self._label)
         self.setWidgetResizable(False)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.horizontalScrollBar().valueChanged.connect(self.view_changed)
+        self.verticalScrollBar().valueChanged.connect(self.view_changed)
 
     def set_image(self, path: Path | None) -> None:
         """Display image at its native scale, or show an empty state."""
@@ -634,6 +639,7 @@ class ImageView(QScrollArea):
         self.verticalScrollBar().setValue(
             old_vertical + new_label_point.y() - old_label_point.y()
         )
+        self.view_changed.emit()
 
     def _render(self) -> None:
         if self._pixmap.isNull():
@@ -660,12 +666,14 @@ class ImageView(QScrollArea):
         """Fit image inside current view."""
         self._scale = 1.0
         self._render()
+        self.view_changed.emit()
 
     def actual_size(self) -> None:
         """Show image at 1:1 source-pixel scale."""
         fit_scale = self._fit_scale()
         self._scale = 1.0 / fit_scale if fit_scale else 1.0
         self._render()
+        self.view_changed.emit()
 
     def center_image(self) -> None:
         """Center current image in available scrollable area."""
@@ -673,6 +681,25 @@ class ImageView(QScrollArea):
         vertical = self.verticalScrollBar()
         horizontal.setValue((horizontal.maximum() + horizontal.minimum()) // 2)
         vertical.setValue((vertical.maximum() + vertical.minimum()) // 2)
+
+    def view_state(self) -> tuple[float, float, float]:
+        """Return zoom and normalized horizontal/vertical pan."""
+        horizontal = self.horizontalScrollBar()
+        vertical = self.verticalScrollBar()
+        return (
+            self._scale,
+            horizontal.value() / horizontal.maximum() if horizontal.maximum() else 0.5,
+            vertical.value() / vertical.maximum() if vertical.maximum() else 0.5,
+        )
+
+    def apply_view_state(self, state: tuple[float, float, float]) -> None:
+        """Apply zoom and normalized pan from another board-side view."""
+        self._scale = max(0.1, min(state[0], 20.0))
+        self._render()
+        horizontal = self.horizontalScrollBar()
+        vertical = self.verticalScrollBar()
+        horizontal.setValue(round(state[1] * horizontal.maximum()))
+        vertical.setValue(round(state[2] * vertical.maximum()))
 
     def _fit_scale(self) -> float:
         """Calculate scale needed to fit image in viewport."""
@@ -692,6 +719,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         self.project: ProjectDocument | None = None
         self.store: ProjectStore | None = None
         self._dirty = False
+        self._syncing_views = False
         self._last_view_key: int | None = None
         self._last_view_time = 0.0
         self.setWindowTitle("Tnasrevner")
@@ -714,6 +742,10 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         self._tabs.addTab(side_by_side, "Top + bottom")
         self._overlay_view = ImageView("No top/bottom images")
         self._tabs.addTab(self._overlay_view, "Both")
+        for view in (*self._views.values(), *self._side_views.values()):
+            view.view_changed.connect(
+                lambda view=view: self._sync_board_views(view)
+            )
         self.setCentralWidget(self._tabs)
         self._create_actions()
         self._create_tool_palette()
@@ -773,6 +805,19 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         if self._tabs.currentIndex() == 2:
             return list(self._side_views.values())
         return [self._overlay_view]
+
+    def _sync_board_views(self, source: ImageView) -> None:
+        """Synchronize zoom and pan between Top and Bottom views."""
+        if self._syncing_views:
+            return
+        state = source.view_state()
+        self._syncing_views = True
+        try:
+            for view in (*self._views.values(), *self._side_views.values()):
+                if view is not source:
+                    view.apply_view_state(state)
+        finally:
+            self._syncing_views = False
 
     def _actual_size(self) -> None:
         """Set active image view(s) to 1:1 scale."""
@@ -1030,6 +1075,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         self._refresh_overlay()
         for side, view in self._side_views.items():
             view.set_pixmap(self._pixmap_for_asset(side))
+        self._sync_board_views(self._views["top"])
         if self.project:
             self._tabs.setCurrentIndex(
                 {"top": 0, "bottom": 1, "side_by_side": 2, "both": 3}[
