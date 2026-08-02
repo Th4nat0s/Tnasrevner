@@ -152,11 +152,13 @@ def test_import_editor_supports_free_rotation_and_zoom(app: QApplication) -> Non
     image.fill(0xFFFFFF)
     dialog = ImageEditDialog(QPixmap.fromImage(image))
 
+    dialog._set_selection(QPoint(10, 10), QPoint(80, 60))
     dialog._rotate(30)
     dialog._zoom_by(2)
 
     assert dialog._angle == 30
     assert dialog._zoom == 2
+    assert dialog._selection is not None
     assert dialog._source.width() > dialog._source.height()
     dialog.close()
 

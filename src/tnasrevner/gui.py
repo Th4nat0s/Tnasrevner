@@ -355,6 +355,22 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
 
     def _set_angle(self, angle: float) -> None:
         """Apply free rotation relative to original imported image."""
+        old_size = self._source.size()
+        selection_ratio = None
+        if self._selection is not None:
+            selection = self._source_rect(self._selection)
+            selection_ratio = (
+                selection.x() / old_size.width(),
+                selection.y() / old_size.height(),
+                selection.width() / old_size.width(),
+                selection.height() / old_size.height(),
+            )
+        line_ratio = None
+        if self._calibration_line is not None:
+            line_ratio = tuple(
+                QPointF(point.x() / old_size.width(), point.y() / old_size.height())
+                for point in self._calibration_line
+            )
         self._angle = angle
         self._angle_spin.blockSignals(True)
         self._angle_spin.setValue(angle)
@@ -362,11 +378,23 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         self._source = self._base_image.transformed(
             QTransform().rotate(angle), Qt.TransformationMode.SmoothTransformation
         )
-        self._selection = None
-        self._calibration_line = None
-        self._rubber_band.hide()
+        new_size = self._source.size()
+        if line_ratio is not None:
+            self._calibration_line = tuple(
+                QPointF(point.x() * new_size.width(), point.y() * new_size.height())
+                for point in line_ratio
+            )
         self._update_confirm_state()
         self._render()
+        if selection_ratio is not None:
+            selection = QRect(
+                round(selection_ratio[0] * new_size.width() * self._display_scale),
+                round(selection_ratio[1] * new_size.height() * self._display_scale),
+                round(selection_ratio[2] * new_size.width() * self._display_scale),
+                round(selection_ratio[3] * new_size.height() * self._display_scale),
+            ).intersected(self._canvas.rect())
+            if selection.width() >= 2 and selection.height() >= 2:
+                self._update_selection(selection)
 
     def _zoom_by(self, factor: float, anchor: QPoint | None = None) -> None:
         """Zoom around anchor point, preserving content under cursor."""
