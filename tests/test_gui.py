@@ -14,7 +14,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 from PySide6.QtCore import QPoint
 from PySide6.QtGui import QImage, QPixmap
-from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
+from PySide6.QtWidgets import QApplication, QDialog, QDialogButtonBox, QMessageBox
 
 from tnasrevner.gui import ImageEditDialog, MainWindow
 from tnasrevner.project import (
@@ -138,7 +138,7 @@ def test_import_image_stores_selected_side(
         lambda *_args: (str(source), ""),
     )
     monkeypatch.setattr(window, "_choose_image_side", lambda: "top")
-    monkeypatch.setattr(window, "_edit_imported_image", lambda image: image)
+    monkeypatch.setattr(window, "_edit_imported_image", lambda image: (image, 10.0))
 
     window.import_picture()
 
@@ -158,6 +158,21 @@ def test_import_editor_supports_free_rotation_and_zoom(app: QApplication) -> Non
     assert dialog._angle == 30
     assert dialog._zoom == 2
     assert dialog._source.width() > dialog._source.height()
+    dialog.close()
+
+
+def test_import_editor_requires_scale_and_calculates_pixels_per_mm(
+    app: QApplication,
+) -> None:
+    """Calibration line and real length produce persisted image scale."""
+    image = QImage(200, 100, QImage.Format.Format_RGB32)
+    image.fill(0xFFFFFF)
+    dialog = ImageEditDialog(QPixmap.fromImage(image))
+    dialog._set_calibration_line(QPoint(10, 10), QPoint(110, 10))
+    dialog._millimeters.setValue(20)
+
+    assert dialog.pixels_per_mm() == 5
+    assert not dialog._buttons.button(QDialogButtonBox.StandardButton.Ok).isEnabled()
     dialog.close()
 
 

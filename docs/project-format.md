@@ -15,7 +15,7 @@ root, making one `.revp` file sufficient to move or copy a project.
   "created_at": "2026-08-02T12:00:00+00:00",
   "updated_at": "2026-08-02T12:00:00+00:00",
   "images": [
-    {"side": "top", "path": "assets/top.png", "original_name": "top.png"}
+    {"side": "top", "path": "assets/top.png", "original_name": "top.png", "pixels_per_mm": 12.5}
   ],
   "display": {
     "mode": "top",
@@ -34,6 +34,9 @@ rejected explicitly.
 
 Display mode `both` overlays the top image with the bottom image mirrored
 horizontally. This is a view preference only; source images remain unchanged.
+
+Imported images store `pixels_per_mm`, measured from the mandatory calibration
+line drawn during import. This value is optional for older projects.
 
 The ZIP is written atomically through a temporary file. Source pictures are read
 and copied into the archive; original files are never modified.

@@ -5,6 +5,7 @@ from __future__ import annotations
 # PySide6 exposes Qt classes through compiled extension modules; Pylint cannot
 # inspect those names despite them being available at runtime.
 # pylint: disable=no-name-in-module,invalid-name
+# pylint: disable=too-many-lines
 
 from pathlib import Path
 import sys
@@ -14,13 +15,22 @@ from PySide6.QtCore import (
     QBuffer,
     QEvent,
     QIODevice,
+    QLineF,
     QPoint,
     QPointF,
     QRect,
     QTimer,
     Qt,
 )
-from PySide6.QtGui import QAction, QCloseEvent, QCursor, QPainter, QPixmap, QTransform
+from PySide6.QtGui import (
+    QAction,
+    QCloseEvent,
+    QCursor,
+    QPainter,
+    QPen,
+    QPixmap,
+    QTransform,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -96,7 +106,7 @@ class StartupDialog(QMessageBox):  # pylint: disable=too-few-public-methods
         return None
 
 
-class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-statements,too-many-return-statements
+class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-statements,too-many-return-statements,too-many-branches
     QDialog
 ):
     """Rotate and crop an image before it enters a project archive."""
@@ -115,6 +125,10 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         self._selection_start: QPoint | None = None
         self._selection = None
         self._resize_edges: set[str] = set()
+        self._calibration_start: QPoint | None = None
+        self._calibration_end: QPoint | None = None
+        self._calibration_line: tuple[QPointF, QPointF] | None = None
+        self._edit_mode = "calibration"
         self._canvas = QLabel()
         self._canvas.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._canvas.installEventFilter(self)
@@ -122,6 +136,23 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         self._scroll = QScrollArea()
         self._scroll.setWidget(self._canvas)
         self._scroll.setWidgetResizable(False)
+        self._scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        calibration_button = QPushButton("Scale line")
+        calibration_button.setCheckable(True)
+        calibration_button.setChecked(True)
+        calibration_button.clicked.connect(lambda: self._set_edit_mode("calibration"))
+        crop_button = QPushButton("Crop rectangle")
+        crop_button.setCheckable(True)
+        crop_button.clicked.connect(lambda: self._set_edit_mode("crop"))
+        self._calibration_button = calibration_button
+        self._crop_button = crop_button
+        millimeters = QDoubleSpinBox()
+        millimeters.setRange(0.0, 1_000_000.0)
+        millimeters.setDecimals(3)
+        millimeters.setSuffix(" mm")
+        millimeters.setToolTip("Real length of scale line")
+        millimeters.valueChanged.connect(lambda _value: self._update_confirm_state())
+        self._millimeters = millimeters
         rotate_left = QPushButton("Rotate left")
         rotate_left.clicked.connect(lambda: self._rotate(-90))
         rotate_right = QPushButton("Rotate right")
@@ -149,6 +180,10 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         self._buttons.rejected.connect(self.reject)
         self._buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(False)
         controls = QHBoxLayout()
+        controls.addWidget(calibration_button)
+        controls.addWidget(crop_button)
+        controls.addWidget(QLabel("Real length"))
+        controls.addWidget(millimeters)
         controls.addWidget(rotate_left)
         controls.addWidget(rotate_right)
         controls.addWidget(QLabel("Angle"))
@@ -159,11 +194,16 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         controls.addStretch()
         controls.addWidget(self._buttons)
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("Drag a rectangle over the board area to import."))
+        layout.addWidget(
+            QLabel(
+                "Draw scale line, enter real length in mm, then select crop rectangle."
+            )
+        )
         layout.addWidget(self._scroll)
         layout.addLayout(controls)
         self.showMaximized()
         self._render()
+        QTimer.singleShot(0, self._render)
 
     def eventFilter(
         self, watched, event
@@ -186,6 +226,31 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         ):
             self._zoom_by(max(0.01, 1.0 + event.value()))
             return True
+        if self._edit_mode == "calibration":
+            if (
+                event.type() == QEvent.Type.MouseButtonPress
+                and event.button() == Qt.MouseButton.LeftButton
+            ):
+                self._calibration_start = event.position().toPoint()
+                self._calibration_end = self._calibration_start
+                self._render()
+                return True
+            if event.type() == QEvent.Type.MouseMove and self._calibration_start:
+                self._calibration_end = event.position().toPoint()
+                self._render()
+                return True
+            if (
+                event.type() == QEvent.Type.MouseButtonRelease
+                and self._calibration_start
+            ):
+                self._calibration_end = event.position().toPoint()
+                self._set_calibration_line(
+                    self._calibration_start, self._calibration_end
+                )
+                self._calibration_start = None
+                self._calibration_end = None
+                return True
+            return super().eventFilter(watched, event)
         if (
             event.type() == QEvent.Type.MouseButtonPress
             and event.button() == Qt.MouseButton.LeftButton
@@ -230,8 +295,14 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
             self._selection is None
             or self._selection.width() < 2
             or self._selection.height() < 2
+            or self._calibration_line is None
+            or self._millimeters.value() <= 0
         ):
-            QMessageBox.warning(self, "Select area", "Select a rectangle first.")
+            QMessageBox.warning(
+                self,
+                "Incomplete import",
+                "Define scale line, real length, and crop rectangle first.",
+            )
             return
         selection = self._selection
         source_rect = self._source_rect(selection)
@@ -241,6 +312,41 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
     def result_pixmap(self) -> QPixmap:
         """Return edited image after accepted dialog."""
         return self._source
+
+    def pixels_per_mm(self) -> float:
+        """Return source pixels per real millimeter from calibration line."""
+        if self._calibration_line is None or self._millimeters.value() <= 0:
+            return 0.0
+        return QLineF(*self._calibration_line).length() / self._millimeters.value()
+
+    def _set_edit_mode(self, mode: str) -> None:
+        """Switch between scale-line and crop-rectangle drawing."""
+        self._edit_mode = mode
+        self._calibration_button.setChecked(mode == "calibration")
+        self._crop_button.setChecked(mode == "crop")
+
+    def _set_calibration_line(self, start: QPoint, end: QPoint) -> None:
+        """Store calibration endpoints in source-image coordinates."""
+        start = self._clamp_point(start, self._canvas.rect())
+        end = self._clamp_point(end, self._canvas.rect())
+        if QLineF(start, end).length() < 2:
+            return
+        self._calibration_line = (
+            QPointF(start.x() / self._display_scale, start.y() / self._display_scale),
+            QPointF(end.x() / self._display_scale, end.y() / self._display_scale),
+        )
+        self._update_confirm_state()
+
+    def _update_confirm_state(self) -> None:
+        """Enable import only after calibration and crop are complete."""
+        enabled = (
+            self._selection is not None
+            and self._selection.width() >= 2
+            and self._selection.height() >= 2
+            and self._calibration_line is not None
+            and self._millimeters.value() > 0
+        )
+        self._buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(enabled)
 
     def _rotate(self, angle: int) -> None:
         """Rotate source image and clear old selection."""
@@ -256,8 +362,9 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
             QTransform().rotate(angle), Qt.TransformationMode.SmoothTransformation
         )
         self._selection = None
+        self._calibration_line = None
         self._rubber_band.hide()
-        self._buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(False)
+        self._update_confirm_state()
         self._render()
 
     def _zoom_by(self, factor: float, anchor: QPoint | None = None) -> None:
@@ -303,6 +410,24 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
         )
+        painter = QPainter(displayed)
+        if self._calibration_line is not None:
+            start, end = self._calibration_line
+            painter.setPen(QPen(Qt.GlobalColor.red, 3))
+            painter.drawLine(
+                QPoint(
+                    round(start.x() * self._display_scale),
+                    round(start.y() * self._display_scale),
+                ),
+                QPoint(
+                    round(end.x() * self._display_scale),
+                    round(end.y() * self._display_scale),
+                ),
+            )
+        if self._calibration_start is not None and self._calibration_end is not None:
+            painter.setPen(QPen(Qt.GlobalColor.yellow, 3))
+            painter.drawLine(self._calibration_start, self._calibration_end)
+        painter.end()
         self._canvas.setPixmap(displayed)
         self._canvas.resize(displayed.size())
 
@@ -318,9 +443,7 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         self._selection = selection
         self._rubber_band.setGeometry(self._selection)
         self._rubber_band.show()
-        self._buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(
-            self._selection.width() >= 2 and self._selection.height() >= 2
-        )
+        self._update_confirm_state()
 
     def _hit_edges(self, point: QPoint) -> set[str]:
         """Return selection edges near point for individual edge dragging."""
@@ -624,6 +747,10 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         remove_button.setToolTip("Remove a Top or Bottom image")
         remove_button.clicked.connect(self.remove_picture)
         layout.addWidget(remove_button)
+        save_button = QPushButton("Save", panel)
+        save_button.setToolTip("Save project")
+        save_button.clicked.connect(self.save_project)
+        layout.addWidget(save_button)
         layout.addStretch()
         panel.setLayout(layout)
         dock.setWidget(panel)
@@ -820,9 +947,10 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         side = self._choose_image_side()
         if side is None:
             return
-        edited_image = self._edit_imported_image(QPixmap(str(source_path)))
-        if edited_image is None:
+        edited = self._edit_imported_image(QPixmap(str(source_path)))
+        if edited is None:
             return
+        edited_image, pixels_per_mm = edited
         relative_path = f"assets/{side}.png"
         self.store.write_asset(relative_path, self._pixmap_bytes(edited_image))
         self.project.images = [
@@ -833,6 +961,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
                 side,
                 relative_path,
                 source_path.name,
+                pixels_per_mm,
             )
         )
         self._dirty = True
@@ -863,12 +992,12 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         self._refresh_views()
         self._update_title()
 
-    def _edit_imported_image(self, image: QPixmap) -> QPixmap | None:
-        """Open image editor and return edited image, or `None` on cancel."""
+    def _edit_imported_image(self, image: QPixmap) -> tuple[QPixmap, float] | None:
+        """Open editor and return image plus scale, or `None` on cancel."""
         dialog = ImageEditDialog(image, self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return None
-        return dialog.result_pixmap()
+        return dialog.result_pixmap(), dialog.pixels_per_mm()
 
     @staticmethod
     def _pixmap_bytes(image: QPixmap) -> bytes:

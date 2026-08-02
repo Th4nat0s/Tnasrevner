@@ -47,19 +47,23 @@ class ImageAsset:
     side: str
     path: str
     original_name: str
+    pixels_per_mm: float | None = None
 
     def __post_init__(self) -> None:
         if self.side not in _SIDES:
             raise ProjectFormatError("image side must be 'top' or 'bottom'")
         _relative_asset_path(self.path)
         _required_string(self.original_name, "image original_name")
+        if self.pixels_per_mm is not None and self.pixels_per_mm <= 0:
+            raise ProjectFormatError("image pixels_per_mm must be positive")
 
-    def to_dict(self) -> dict[str, str]:
+    def to_dict(self) -> dict[str, Any]:
         """Return JSON-compatible image data."""
         return {
             "side": self.side,
             "path": self.path,
             "original_name": self.original_name,
+            "pixels_per_mm": self.pixels_per_mm,
         }
 
     @classmethod
@@ -73,6 +77,7 @@ class ImageAsset:
             original_name=_required_string(
                 data.get("original_name"), "image original_name"
             ),
+            pixels_per_mm=data.get("pixels_per_mm"),
         )
 
 
