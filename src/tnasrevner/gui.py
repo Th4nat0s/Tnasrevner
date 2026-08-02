@@ -910,6 +910,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         self._syncing_views = False
         self._pending_pad: Pad | None = None
         self._selected_pad_name: str | None = None
+        self._selected_pad_id: str | None = None
         self._last_view_key: int | None = None
         self._last_view_time = 0.0
         self.setWindowTitle("Tnasrevner")
@@ -1135,6 +1136,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         """Select a pad name to show its same-name connections."""
         pad = self._pad_at(side, x, y)
         self._selected_pad_name = pad.name if pad else None
+        self._selected_pad_id = pad.pad_id if pad else None
         self._refresh_views()
 
     def _rename_pad(self, side: str, x: float, y: float) -> None:
@@ -1155,6 +1157,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
             for item in self.project.pads
         ]
         self._selected_pad_name = name
+        self._selected_pad_id = pad.pad_id
         self._dirty = True
         self._refresh_views()
         self._update_title()
@@ -1564,21 +1567,21 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         painter = QPainter(pixmap)
         radius = max(5, min(pixmap.width(), pixmap.height()) // 100)
         pads = [pad for pad in self.project.pads if pad.side == side]
-        if self._selected_pad_name:
-            centers: dict[str, list[QPoint]] = {}
-            for pad in pads:
-                if pad.name != self._selected_pad_name:
-                    continue
-                centers.setdefault(pad.name, []).append(
-                    QPoint(
-                        round((pad.x + pad.width / 2) * (pixmap.width() - 1)),
-                        round((pad.y + pad.height / 2) * (pixmap.height() - 1)),
-                    )
+        if self._selected_pad_name and self._selected_pad_id:
+            centers = {
+                pad.pad_id: QPoint(
+                    round((pad.x + pad.width / 2) * (pixmap.width() - 1)),
+                    round((pad.y + pad.height / 2) * (pixmap.height() - 1)),
                 )
+                for pad in pads
+                if pad.name == self._selected_pad_name
+            }
+            origin = centers.get(self._selected_pad_id)
             painter.setPen(QPen(Qt.GlobalColor.white, max(2, radius // 2)))
-            for points in centers.values():
-                for start, end in zip(points, points[1:]):
-                    painter.drawLine(start, end)
+            if origin is not None:
+                for pad_id, target in centers.items():
+                    if pad_id != self._selected_pad_id:
+                        painter.drawLine(origin, target)
         painter.setOpacity(0.45)
         painter.setPen(QPen(Qt.GlobalColor.yellow, max(2, radius // 3)))
         painter.setBrush(Qt.GlobalColor.red)
