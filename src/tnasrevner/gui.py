@@ -974,6 +974,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         self._pads_visible = True
         self._pad_refresh_pending = False
         self._pending_pad_view_state: tuple[float, float, float] | None = None
+        self._image_cache: dict[str, QPixmap] = {}
         self._last_view_key: int | None = None
         self._last_view_time = 0.0
         self.setWindowTitle("Tnasrevner")
@@ -1230,7 +1231,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         return None
 
     def _select_pad(self, side: str, x: float, y: float) -> None:
-        """Toggle same-name connections without changing the current view."""
+        """Toggle same-net connections without changing the current view."""
         view_state = self._active_views()[0].view_state()
         pad = self._pad_at(side, x, y)
         if pad and pad.pad_id == self._selected_pad_id:
@@ -1370,6 +1371,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         self.project = ProjectDocument(
             dialog.project_name.text(), dialog.board_name.text()
         )
+        self._image_cache.clear()
         self._dirty = True
         self._refresh_views()
         self._update_title()
@@ -1390,6 +1392,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
             QMessageBox.critical(self, "Open failed", str(error))
             return
         self.store, self.project, self._dirty = store, project, False
+        self._image_cache.clear()
         self._refresh_views()
         self._update_title()
 
@@ -1428,6 +1431,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
             return
         self.project = None
         self.store = None
+        self._image_cache.clear()
         self._dirty = False
         self._refresh_views()
         self._update_title()
@@ -1507,6 +1511,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
                 calibration_line,
             )
         )
+        self._image_cache.pop(side, None)
         self._dirty = True
         self._refresh_views()
         self._update_title()
@@ -1533,6 +1538,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         self.project.images = [
             image for image in self.project.images if image.side != side
         ]
+        self._image_cache.pop(side, None)
         self._dirty = True
         self._refresh_views()
         self._update_title()
@@ -1584,6 +1590,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
             )
             for image in self.project.images
         ]
+        self._image_cache.pop(side, None)
         self._dirty = True
         self._refresh_views()
         self._update_title()
@@ -1631,12 +1638,13 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         return None
 
     def _refresh_views(self) -> None:
-        """Reload both picture views from project-relative asset paths."""
+        """Refresh all views from one composed pixmap per board side."""
+        images = {side: self._pixmap_for_asset(side) for side in ("top", "bottom")}
         for side, view in self._views.items():
-            view.set_pixmap(self._pixmap_for_asset(side))
-        self._refresh_overlay()
+            view.set_pixmap(images[side])
+        self._refresh_overlay(images)
         for side, view in self._side_views.items():
-            view.set_pixmap(self._pixmap_for_asset(side))
+            view.set_pixmap(images[side])
         self._refresh_net_table()
         if self.project:
             self._tabs.setCurrentIndex(
@@ -1663,6 +1671,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
                 self._sync_board_views(self._active_views()[0])
         else:
             self._sync_board_views(self._views["top"])
+        LOGGER.debug("View refresh completed")
 
     def _refresh_net_table(self) -> None:
         """Show each stable pad name and its assigned electrical net."""
@@ -1674,9 +1683,8 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
             self._net_table.setItem(row, 0, QTableWidgetItem(pad.name))
             self._net_table.setItem(row, 1, QTableWidgetItem(pad.net or ""))
 
-    def _refresh_overlay(self) -> None:
+    def _refresh_overlay(self, images: dict[str, QPixmap]) -> None:
         """Compose top and mirrored bottom images into the Both view."""
-        images = {side: self._pixmap_for_asset(side) for side in ("top", "bottom")}
         top = images["top"]
         bottom = images["bottom"]
         base = top if not top.isNull() else bottom
@@ -1706,7 +1714,16 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         self._overlay_view.set_pixmap(canvas)
 
     def _pixmap_for_asset(self, side: str) -> QPixmap:
-        """Load one project image for overlay composition."""
+        """Copy one cached working image and draw current pad overlays."""
+        pixmap = self._base_pixmap_for_asset(side)
+        if pixmap.isNull():
+            return pixmap
+        pixmap = QPixmap(pixmap)
+        self._draw_pads(pixmap, side)
+        return pixmap
+
+    def _base_pixmap_for_asset(self, side: str) -> QPixmap:
+        """Load and cache one undecorated working image."""
         if not self.project or not self.store:
             return QPixmap()
         asset = next(
@@ -1714,6 +1731,8 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         )
         if not asset:
             return QPixmap()
+        if side in self._image_cache:
+            return self._image_cache[side]
         try:
             if self.store.is_archive:
                 pixmap = QPixmap()
@@ -1728,7 +1747,13 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
                 self, "Image unavailable", f"Cannot decode image asset: {asset.path}"
             )
             return pixmap
-        self._draw_pads(pixmap, side)
+        self._image_cache[side] = pixmap
+        LOGGER.debug(
+            "Cached working image side=%s size=%sx%s",
+            side,
+            pixmap.width(),
+            pixmap.height(),
+        )
         return pixmap
 
     def _draw_pads(self, pixmap: QPixmap, side: str) -> None:

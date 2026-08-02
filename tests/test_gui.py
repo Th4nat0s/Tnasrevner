@@ -262,6 +262,35 @@ def test_net_view_and_right_click_assignment(
     assert window._net_table.item(0, 1).text() == "GND"
 
 
+def test_pad_refresh_reuses_cached_working_image(
+    window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Repeated pad refreshes decode each working image only once."""
+    window.store = ProjectStore(tmp_path / "board.revp")
+    window.project = ProjectDocument("Project", "Board")
+    image = QImage(100, 100, QImage.Format.Format_RGB32)
+    image.fill(0xFFFFFF)
+    window.store.write_asset(
+        "assets/top.png", window._pixmap_bytes(QPixmap.fromImage(image))
+    )
+    window.project.images.append(ImageAsset("top", "assets/top.png", "top.png"))
+    original_read = window.store.read_asset
+    reads = 0
+
+    def counted_read(path: str) -> bytes:
+        nonlocal reads
+        reads += 1
+        return original_read(path)
+
+    monkeypatch.setattr(window.store, "read_asset", counted_read)
+    window._image_cache.clear()
+
+    window._refresh_views()
+    window._refresh_views()
+
+    assert reads == 1
+
+
 def test_pad_mouse_rectangle_releases_placement_mode(
     window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
