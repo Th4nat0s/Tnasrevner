@@ -73,7 +73,7 @@ class ImageView(QScrollArea):
         self._label.installEventFilter(self)
         self.viewport().installEventFilter(self)
         self.setWidget(self._label)
-        self.setWidgetResizable(True)
+        self.setWidgetResizable(False)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
     def set_image(self, path: Path | None) -> None:
@@ -161,6 +161,7 @@ class ImageView(QScrollArea):
                 Qt.TransformationMode.SmoothTransformation,
             )
         )
+        self._label.resize(self._label.pixmap().size())
 
     def resizeEvent(self, event) -> None:  # noqa: N802  # pylint: disable=invalid-name
         """Keep the image fitted after resizing its view."""
@@ -177,6 +178,13 @@ class ImageView(QScrollArea):
         fit_scale = self._fit_scale()
         self._scale = 1.0 / fit_scale if fit_scale else 1.0
         self._render()
+
+    def center_image(self) -> None:
+        """Center current image in available scrollable area."""
+        horizontal = self.horizontalScrollBar()
+        vertical = self.verticalScrollBar()
+        horizontal.setValue((horizontal.maximum() + horizontal.minimum()) // 2)
+        vertical.setValue((vertical.maximum() + vertical.minimum()) // 2)
 
     def _fit_scale(self) -> float:
         """Calculate scale needed to fit image in viewport."""
@@ -232,6 +240,9 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         fit_action = palette.addAction("FIT")
         fit_action.setToolTip("Fit image in view")
         fit_action.triggered.connect(self._fit_images)
+        center_action = palette.addAction("◎")
+        center_action.setToolTip("Center image")
+        center_action.triggered.connect(self._center_images)
         self.addToolBar(Qt.ToolBarArea.RightToolBarArea, palette)
 
     def _active_views(self) -> list[ImageView]:
@@ -252,6 +263,11 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         for view in self._active_views():
             view.fit_image()
 
+    def _center_images(self) -> None:
+        """Center active image view(s)."""
+        for view in self._active_views():
+            view.center_image()
+
     def _create_actions(self) -> None:
         file_menu = self.menuBar().addMenu("File")
         for label, handler, shortcut in (
@@ -259,13 +275,19 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
             ("Open project", self.open_project, "Ctrl+O"),
             ("Save project", self.save_project, "Ctrl+S"),
             ("Close project", self.close_project, "Ctrl+W"),
-            ("Import top picture", lambda: self.import_picture("top"), "Ctrl+T"),
-            ("Import bottom picture", lambda: self.import_picture("bottom"), "Ctrl+B"),
         ):
             action = QAction(label, self)
             action.triggered.connect(handler)
             action.setShortcut(shortcut)
             file_menu.addAction(action)
+        import_action = QAction("Import image", self)
+        import_action.setShortcut("I")
+        import_action.setToolTip("Import image, then choose Top or Bottom")
+        import_action.triggered.connect(self.import_picture)
+        file_menu.addAction(import_action)
+        main_toolbar = QToolBar("Main tools", self)
+        main_toolbar.addAction(import_action)
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, main_toolbar)
         file_menu.addSeparator()
         quit_action = QAction("Quit", self)
         quit_action.triggered.connect(self.close)
@@ -383,8 +405,8 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         else:
             event.ignore()
 
-    def import_picture(self, side: str) -> None:
-        """Copy a selected picture into project assets and display it."""
+    def import_picture(self) -> None:
+        """Import an image, then ask whether it belongs to top or bottom."""
         if not self.project or not self.store:
             QMessageBox.information(
                 self, "No project", "Create or open a project first."
@@ -392,7 +414,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
             return
         source, _ = QFileDialog.getOpenFileName(
             self,
-            f"Import {side} picture",
+            "Import image",
             "",
             "Images (*.png *.jpg *.jpeg *.bmp *.tif *.tiff)",
         )
@@ -403,6 +425,9 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
             QMessageBox.warning(
                 self, "Import failed", "Selected file is not a readable image."
             )
+            return
+        side = self._choose_image_side()
+        if side is None:
             return
         relative_path = f"assets/{side}{source_path.suffix.lower()}"
         self.store.write_asset(relative_path, source_path.read_bytes())
@@ -419,6 +444,21 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         self._dirty = True
         self._refresh_views()
         self._update_title()
+
+    def _choose_image_side(self) -> str | None:
+        """Ask which external board side the selected image represents."""
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("Image side")
+        dialog.setText("Where does this image belong?")
+        top_button = dialog.addButton("Top", QMessageBox.ButtonRole.AcceptRole)
+        bottom_button = dialog.addButton("Bottom", QMessageBox.ButtonRole.AcceptRole)
+        dialog.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        dialog.exec()
+        if dialog.clickedButton() is top_button:
+            return "top"
+        if dialog.clickedButton() is bottom_button:
+            return "bottom"
+        return None
 
     def _refresh_views(self) -> None:
         """Reload both picture views from project-relative asset paths."""

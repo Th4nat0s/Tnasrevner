@@ -12,6 +12,7 @@ from types import SimpleNamespace
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
+from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
 
 from tnasrevner.gui import MainWindow
@@ -113,3 +114,26 @@ def test_open_invalid_archive_reports_error(
 
     assert window.project is None
     assert errors and "cannot read project archive" in errors[0]
+
+
+def test_import_image_stores_selected_side(
+    window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One import action stores image after side selection."""
+    source = tmp_path / "board-photo.png"
+    image = QImage(10, 10, QImage.Format.Format_RGB32)
+    image.fill(0xFFFFFF)
+    assert image.save(str(source))
+    archive = tmp_path / "board.revp"
+    window.store = ProjectStore(archive)
+    window.project = ProjectDocument("Project", "Board")
+    monkeypatch.setattr(
+        "tnasrevner.gui.QFileDialog.getOpenFileName",
+        lambda *_args: (str(source), ""),
+    )
+    monkeypatch.setattr(window, "_choose_image_side", lambda: "top")
+
+    window.import_picture()
+
+    assert window.project.images[0].side == "top"
+    assert window.store.read_asset("assets/top.png") == source.read_bytes()
