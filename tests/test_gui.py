@@ -28,7 +28,7 @@ def app() -> QApplication:
 @pytest.fixture
 def window(app: QApplication) -> MainWindow:
     """Create isolated main window."""
-    result = MainWindow()
+    result = MainWindow(show_startup=False)
     yield result
     result._dirty = False
     result.close()

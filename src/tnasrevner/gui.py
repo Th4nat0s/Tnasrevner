@@ -10,7 +10,7 @@ from pathlib import Path
 import sys
 from time import monotonic
 
-from PySide6.QtCore import QEvent, QPoint, Qt
+from PySide6.QtCore import QEvent, QPoint, QTimer, Qt
 from PySide6.QtGui import QAction, QCloseEvent, QCursor, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -56,6 +56,31 @@ class ProjectDetailsDialog(QDialog):  # pylint: disable=too-few-public-methods
             QMessageBox.warning(self, "Missing name", "Enter project and board names.")
             return
         super().accept()
+
+
+class StartupDialog(QMessageBox):  # pylint: disable=too-few-public-methods
+    """Ask whether to load an existing project or create a new one."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Tnasrevner")
+        self.setText("What do you want to do?")
+        self.load_button = self.addButton(
+            "Load project", QMessageBox.ButtonRole.AcceptRole
+        )
+        self.new_button = self.addButton(
+            "New project", QMessageBox.ButtonRole.AcceptRole
+        )
+        self.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+
+    def choice(self) -> str | None:
+        """Return `load`, `new`, or `None` after dialog closes."""
+        self.exec()
+        if self.clickedButton() is self.load_button:
+            return "load"
+        if self.clickedButton() is self.new_button:
+            return "new"
+        return None
 
 
 class ImageView(QScrollArea):
@@ -199,7 +224,7 @@ class ImageView(QScrollArea):
 class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
     """Minimal project and board-picture workspace."""
 
-    def __init__(self) -> None:
+    def __init__(self, show_startup: bool = True) -> None:
         super().__init__()
         self.project: ProjectDocument | None = None
         self.store: ProjectStore | None = None
@@ -225,9 +250,11 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         side_layout.addWidget(self._side_views["bottom"])
         self._tabs.addTab(side_by_side, "Top + bottom")
         self.setCentralWidget(self._tabs)
-        self._create_tool_palette()
         self._create_actions()
+        self._create_tool_palette()
         self._update_title()
+        if show_startup:
+            QTimer.singleShot(0, self._startup_choice)
 
     def _create_tool_palette(self) -> None:
         """Create the right-side view control palette."""
@@ -243,7 +270,17 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         center_action = palette.addAction("◎")
         center_action.setToolTip("Center image")
         center_action.triggered.connect(self._center_images)
+        palette.addSeparator()
+        palette.addAction(self._import_action)
         self.addToolBar(Qt.ToolBarArea.RightToolBarArea, palette)
+
+    def _startup_choice(self) -> None:
+        """Show startup choice and open the selected workflow."""
+        choice = StartupDialog(self).choice()
+        if choice == "load":
+            self.open_project()
+        elif choice == "new":
+            self.new_project()
 
     def _active_views(self) -> list[ImageView]:
         """Return image views belonging to current tab."""
@@ -280,14 +317,11 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
             action.triggered.connect(handler)
             action.setShortcut(shortcut)
             file_menu.addAction(action)
-        import_action = QAction("Import image", self)
-        import_action.setShortcut("I")
-        import_action.setToolTip("Import image, then choose Top or Bottom")
-        import_action.triggered.connect(self.import_picture)
-        file_menu.addAction(import_action)
-        main_toolbar = QToolBar("Main tools", self)
-        main_toolbar.addAction(import_action)
-        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, main_toolbar)
+        self._import_action = QAction("Import image", self)
+        self._import_action.setShortcut("I")
+        self._import_action.setToolTip("Import image, then choose Top or Bottom")
+        self._import_action.triggered.connect(self.import_picture)
+        file_menu.addAction(self._import_action)
         file_menu.addSeparator()
         quit_action = QAction("Quit", self)
         quit_action.triggered.connect(self.close)
