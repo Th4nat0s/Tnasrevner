@@ -10,7 +10,7 @@ from pathlib import Path
 import sys
 from time import monotonic
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QEvent, Qt
 from PySide6.QtGui import QAction, QCloseEvent, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -91,12 +91,26 @@ class ImageView(QScrollArea):
             event.modifiers() & Qt.KeyboardModifier.ControlModifier
             and not self._pixmap.isNull()
         ):
-            self._scale *= 1.2 if event.angleDelta().y() > 0 else 1 / 1.2
-            self._scale = max(0.1, min(self._scale, 20.0))
-            self._render()
+            self._zoom_by(1.2 if event.angleDelta().y() > 0 else 1 / 1.2)
             event.accept()
             return
         super().wheelEvent(event)
+
+    def event(self, event) -> bool:  # noqa: N802
+        """Handle macOS trackpad pinch-to-zoom gestures."""
+        if (
+            event.type() == QEvent.Type.NativeGesture
+            and event.gestureType() == Qt.NativeGestureType.ZoomNativeGesture
+            and not self._pixmap.isNull()
+        ):
+            self._zoom_by(max(0.01, 1.0 + event.value()))
+            return True
+        return super().event(event)
+
+    def _zoom_by(self, factor: float) -> None:
+        """Apply zoom factor and keep it in a usable range."""
+        self._scale = max(0.1, min(self._scale * factor, 20.0))
+        self._render()
 
     def _render(self) -> None:
         if self._pixmap.isNull():
