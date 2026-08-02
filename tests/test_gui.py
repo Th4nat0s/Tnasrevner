@@ -175,6 +175,10 @@ def test_create_pad_from_tools_places_and_persists_marker(
     window.project = ProjectDocument("Project", "Board")
     image = QImage(100, 100, QImage.Format.Format_RGB32)
     image.fill(0xFFFFFF)
+    window.store.write_asset(
+        "assets/top.png", window._pixmap_bytes(QPixmap.fromImage(image))
+    )
+    window.project.images.append(ImageAsset("top", "assets/top.png", "top.png"))
     window._views["top"].set_pixmap(QPixmap.fromImage(image))
     monkeypatch.setattr(window, "_choose_image_side", lambda: "top")
 
@@ -191,6 +195,11 @@ def test_create_pad_from_tools_places_and_persists_marker(
         action.text() == "Create pad"
         for action in window._tools_dock.widget().findChildren(QPushButton)
     )
+
+    window.create_pad()
+    window._views["top"].pad_selected.emit(0.6, 0.2, 0.15, 0.15)
+
+    assert [pad.name for pad in window.project.pads] == ["P1", "P2"]
 
 
 def test_import_image_stores_selected_side(

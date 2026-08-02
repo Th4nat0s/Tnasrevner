@@ -764,6 +764,12 @@ class ImageView(QScrollArea):  # pylint: disable=too-many-instance-attributes
     def set_pad_placement(self, enabled: bool) -> None:
         """Enable or disable click-to-place mode for a pad."""
         self._pad_placement = enabled
+        if not enabled:
+            self._pad_start = None
+            self._pad_band.hide()
+            self._click_position = None
+            self._drag_position = None
+            self.unsetCursor()
 
     def _label_point(self, watched, point: QPoint) -> QPoint:
         """Convert an event point to label coordinates."""
