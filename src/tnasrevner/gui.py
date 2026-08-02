@@ -549,6 +549,10 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         import_button.setToolTip("Import image, then choose Top or Bottom")
         import_button.clicked.connect(self.import_picture)
         layout.addWidget(import_button)
+        remove_button = QPushButton("Remove image", panel)
+        remove_button.setToolTip("Remove a Top or Bottom image")
+        remove_button.clicked.connect(self.remove_picture)
+        layout.addWidget(remove_button)
         layout.addStretch()
         panel.setLayout(layout)
         dock.setWidget(panel)
@@ -764,6 +768,26 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         self._refresh_views()
         self._update_title()
 
+    def remove_picture(self) -> None:
+        """Remove selected Top or Bottom image after explicit side choice."""
+        if not self.project or not self.store:
+            QMessageBox.information(
+                self, "No project", "Create or open a project first."
+            )
+            return
+        side = self._choose_image_side()
+        if side is None:
+            return
+        asset = next((image for image in self.project.images if image.side == side), None)
+        if asset is None:
+            QMessageBox.information(self, "No image", f"No {side} image imported.")
+            return
+        self.store.remove_asset(asset.path)
+        self.project.images = [image for image in self.project.images if image.side != side]
+        self._dirty = True
+        self._refresh_views()
+        self._update_title()
+
     def _edit_imported_image(self, image: QPixmap) -> QPixmap | None:
         """Open image editor and return edited image, or `None` on cancel."""
         dialog = ImageEditDialog(image, self)
@@ -798,34 +822,10 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
     def _refresh_views(self) -> None:
         """Reload both picture views from project-relative asset paths."""
         for side, view in self._views.items():
-            asset = next(
-                (
-                    image
-                    for image in (self.project.images if self.project else [])
-                    if image.side == side
-                ),
-                None,
-            )
-            if asset and self.store and self.store.is_archive:
-                view.set_image_data(self.store.read_asset(asset.path))
-            else:
-                path = self.store.root / asset.path if asset and self.store else None
-                view.set_image(path if path and path.is_file() else None)
+            view.set_pixmap(self._pixmap_for_asset(side))
         self._refresh_overlay()
         for side, view in self._side_views.items():
-            asset = next(
-                (
-                    image
-                    for image in (self.project.images if self.project else [])
-                    if image.side == side
-                ),
-                None,
-            )
-            if asset and self.store and self.store.is_archive:
-                view.set_image_data(self.store.read_asset(asset.path))
-            else:
-                path = self.store.root / asset.path if asset and self.store else None
-                view.set_image(path if path and path.is_file() else None)
+            view.set_pixmap(self._pixmap_for_asset(side))
         if self.project:
             self._tabs.setCurrentIndex(
                 {"top": 0, "bottom": 1, "side_by_side": 2, "both": 3}[
@@ -874,11 +874,20 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         asset = next((image for image in self.project.images if image.side == side), None)
         if not asset:
             return QPixmap()
-        if self.store.is_archive:
-            pixmap = QPixmap()
-            pixmap.loadFromData(self.store.read_asset(asset.path))
-            return pixmap
-        return QPixmap(str(self.store.root / asset.path))
+        try:
+            if self.store.is_archive:
+                pixmap = QPixmap()
+                pixmap.loadFromData(self.store.read_asset(asset.path))
+            else:
+                pixmap = QPixmap(str(self.store.root / asset.path))
+        except ProjectFormatError as error:
+            QMessageBox.warning(self, "Image unavailable", str(error))
+            return QPixmap()
+        if pixmap.isNull():
+            QMessageBox.warning(
+                self, "Image unavailable", f"Cannot decode image asset: {asset.path}"
+            )
+        return pixmap
 
     def _update_title(self) -> None:
         name = self.project.project_name if self.project else "No project"

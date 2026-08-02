@@ -16,7 +16,7 @@ from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
 
 from tnasrevner.gui import ImageEditDialog, MainWindow
-from tnasrevner.project import ProjectDocument, ProjectStore
+from tnasrevner.project import ImageAsset, ProjectDocument, ProjectFormatError, ProjectStore
 
 
 @pytest.fixture(scope="module")
@@ -153,3 +153,21 @@ def test_import_editor_supports_free_rotation_and_zoom(app: QApplication) -> Non
     assert dialog._zoom == 2
     assert dialog._source.width() > dialog._source.height()
     dialog.close()
+
+
+def test_remove_image_removes_selected_side(
+    window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Remove image action removes metadata and archive asset."""
+    archive = tmp_path / "board.revp"
+    window.store = ProjectStore(archive)
+    window.project = ProjectDocument("Project", "Board")
+    window.store.write_asset("assets/top.png", b"picture")
+    window.project.images.append(ImageAsset("top", "assets/top.png", "top.png"))
+    monkeypatch.setattr(window, "_choose_image_side", lambda: "top")
+
+    window.remove_picture()
+
+    assert not window.project.images
+    with pytest.raises(ProjectFormatError):
+        window.store.read_asset("assets/top.png")

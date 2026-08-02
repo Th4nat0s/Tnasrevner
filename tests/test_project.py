@@ -1,5 +1,8 @@
 """Tests for minimal project persistence."""
 
+# Tests use descriptive names; function docstrings add no test value here.
+# pylint: disable=missing-function-docstring
+
 import json
 from pathlib import Path
 
@@ -42,6 +45,19 @@ def test_revp_archive_round_trip_includes_image_bytes(tmp_path: Path) -> None:
     assert loaded_store.read_asset("assets/top.png") == b"picture-bytes"
 
 
+def test_missing_archive_asset_is_rejected(tmp_path: Path) -> None:
+    store = ProjectStore(tmp_path / "board.revp")
+    project = ProjectDocument(
+        "Project",
+        "Board",
+        images=[ImageAsset("top", "assets/top.png", "top.png")],
+    )
+    store.save(project)
+
+    with pytest.raises(ProjectFormatError, match="missing or unreadable"):
+        ProjectStore(tmp_path / "board.revp").load()
+
+
 def test_project_with_both_images_and_display_round_trip(tmp_path: Path) -> None:
     project = ProjectDocument(
         "Project",
@@ -52,7 +68,9 @@ def test_project_with_both_images_and_display_round_trip(tmp_path: Path) -> None
         ],
         display=DisplaySettings("side_by_side", 2.5, 12.0, -4.0, False),
     )
-    store = ProjectStore(tmp_path / "project")
+    store = ProjectStore(tmp_path / "project.revp")
+    store.write_asset("assets/top.png", b"top")
+    store.write_asset("assets/bottom.jpg", b"bottom")
 
     store.save(project)
 

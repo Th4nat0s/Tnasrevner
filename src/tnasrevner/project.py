@@ -239,7 +239,9 @@ class ProjectStore:
             data = json.loads(self.project_file.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, json.JSONDecodeError) as error:
             raise ProjectFormatError(f"cannot read project: {error}") from error
-        return ProjectDocument.from_dict(data)
+        project = ProjectDocument.from_dict(data)
+        self._validate_assets(project)
+        return project
 
     def write_asset(self, relative_path: str, content: bytes) -> None:
         """Store asset bytes in the archive or project directory."""
@@ -263,6 +265,28 @@ class ProjectStore:
         except (KeyError, OSError) as error:
             raise ProjectFormatError(f"cannot read asset: {relative_path}") from error
 
+    def remove_asset(self, relative_path: str) -> None:
+        """Remove one imported asset from archive or legacy project directory."""
+        relative_path = _relative_asset_path(relative_path)
+        if self.is_archive:
+            self._assets.pop(relative_path, None)
+            return
+        try:
+            (self.root / relative_path).unlink()
+        except FileNotFoundError:
+            pass
+
+    def _validate_assets(self, project: ProjectDocument) -> None:
+        """Reject projects referencing missing or empty image assets."""
+        for image in project.images:
+            try:
+                if not self.read_asset(image.path):
+                    raise ProjectFormatError(f"image asset is empty: {image.path}")
+            except ProjectFormatError as error:
+                raise ProjectFormatError(
+                    f"missing or unreadable image asset: {image.path}"
+                ) from error
+
     def _load_archive(self) -> ProjectDocument:
         try:
             with ZipFile(self.project_file) as archive:
@@ -280,4 +304,6 @@ class ProjectStore:
             json.JSONDecodeError,
         ) as error:
             raise ProjectFormatError(f"cannot read project archive: {error}") from error
-        return ProjectDocument.from_dict(data)
+        project = ProjectDocument.from_dict(data)
+        self._validate_assets(project)
+        return project
