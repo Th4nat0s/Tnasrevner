@@ -14,7 +14,7 @@ CURRENT_FORMAT_VERSION = 1
 PROJECT_FILENAME = "project.json"
 PROJECT_ARCHIVE_SUFFIX = ".revp"
 _SIDES = frozenset({"top", "bottom"})
-_DISPLAY_MODES = frozenset({"top", "bottom", "side_by_side"})
+_DISPLAY_MODES = frozenset({"top", "bottom", "side_by_side", "both"})
 
 
 class ProjectFormatError(ValueError):

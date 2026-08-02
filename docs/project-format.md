@@ -32,5 +32,8 @@ must be relative, use `/` separators, and cannot escape the project root.
 Unknown future fields are ignored when reading; unsupported format versions are
 rejected explicitly.
 
+Display mode `both` overlays the top image with the bottom image mirrored
+horizontally. This is a view preference only; source images remain unchanged.
+
 The ZIP is written atomically through a temporary file. Source pictures are read
 and copied into the archive; original files are never modified.

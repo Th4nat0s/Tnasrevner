@@ -20,7 +20,7 @@ from PySide6.QtCore import (
     QTimer,
     Qt,
 )
-from PySide6.QtGui import QAction, QCloseEvent, QCursor, QPixmap, QTransform
+from PySide6.QtGui import QAction, QCloseEvent, QCursor, QPainter, QPixmap, QTransform
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -349,6 +349,12 @@ class ImageView(QScrollArea):
         self._scale = 1.0
         self._render()
 
+    def set_pixmap(self, pixmap: QPixmap) -> None:
+        """Display an already composed pixmap."""
+        self._pixmap = pixmap
+        self._scale = 1.0
+        self._render()
+
     def wheelEvent(self, event) -> None:  # noqa: N802  # pylint: disable=invalid-name
         """Zoom image with Ctrl+wheel, preserving normal scroll behavior."""
         if (
@@ -512,6 +518,8 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         side_layout.addWidget(self._side_views["top"])
         side_layout.addWidget(self._side_views["bottom"])
         self._tabs.addTab(side_by_side, "Top + bottom")
+        self._overlay_view = ImageView("No top/bottom images")
+        self._tabs.addTab(self._overlay_view, "Both")
         self.setCentralWidget(self._tabs)
         self._create_actions()
         self._create_tool_palette()
@@ -560,7 +568,9 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
             return [self._views["top"]]
         if self._tabs.currentIndex() == 1:
             return [self._views["bottom"]]
-        return list(self._side_views.values())
+        if self._tabs.currentIndex() == 2:
+            return list(self._side_views.values())
+        return [self._overlay_view]
 
     def _actual_size(self) -> None:
         """Set active image view(s) to 1:1 scale."""
@@ -663,7 +673,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
                 self, "No project", "Create or open a project first."
             )
             return False
-        self.project.display.mode = ("top", "bottom", "side_by_side")[
+        self.project.display.mode = ("top", "bottom", "side_by_side", "both")[
             self._tabs.currentIndex()
         ]
         try:
@@ -801,6 +811,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
             else:
                 path = self.store.root / asset.path if asset and self.store else None
                 view.set_image(path if path and path.is_file() else None)
+        self._refresh_overlay()
         for side, view in self._side_views.items():
             asset = next(
                 (
@@ -817,8 +828,57 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
                 view.set_image(path if path and path.is_file() else None)
         if self.project:
             self._tabs.setCurrentIndex(
-                {"top": 0, "bottom": 1, "side_by_side": 2}[self.project.display.mode]
+                {"top": 0, "bottom": 1, "side_by_side": 2, "both": 3}[
+                    self.project.display.mode
+                ]
             )
+
+    def _refresh_overlay(self) -> None:
+        """Compose top and mirrored bottom images into the Both view."""
+        images = {
+            side: self._pixmap_for_asset(side)
+            for side in ("top", "bottom")
+        }
+        top = images["top"]
+        bottom = images["bottom"]
+        base = top if not top.isNull() else bottom
+        if base.isNull():
+            self._overlay_view.set_pixmap(QPixmap())
+            return
+        canvas = QPixmap(base.size())
+        canvas.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(canvas)
+        if not bottom.isNull():
+            mirrored = bottom.scaled(
+                base.size(),
+                Qt.AspectRatioMode.IgnoreAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            ).transformed(QTransform().scale(-1, 1))
+            painter.setOpacity(0.5)
+            painter.drawPixmap(0, 0, mirrored)
+        if not top.isNull():
+            top = top.scaled(
+                base.size(),
+                Qt.AspectRatioMode.IgnoreAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            painter.setOpacity(0.5 if not bottom.isNull() else 1.0)
+            painter.drawPixmap(0, 0, top)
+        painter.end()
+        self._overlay_view.set_pixmap(canvas)
+
+    def _pixmap_for_asset(self, side: str) -> QPixmap:
+        """Load one project image for overlay composition."""
+        if not self.project or not self.store:
+            return QPixmap()
+        asset = next((image for image in self.project.images if image.side == side), None)
+        if not asset:
+            return QPixmap()
+        if self.store.is_archive:
+            pixmap = QPixmap()
+            pixmap.loadFromData(self.store.read_asset(asset.path))
+            return pixmap
+        return QPixmap(str(self.store.root / asset.path))
 
     def _update_title(self) -> None:
         name = self.project.project_name if self.project else "No project"
