@@ -4,7 +4,7 @@ from __future__ import annotations
 
 # PySide6 exposes Qt classes through compiled extension modules; Pylint cannot
 # inspect those names despite them being available at runtime.
-# pylint: disable=no-name-in-module
+# pylint: disable=no-name-in-module,invalid-name
 
 from pathlib import Path
 import sys
@@ -103,13 +103,22 @@ class ImageView(QScrollArea):
             self._label.setText(self._empty_text)
             return
         self._label.setText("")
+        viewport = self.viewport().size()
+        width_ratio = viewport.width() / self._pixmap.width()
+        height_ratio = viewport.height() / self._pixmap.height()
+        fit_scale = min(1.0, width_ratio, height_ratio)
         self._label.setPixmap(
             self._pixmap.scaled(
-                self._pixmap.size() * self._scale,
+                self._pixmap.size() * (fit_scale * self._scale),
                 Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation,
             )
         )
+
+    def resizeEvent(self, event) -> None:  # noqa: N802  # pylint: disable=invalid-name
+        """Keep the image fitted after resizing its view."""
+        self._render()
+        super().resizeEvent(event)
 
 
 class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
@@ -286,7 +295,21 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
 
     def _refresh_views(self) -> None:
         """Reload both picture views from project-relative asset paths."""
-        for side, view in {**self._views, **self._side_views}.items():
+        for side, view in self._views.items():
+            asset = next(
+                (
+                    image
+                    for image in (self.project.images if self.project else [])
+                    if image.side == side
+                ),
+                None,
+            )
+            if asset and self.store and self.store.is_archive:
+                view.set_image_data(self.store.read_asset(asset.path))
+            else:
+                path = self.store.root / asset.path if asset and self.store else None
+                view.set_image(path if path and path.is_file() else None)
+        for side, view in self._side_views.items():
             asset = next(
                 (
                     image
