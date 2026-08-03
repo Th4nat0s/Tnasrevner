@@ -1495,6 +1495,7 @@ class ImageView(
         self._pixmap = QPixmap()
         self._scale = 1.0
         self._zoom_revision = 0
+        self._zoom_render_pending = False
         self._drag_position: QPoint | None = None
         self._temporary_pan = False
         self._pad_placement = False
@@ -1531,6 +1532,7 @@ class ImageView(
     def set_image(self, path: Path | None) -> None:
         """Display image at its native scale, or show an empty state."""
         self._zoom_revision += 1
+        self._zoom_render_pending = False
         self._pixmap = QPixmap(str(path)) if path else QPixmap()
         self._scale = 1.0
         self._render()
@@ -1538,6 +1540,7 @@ class ImageView(
     def set_image_data(self, content: bytes) -> None:
         """Display image bytes loaded from a `.revp` archive."""
         self._zoom_revision += 1
+        self._zoom_render_pending = False
         self._pixmap = QPixmap()
         self._pixmap.loadFromData(content)
         self._scale = 1.0
@@ -1546,6 +1549,7 @@ class ImageView(
     def set_pixmap(self, pixmap: QPixmap) -> None:
         """Display an already composed pixmap."""
         self._zoom_revision += 1
+        self._zoom_render_pending = False
         self._pixmap = pixmap
         self._scale = 1.0
         self._render()
@@ -1969,14 +1973,19 @@ class ImageView(
             old_label_point.y() / old_effective,
         )
         self._scale = max(0.1, min(self._scale * factor, 20.0))
-        self._render(smooth=False)
+        if not self._zoom_render_pending:
+            self._render(smooth=False)
+            self._zoom_render_pending = True
         zoom_anchor = None if centered else anchor
         self._restore_zoom_anchor(source_point, zoom_anchor)
         QTimer.singleShot(
             0,
             lambda: self._finish_zoom_anchor(revision, source_point, zoom_anchor),
         )
-        QTimer.singleShot(100, lambda: self._finish_zoom_render(revision))
+        QTimer.singleShot(
+            80,
+            lambda: self._finish_zoom_render(revision, source_point, zoom_anchor),
+        )
         self.view_changed.emit()
 
     def _finish_zoom_anchor(
@@ -2012,10 +2021,15 @@ class ImageView(
             vertical.value() + new_label_point.y() - current_label_point.y()
         )
 
-    def _finish_zoom_render(self, revision: int) -> None:
+    def _finish_zoom_render(
+        self, revision: int, source_point: QPointF, anchor: QPoint | None
+    ) -> None:
         """Replace the fast zoom preview with a smooth render when idle."""
-        if revision == self._zoom_revision:
-            self._render(smooth=True)
+        if revision != self._zoom_revision:
+            return
+        self._zoom_render_pending = False
+        self._render(smooth=True)
+        self._restore_zoom_anchor(source_point, anchor)
 
     def _render(self, smooth: bool = True) -> None:
         if self._pixmap.isNull():
@@ -2124,6 +2138,7 @@ class ImageView(
     def fit_image(self) -> None:
         """Fit image inside current view."""
         self._zoom_revision += 1
+        self._zoom_render_pending = False
         self._scale = 1.0
         self._render()
         self.view_changed.emit()
@@ -2131,6 +2146,7 @@ class ImageView(
     def actual_size(self) -> None:
         """Show image at 1:1 source-pixel scale."""
         self._zoom_revision += 1
+        self._zoom_render_pending = False
         fit_scale = self._fit_scale()
         self._scale = 1.0 / fit_scale if fit_scale else 1.0
         self._render()
