@@ -42,8 +42,10 @@ Placement creates every named footprint pad automatically. Pad identities combin
 the reference and KiCad pad number (`U1.1`, `U1.2`, and so on). Repeated physical
 shapes carrying the same KiCad number are grouped into one logical pad. Bottom-side
 geometry is mirrored automatically. Footprint millimeter dimensions are converted
-with the selected image's calibration, so preview, outline, and pads remain at 1:1
-physical scale through FIT and zoom changes.
+directly from the saved measurement line and its entered millimeter length, so
+preview, outline, and pads remain at 1:1 physical scale through FIT and zoom changes.
+The measurement field accepts either `30.5` or `30,5`. Legacy images that do not
+contain both measurement values must be recalibrated once through **Edit image**.
 
 The first implementation accepts standard rectangular, circular, oval, rounded
 rectangle, and trapezoid pads. Unsupported custom pad shapes and malformed files are

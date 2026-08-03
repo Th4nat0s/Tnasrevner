@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 import json
+import math
 from pathlib import Path, PurePosixPath
 from typing import Any
 from uuid import uuid4
@@ -53,6 +54,7 @@ class ImageAsset:
     pixels_per_mm: float | None = None
     original_path: str | None = None
     calibration_line: tuple[float, float, float, float] | None = None
+    calibration_length_mm: float | None = None
 
     def __post_init__(self) -> None:
         if self.side not in _SIDES:
@@ -65,11 +67,39 @@ class ImageAsset:
             raise ProjectFormatError("image pixels_per_mm must be positive")
         if self.calibration_line is not None:
             if len(self.calibration_line) != 4 or not all(
-                isinstance(value, (int, float)) for value in self.calibration_line
+                isinstance(value, (int, float)) and math.isfinite(value)
+                for value in self.calibration_line
             ):
                 raise ProjectFormatError(
                     "image calibration_line must have four numbers"
                 )
+        if self.calibration_length_mm is not None and (
+            not isinstance(self.calibration_length_mm, (int, float))
+            or not math.isfinite(self.calibration_length_mm)
+            or self.calibration_length_mm <= 0
+        ):
+            raise ProjectFormatError(
+                "image calibration_length_mm must be a positive number"
+            )
+        if self.calibration_length_mm is not None and self.calibration_line is None:
+            raise ProjectFormatError(
+                "image calibration_length_mm requires calibration_line"
+            )
+
+    def measured_pixels_per_mm(
+        self, image_width: int, image_height: int
+    ) -> float | None:
+        """Derive physical scale directly from the saved line and real length."""
+        if self.calibration_line is None or self.calibration_length_mm is None:
+            return None
+        start_x, start_y, end_x, end_y = self.calibration_line
+        line_pixels = math.hypot(
+            (end_x - start_x) * image_width,
+            (end_y - start_y) * image_height,
+        )
+        if line_pixels <= 0:
+            return None
+        return line_pixels / self.calibration_length_mm
 
     def to_dict(self) -> dict[str, Any]:
         """Return JSON-compatible image data."""
@@ -80,6 +110,7 @@ class ImageAsset:
             "pixels_per_mm": self.pixels_per_mm,
             "original_path": self.original_path,
             "calibration_line": self.calibration_line,
+            "calibration_length_mm": self.calibration_length_mm,
         }
 
     @classmethod
@@ -100,6 +131,7 @@ class ImageAsset:
                 if data.get("calibration_line") is not None
                 else None
             ),
+            calibration_length_mm=data.get("calibration_length_mm"),
         )
 
 

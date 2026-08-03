@@ -22,6 +22,7 @@ from PySide6.QtCore import (
     QEvent,
     QIODevice,
     QLineF,
+    QLocale,
     QObject,
     QPoint,
     QPointF,
@@ -198,6 +199,25 @@ class StartupDialog(QMessageBox):  # pylint: disable=too-few-public-methods
         return None
 
 
+class MeasurementSpinBox(QDoubleSpinBox):
+    """Decimal measurement input accepting both `.` and `,` separators."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setLocale(QLocale.c())
+
+    def validate(self, text: str, position: int):
+        """Validate comma input with the locale-independent decimal parser."""
+        state, _normalized, _position = super().validate(
+            text.replace(",", "."), position
+        )
+        return state, text, position
+
+    def valueFromText(self, text: str) -> float:  # noqa: N802
+        """Parse either common decimal separator without changing magnitude."""
+        return super().valueFromText(text.replace(",", "."))
+
+
 class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-statements,too-many-return-statements,too-many-branches
     QDialog
 ):
@@ -240,7 +260,7 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         crop_button.clicked.connect(lambda: self._set_edit_mode("crop"))
         self._calibration_button = calibration_button
         self._crop_button = crop_button
-        millimeters = QDoubleSpinBox()
+        millimeters = MeasurementSpinBox()
         millimeters.setRange(0.0, 1_000_000.0)
         millimeters.setDecimals(3)
         millimeters.setSuffix(" mm")
@@ -290,7 +310,8 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         layout = QVBoxLayout(self)
         layout.addWidget(
             QLabel(
-                "Draw scale line, enter real length in mm, then select crop rectangle."
+                "Draw scale line, enter real length in mm (30.5 or 30,5), "
+                "then select crop rectangle."
             )
         )
         layout.addWidget(self._scroll)
@@ -303,6 +324,7 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         self,
         pixels_per_mm: float,
         calibration_line: tuple[float, float, float, float] | None = None,
+        calibration_length_mm: float | None = None,
     ) -> None:
         """Start editing with the existing crop and scale still valid."""
         if pixels_per_mm <= 0:
@@ -313,24 +335,27 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         if calibration_line is None:
             start = QPoint(1, max(1, height // 2))
             end = QPoint(width, max(1, height // 2))
+            self._set_calibration_line(start, end)
         else:
-            start = QPoint(
-                round(calibration_line[0] * self._source.width() * self._display_scale),
-                round(
-                    calibration_line[1] * self._source.height() * self._display_scale
+            # The calibration line may intentionally sit outside the crop. Keep
+            # its source coordinates instead of clamping it to the working image.
+            self._calibration_line = (
+                QPointF(
+                    calibration_line[0] * self._source.width(),
+                    calibration_line[1] * self._source.height(),
+                ),
+                QPointF(
+                    calibration_line[2] * self._source.width(),
+                    calibration_line[3] * self._source.height(),
                 ),
             )
-            end = QPoint(
-                round(calibration_line[2] * self._source.width() * self._display_scale),
-                round(
-                    calibration_line[3] * self._source.height() * self._display_scale
-                ),
-            )
-        self._set_calibration_line(start, end)
         if self._calibration_line is not None:
-            self._millimeters.setValue(
-                QLineF(*self._calibration_line).length() / pixels_per_mm
-            )
+            if calibration_length_mm is not None:
+                self._millimeters.setValue(calibration_length_mm)
+            else:
+                self._millimeters.setValue(
+                    QLineF(*self._calibration_line).length() / pixels_per_mm
+                )
         self._update_confirm_state()
 
     def eventFilter(
@@ -458,6 +483,10 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
     def calibration_line(self) -> tuple[float, float, float, float] | None:
         """Return accepted scale-line coordinates normalized to output image."""
         return self._result_calibration_line
+
+    def calibration_length_mm(self) -> float:
+        """Return the exact real-world length entered for the scale line."""
+        return self._millimeters.value()
 
     def _set_edit_mode(self, mode: str) -> None:
         """Switch between scale-line and crop-rectangle drawing."""
@@ -1608,11 +1637,27 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
                 self, "No project", "Create or open a project first."
             )
             return
-        if not any(image.pixels_per_mm for image in self.project.images):
+        has_measurement = False
+        for image in self.project.images:
+            pixmap = self._base_pixmap_for_asset(image.side)
+            if (
+                image.measured_pixels_per_mm(pixmap.width(), pixmap.height())
+                is not None
+            ):
+                has_measurement = True
+                break
+        if not has_measurement:
+            legacy_scale = any(image.pixels_per_mm for image in self.project.images)
             QMessageBox.information(
                 self,
                 "No calibrated image",
-                "Import and calibrate a board image before adding a device.",
+                (
+                    "This project has legacy scale data but no saved measurement "
+                    "line. Use Edit image, redraw the scale line, and enter its "
+                    "real length in mm."
+                    if legacy_scale
+                    else "Import and calibrate a board image before adding a device."
+                ),
             )
             return
         self._add_device_pending = True
@@ -1782,11 +1827,14 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         """Arm every calibrated board-side view for footprint placement."""
         if not self.project:
             return
-        calibrated = {
-            image.side: image
-            for image in self.project.images
-            if image.pixels_per_mm is not None
-        }
+        calibrated: dict[str, tuple[ImageAsset, float]] = {}
+        for image in self.project.images:
+            pixmap = self._base_pixmap_for_asset(image.side)
+            pixels_per_mm = image.measured_pixels_per_mm(
+                pixmap.width(), pixmap.height()
+            )
+            if pixels_per_mm is not None:
+                calibrated[image.side] = (image, pixels_per_mm)
         if not calibrated:
             return
         self._cancel_device_placement(clear_status=False)
@@ -1801,9 +1849,15 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
             self._tabs.setCurrentIndex(0 if side == "top" else 1)
             views = {side: self._views[side]}
         for side, view in views.items():
-            image = calibrated.get(side)
-            if image and image.pixels_per_mm is not None and view.has_image():
-                view.set_device_placement(footprint, image.pixels_per_mm, side, 0.0)
+            calibration = calibrated.get(side)
+            if calibration and view.has_image():
+                _image, pixels_per_mm = calibration
+                view.set_device_placement(footprint, pixels_per_mm, side, 0.0)
+                LOGGER.info(
+                    "Footprint preview scale side=%s pixels_per_mm=%.6f",
+                    side,
+                    pixels_per_mm,
+                )
         self.statusBar().showMessage(
             f"Place {reference}: left click to place, right click rotates 45°, Esc cancels."
         )
@@ -1833,17 +1887,19 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
             return
         view_state = self._active_views()[0].view_state()
         image = next(
-            (
-                asset
-                for asset in self.project.images
-                if asset.side == side and asset.pixels_per_mm is not None
-            ),
-            None,
+            (asset for asset in self.project.images if asset.side == side), None
         )
         pixmap = self._base_pixmap_for_asset(side)
-        if image is None or image.pixels_per_mm is None or pixmap.isNull():
+        pixels_per_mm = (
+            image.measured_pixels_per_mm(pixmap.width(), pixmap.height())
+            if image is not None and not pixmap.isNull()
+            else None
+        )
+        if image is None or pixels_per_mm is None or pixmap.isNull():
             QMessageBox.warning(
-                self, "Cannot place device", "The selected image is not calibrated."
+                self,
+                "Cannot place device",
+                "The selected image needs a saved scale line and real length.",
             )
             return
         try:
@@ -1855,7 +1911,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
                 pending.rotation,
                 pixmap.width(),
                 pixmap.height(),
-                image.pixels_per_mm,
+                pixels_per_mm,
             )
             device_id = str(uuid4())
             device = Device(
@@ -2399,7 +2455,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         edited = self._edit_imported_image(QPixmap(str(source_path)))
         if edited is None:
             return
-        edited_image, pixels_per_mm, calibration_line = edited
+        edited_image, pixels_per_mm, calibration_line, calibration_length_mm = edited
         relative_path = f"assets/{side}.png"
         original_path = f"assets/original/{side}{source_path.suffix.lower()}"
         try:
@@ -2419,9 +2475,11 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
                 pixels_per_mm,
                 original_path,
                 calibration_line,
+                calibration_length_mm,
             )
         )
         self._image_cache.pop(side, None)
+        self._rebuild_device_pads(side, edited_image)
         self._dirty = True
         self._refresh_views()
         self._update_title()
@@ -2479,11 +2537,14 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
             QMessageBox.warning(self, "Edit failed", "Working image is unreadable.")
             return
         edited = self._edit_imported_image(
-            image, asset.pixels_per_mm, asset.calibration_line
+            image,
+            asset.pixels_per_mm,
+            asset.calibration_line,
+            asset.calibration_length_mm,
         )
         if edited is None:
             return
-        edited_image, pixels_per_mm, calibration_line = edited
+        edited_image, pixels_per_mm, calibration_line, calibration_length_mm = edited
         self.store.write_asset(asset.path, self._pixmap_bytes(edited_image))
         self.project.images = [
             (
@@ -2494,6 +2555,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
                     pixels_per_mm,
                     image.original_path,
                     calibration_line,
+                    calibration_length_mm,
                 )
                 if image.side == side
                 else image
@@ -2501,6 +2563,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
             for image in self.project.images
         ]
         self._image_cache.pop(side, None)
+        self._rebuild_device_pads(side, edited_image)
         self._dirty = True
         self._refresh_views()
         self._update_title()
@@ -2510,17 +2573,29 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         image: QPixmap,
         pixels_per_mm: float | None = None,
         calibration_line: tuple[float, float, float, float] | None = None,
-    ) -> tuple[QPixmap, float, tuple[float, float, float, float] | None] | None:
+        calibration_length_mm: float | None = None,
+    ) -> (
+        tuple[
+            QPixmap,
+            float,
+            tuple[float, float, float, float] | None,
+            float,
+        ]
+        | None
+    ):
         """Open editor and return image plus scale, or `None` on cancel."""
         dialog = ImageEditDialog(image, self)
         if pixels_per_mm is not None:
-            dialog.prepare_existing_image(pixels_per_mm, calibration_line)
+            dialog.prepare_existing_image(
+                pixels_per_mm, calibration_line, calibration_length_mm
+            )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return None
         return (
             dialog.result_pixmap(),
             dialog.pixels_per_mm(),
             dialog.calibration_line(),
+            dialog.calibration_length_mm(),
         )
 
     @staticmethod
@@ -2640,7 +2715,12 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         image = next(
             (asset for asset in self.project.images if asset.side == side), None
         )
-        if image is None or image.pixels_per_mm is None:
+        if image is None:
+            return
+        pixels_per_mm = image.measured_pixels_per_mm(pixmap.width(), pixmap.height())
+        if pixels_per_mm is None:
+            pixels_per_mm = image.pixels_per_mm
+        if pixels_per_mm is None:
             return
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -2658,7 +2738,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
             _paint_footprint(
                 painter,
                 footprint,
-                image.pixels_per_mm,
+                pixels_per_mm,
                 side,
                 device.rotation,
             )
@@ -2686,6 +2766,86 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
             return None
         self._device_footprint_cache[device.footprint_path] = footprint
         return footprint
+
+    def _rebuild_device_pads(self, side: str, pixmap: QPixmap) -> None:
+        """Recalculate generated pads after an image is recalibrated."""
+        if not self.project or pixmap.isNull():
+            return
+        image = next(
+            (asset for asset in self.project.images if asset.side == side), None
+        )
+        if image is None:
+            return
+        pixels_per_mm = image.measured_pixels_per_mm(pixmap.width(), pixmap.height())
+        if pixels_per_mm is None:
+            return
+        for device in [item for item in self.project.devices if item.side == side]:
+            footprint = self._footprint_for_device(device)
+            if footprint is None:
+                continue
+            try:
+                placed_pads = place_footprint_pads(
+                    footprint,
+                    side,
+                    device.x,
+                    device.y,
+                    device.rotation,
+                    pixmap.width(),
+                    pixmap.height(),
+                    pixels_per_mm,
+                )
+            except KiCadFormatError as error:
+                LOGGER.warning(
+                    "Cannot rebuild pads device=%s error=%s",
+                    device.reference,
+                    error,
+                )
+                continue
+            existing = {
+                pad.number: pad
+                for pad in self.project.pads
+                if pad.device_id == device.device_id and pad.number is not None
+            }
+            rebuilt = []
+            for placed in placed_pads:
+                previous = existing.get(placed.number)
+                if previous is None:
+                    rebuilt.append(
+                        Pad(
+                            f"{device.reference}.{placed.number}",
+                            side,
+                            placed.x,
+                            placed.y,
+                            width=placed.width,
+                            height=placed.height,
+                            device_id=device.device_id,
+                            number=placed.number,
+                            shape=placed.shape,
+                            rotation=placed.rotation,
+                        )
+                    )
+                else:
+                    rebuilt.append(
+                        replace(
+                            previous,
+                            side=side,
+                            x=placed.x,
+                            y=placed.y,
+                            width=placed.width,
+                            height=placed.height,
+                            shape=placed.shape,
+                            rotation=placed.rotation,
+                        )
+                    )
+            self.project.pads = [
+                pad for pad in self.project.pads if pad.device_id != device.device_id
+            ] + rebuilt
+            LOGGER.info(
+                "Rebuilt device pads reference=%s pixels_per_mm=%.6f pads=%s",
+                device.reference,
+                pixels_per_mm,
+                len(rebuilt),
+            )
 
     def _base_pixmap_for_asset(self, side: str) -> QPixmap:
         """Load and cache one undecorated working image."""

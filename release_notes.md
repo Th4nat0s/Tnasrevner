@@ -13,3 +13,5 @@
 - Added rotating application diagnostics available through Tools > Log file.
 - Added KiCad footprint caching and Add device placement with 45° right-click
   rotation, calibrated physical sizing, and automatically named footprint pads.
+- Fixed physical footprint sizing by retaining the exact calibration line and
+  millimeter length; decimal input now accepts both dot and comma separators.

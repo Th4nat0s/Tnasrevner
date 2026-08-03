@@ -13,7 +13,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PySide6.QtCore import QPoint, Qt
-from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtGui import QImage, QPixmap, QValidator
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
     QApplication,
@@ -263,7 +263,14 @@ def test_add_device_rotates_and_creates_named_footprint_pads(
         "assets/top.png", window._pixmap_bytes(QPixmap.fromImage(image))
     )
     window.project.images.append(
-        ImageAsset("top", "assets/top.png", "top.png", pixels_per_mm=10)
+        ImageAsset(
+            "top",
+            "assets/top.png",
+            "top.png",
+            pixels_per_mm=1,
+            calibration_line=(0.0, 0.5, 1.0, 0.5),
+            calibration_length_mm=20,
+        )
     )
     window._refresh_views()
     source = FootprintReference("Resistor_SMD", "R_0603", tmp_path / "R_0603.kicad_mod")
@@ -314,7 +321,14 @@ def test_add_device_selects_footprint_before_asking_reference(
         "assets/top.png", window._pixmap_bytes(QPixmap.fromImage(image))
     )
     window.project.images.append(
-        ImageAsset("top", "assets/top.png", "top.png", pixels_per_mm=10)
+        ImageAsset(
+            "top",
+            "assets/top.png",
+            "top.png",
+            pixels_per_mm=1,
+            calibration_line=(0.0, 0.5, 1.0, 0.5),
+            calibration_length_mm=10,
+        )
     )
     window._refresh_views()
     source = FootprintReference("Resistor_SMD", "R_0603", tmp_path / "R_0603.kicad_mod")
@@ -368,6 +382,73 @@ def test_add_device_selects_footprint_before_asking_reference(
     assert order == ["footprint", "reference"]
     assert window._pending_device is not None
     assert window._pending_device.reference == "R1"
+
+
+def test_add_device_requires_saved_measurement_for_legacy_image(
+    window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A derived legacy number alone cannot guarantee physical device size."""
+    window.store = ProjectStore(tmp_path / "legacy.revp")
+    window.project = ProjectDocument(
+        "Project",
+        "Board",
+        images=[ImageAsset("top", "assets/top.png", "top.png", pixels_per_mm=3.199)],
+    )
+    image = QImage(100, 100, QImage.Format.Format_RGB32)
+    image.fill(0xFFFFFF)
+    window.store.write_asset(
+        "assets/top.png", window._pixmap_bytes(QPixmap.fromImage(image))
+    )
+    messages: list[str] = []
+    monkeypatch.setattr(
+        "tnasrevner.gui.QMessageBox.information",
+        lambda _parent, _title, message: messages.append(message),
+    )
+
+    window.add_device()
+
+    assert messages and "legacy scale data" in messages[0]
+    assert not window._add_device_pending
+
+
+def test_recalibration_rebuilds_existing_device_pads(
+    window: MainWindow, tmp_path: Path
+) -> None:
+    """Changing the saved measurement updates generated pad geometry."""
+    window.store = ProjectStore(tmp_path / "board.revp")
+    window.project = ProjectDocument("Project", "Board")
+    image = QImage(200, 200, QImage.Format.Format_RGB32)
+    image.fill(0xFFFFFF)
+    pixmap = QPixmap.fromImage(image)
+    window.store.write_asset("assets/top.png", window._pixmap_bytes(pixmap))
+    window.project.images.append(
+        ImageAsset(
+            "top",
+            "assets/top.png",
+            "top.png",
+            pixels_per_mm=10,
+            calibration_line=(0.0, 0.5, 1.0, 0.5),
+            calibration_length_mm=20,
+        )
+    )
+    source = FootprintReference("Resistor_SMD", "R_0603", tmp_path / "R.kicad_mod")
+    footprint = parse_footprint(FOOTPRINT, source.library)
+    window._begin_device_placement("R1", source, footprint, FOOTPRINT, "a" * 40)
+    window._place_device("top", 0.5, 0.5)
+    original_pad_id = window.project.pads[0].pad_id
+
+    window.project.images[0] = ImageAsset(
+        "top",
+        "assets/top.png",
+        "top.png",
+        pixels_per_mm=10,
+        calibration_line=(0.0, 0.5, 1.0, 0.5),
+        calibration_length_mm=10,
+    )
+    window._rebuild_device_pads("top", pixmap)
+
+    assert window.project.pads[0].width * image.width() == pytest.approx(20)
+    assert window.project.pads[0].pad_id == original_pad_id
 
 
 def test_clicking_pad_toggles_links_without_resetting_zoom(
@@ -552,7 +633,7 @@ def test_import_image_stores_selected_side(
     monkeypatch.setattr(
         window,
         "_edit_imported_image",
-        lambda image: (image, 10.0, (0.1, 0.2, 0.8, 0.2)),
+        lambda image: (image, 10.0, (0.1, 0.2, 0.8, 0.2), 7.0),
     )
 
     window.import_picture()
@@ -563,6 +644,7 @@ def test_import_image_stores_selected_side(
     assert original_path == "assets/original/top.png"
     assert window.store.read_asset(original_path).startswith(b"\x89PNG")
     assert window.project.images[0].calibration_line == (0.1, 0.2, 0.8, 0.2)
+    assert window.project.images[0].calibration_length_mm == 7.0
 
 
 def test_import_editor_supports_free_rotation_and_zoom(app: QApplication) -> None:
@@ -615,6 +697,18 @@ def test_import_editor_requires_scale_and_calculates_pixels_per_mm(
     dialog.close()
 
 
+def test_import_measurement_accepts_dot_and_comma_decimals(app: QApplication) -> None:
+    """macOS locale must not turn 30.5 mm into 305 mm."""
+    image = QImage(200, 100, QImage.Format.Format_RGB32)
+    image.fill(0xFFFFFF)
+    dialog = ImageEditDialog(QPixmap.fromImage(image))
+
+    assert dialog._millimeters.valueFromText("30.5 mm") == pytest.approx(30.5)
+    assert dialog._millimeters.valueFromText("30,5 mm") == pytest.approx(30.5)
+    assert dialog._millimeters.validate("30,5 mm", 4)[0] == QValidator.State.Acceptable
+    dialog.close()
+
+
 def test_editing_existing_image_preserves_physical_scale(app: QApplication) -> None:
     """FIT display scaling must not alter persisted source pixels per mm."""
     image = QImage(2000, 1000, QImage.Format.Format_RGB32)
@@ -624,9 +718,10 @@ def test_editing_existing_image_preserves_physical_scale(app: QApplication) -> N
     dialog._render()
     assert dialog._display_scale < 1
 
-    dialog.prepare_existing_image(25.0, (0.1, 0.5, 0.6, 0.5))
+    dialog.prepare_existing_image(25.0, (0.1, 0.5, 0.6, 0.5), 40.0)
 
     assert dialog.pixels_per_mm() == pytest.approx(25.0, rel=0.01)
+    assert dialog.calibration_length_mm() == 40.0
     dialog.close()
 
 

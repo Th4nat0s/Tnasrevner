@@ -65,6 +65,7 @@ def test_revp_archive_keeps_original_and_working_image(tmp_path: Path) -> None:
                 10.0,
                 "assets/original/top.jpg",
                 (0.1, 0.2, 0.8, 0.2),
+                30.5,
             )
         ],
     )
@@ -77,7 +78,21 @@ def test_revp_archive_keeps_original_and_working_image(tmp_path: Path) -> None:
 
     assert loaded.images[0].original_path == "assets/original/top.jpg"
     assert loaded.images[0].calibration_line == (0.1, 0.2, 0.8, 0.2)
+    assert loaded.images[0].calibration_length_mm == 30.5
     assert loaded_store.read_asset("assets/original/top.jpg") == b"original"
+
+
+def test_image_scale_is_derived_from_saved_measurement() -> None:
+    image = ImageAsset(
+        "top",
+        "assets/top.png",
+        "top.png",
+        pixels_per_mm=3.2,
+        calibration_line=(0.1, 0.5, 0.9, 0.5),
+        calibration_length_mm=40.0,
+    )
+
+    assert image.measured_pixels_per_mm(1000, 500) == pytest.approx(20.0)
 
 
 def test_missing_archive_asset_is_rejected(tmp_path: Path) -> None:
