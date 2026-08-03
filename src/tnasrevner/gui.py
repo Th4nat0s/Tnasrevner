@@ -12,6 +12,7 @@ from dataclasses import dataclass, replace
 import logging
 from logging.handlers import RotatingFileHandler
 import math
+import os
 from pathlib import Path
 import re
 import sys
@@ -43,6 +44,7 @@ from PySide6.QtGui import (
     QColor,
     QCloseEvent,
     QCursor,
+    QIcon,
     QPainter,
     QPen,
     QPixmap,
@@ -95,12 +97,19 @@ from .project import (
     ProjectStore,
 )
 
+
+def _application_icon() -> QIcon:
+    """Load application icon from package data."""
+    return QIcon(str(Path(__file__).with_name("assets") / "tnasrevner.svg"))
+
+
 LOGGER = logging.getLogger("tnasrevner")
 _LOG_PATH: Path | None = None
 _DEVICE_REFERENCE = re.compile(r"[A-Za-z][A-Za-z0-9_.+\-]{0,63}\Z")
 _NUMBERED_DEVICE_REFERENCE = re.compile(r"([A-Za-z]+)([0-9]+)\Z")
 _RECENT_FOOTPRINTS_KEY = "kicad/recent-footprints"
 _REFERENCE_PREFIX_KEY = "kicad/reference-prefix"
+_LAST_PROJECT_DIRECTORY_KEY = "projects/last-directory"
 _MAX_RECENT_FOOTPRINTS = 5
 _DEFAULT_REFERENCE_PREFIXES = {
     "antenna": "AE",
@@ -375,7 +384,8 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         layout.addWidget(
             QLabel(
                 "Draw a scale line, or choose a KiCad footprint and resize it "
-                "over the photo, then select the crop rectangle."
+                "over the photo (drag the yellow corner handle to resize and "
+                "the square to move it), then select the crop rectangle."
             )
         )
         layout.addWidget(self._scroll)
@@ -445,40 +455,46 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
             return True
         if self._edit_mode == "footprint":
             if event.type() == QEvent.Type.MouseButtonPress:
+                self._footprint_drag_mode = None
                 if event.button() == Qt.MouseButton.RightButton:
                     self._footprint_rotation = (self._footprint_rotation + 45.0) % 360.0
                     self._render()
                     return True
                 if event.button() == Qt.MouseButton.LeftButton:
-                    point = QPointF(
-                        event.position().x() / self._display_scale,
-                        event.position().y() / self._display_scale,
-                    )
+                    point = self._footprint_source_point(event.position())
                     center = self._footprint_center
                     footprint = self._calibration_footprint
                     if center is None or footprint is None:
                         return True
                     radius = footprint.radius() * self._footprint_pixels_per_mm
                     handle = center + QPointF(radius, radius)
-                    if QLineF(point, handle).length() <= max(
-                        12.0 / self._display_scale, 4.0
-                    ):
+                    hit_radius = min(
+                        max(16.0 / self._display_scale, 4.0),
+                        max(radius * 0.75, 4.0),
+                    )
+                    if QLineF(point, handle).length() <= hit_radius:
                         self._footprint_drag_mode = "scale"
-                    elif QLineF(point, center).length() <= radius:
+                    elif QRectF(
+                        center.x() - radius,
+                        center.y() - radius,
+                        radius * 2,
+                        radius * 2,
+                    ).contains(point):
                         self._footprint_drag_mode = "move"
                         self._footprint_drag_offset = point - center
                     else:
                         self._footprint_drag_mode = None
                     return True
             if event.type() == QEvent.Type.MouseMove and self._footprint_drag_mode:
-                point = QPointF(
-                    event.position().x() / self._display_scale,
-                    event.position().y() / self._display_scale,
-                )
+                point = self._footprint_source_point(event.position())
                 if self._footprint_drag_mode == "scale":
-                    radius = max(self._calibration_footprint.radius(), 0.1)
-                    distance = QLineF(self._footprint_center, point).length()
-                    self._footprint_pixels_per_mm = max(0.01, distance / radius)
+                    center = self._footprint_center
+                    footprint = self._calibration_footprint
+                    if center is None or footprint is None:
+                        return True
+                    footprint_radius = max(footprint.radius(), 0.1)
+                    radius = max(point.x() - center.x(), point.y() - center.y(), 0.2)
+                    self._footprint_pixels_per_mm = max(0.01, radius / footprint_radius)
                 else:
                     self._footprint_center = point - self._footprint_drag_offset
                 self._render()
@@ -550,6 +566,13 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
             self._set_resize_cursor(event.position().toPoint())
             return False
         return super().eventFilter(watched, event)
+
+    def _footprint_source_point(self, point: QPointF) -> QPointF:
+        """Convert a canvas point to source-image coordinates."""
+        return QPointF(
+            point.x() / self._display_scale,
+            point.y() / self._display_scale,
+        )
 
     def accept(self) -> None:
         """Crop selected area and close editor."""
@@ -1776,6 +1799,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         self._pad_menu: QMenu | None = None
         self._last_view_key: int | None = None
         self._last_view_time = 0.0
+        self.setWindowIcon(_application_icon())
         self.setWindowTitle("Tnasrevner")
         self.resize(1100, 700)
         self._views = {
@@ -2956,13 +2980,17 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         path, _ = QFileDialog.getSaveFileName(
-            self, "Create project", "", "Tnasrevner project (*.revp)"
+            self,
+            "Create project",
+            str(self._last_project_directory()),
+            "Tnasrevner project (*.revp)",
         )
         if not path:
             return
         project_path = Path(path)
         if project_path.suffix.lower() != ".revp":
             project_path = project_path.with_suffix(".revp")
+        self._remember_project_directory(project_path)
         self.store = ProjectStore(project_path)
         self.project = ProjectDocument(
             dialog.project_name.text(), dialog.board_name.text()
@@ -2979,10 +3007,14 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         if not self._confirm_pending_changes():
             return
         path, _ = QFileDialog.getOpenFileName(
-            self, "Open project", "", "Tnasrevner project (*.revp)"
+            self,
+            "Open project",
+            str(self._last_project_directory()),
+            "Tnasrevner project (*.revp)",
         )
         if not path:
             return
+        self._remember_project_directory(Path(path))
         try:
             store = ProjectStore(Path(path))
             project = store.load()
@@ -2995,6 +3027,24 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         self._cancel_device_placement()
         self._refresh_views()
         self._update_title()
+
+    def _last_project_directory(self) -> Path:
+        """Return remembered project directory, falling back if it vanished."""
+        value = self._settings.value(_LAST_PROJECT_DIRECTORY_KEY, "")
+        if isinstance(value, str):
+            directory = Path(value).expanduser()
+            if directory.is_dir():
+                return directory
+        home = Path.home()
+        return home if home.is_dir() else Path.cwd()
+
+    def _remember_project_directory(self, project_path: Path) -> None:
+        """Persist project parent directory for the next file dialog."""
+        directory = project_path.expanduser().parent
+        if not directory.is_dir():
+            return
+        self._settings.setValue(_LAST_PROJECT_DIRECTORY_KEY, str(directory))
+        self._settings.sync()
 
     def save_project(self) -> bool:
         """Save project metadata and current display tab."""
@@ -3644,9 +3694,13 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
 
 def main() -> int:
     """Run Tnasrevner GUI."""
+    # GNOME/Wayland matches windows to desktop entries through app_id.
+    os.environ.setdefault("QT_WAYLAND_APP_ID", "tnasrevner")
     app = QApplication(sys.argv)
-    app.setApplicationName("Tnasrevner")
+    app.setApplicationName("tnasrevner")
     app.setApplicationDisplayName("Tnasrevner")
+    app.setDesktopFileName("tnasrevner")
+    app.setWindowIcon(_application_icon())
     _configure_logging()
     window = MainWindow()
     window.show()

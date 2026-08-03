@@ -105,6 +105,23 @@ def test_create_save_close_reopen_project(
     assert window.project.board_name == "Board"
 
 
+def test_main_window_has_application_icon(window: MainWindow) -> None:
+    """Linux taskbars need a non-empty window icon."""
+    assert not window.windowIcon().isNull()
+
+
+def test_project_dialog_remembers_existing_directory(
+    window: MainWindow, tmp_path: Path
+) -> None:
+    """Project dialogs reuse their last directory and recover when it vanishes."""
+    window._settings.setValue("projects/last-directory", str(tmp_path))
+    assert window._last_project_directory() == tmp_path
+
+    missing = tmp_path / "removed"
+    window._settings.setValue("projects/last-directory", str(missing))
+    assert window._last_project_directory() == Path.home()
+
+
 def test_close_project_cancel_preserves_dirty_project(
     window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1065,9 +1082,44 @@ def test_footprint_handle_is_rendered_at_display_scale_and_scales(
     QTest.mousePress(dialog._canvas, Qt.MouseButton.LeftButton, pos=expected)
     assert dialog._footprint_drag_mode == "scale"
     old_scale = dialog._footprint_pixels_per_mm
+    old_center = QPointF(dialog._footprint_center)
     QTest.mouseMove(dialog._canvas, expected + QPoint(20, 20))
     assert dialog._footprint_pixels_per_mm > old_scale
+    new_radius = (
+        dialog._calibration_footprint.radius() * dialog._footprint_pixels_per_mm
+    )
+    assert dialog._footprint_center.x() == pytest.approx(old_center.x())
+    assert dialog._footprint_center.y() == pytest.approx(old_center.y())
+    assert new_radius > radius
     QTest.mouseRelease(dialog._canvas, Qt.MouseButton.LeftButton, pos=expected)
+    dialog.close()
+
+
+def test_footprint_handle_hit_area_stays_selectable_when_zoomed(
+    app: QApplication,
+) -> None:
+    """The handle hit area remains screen-sized at high and low zoom."""
+    image = QImage(1000, 1000, QImage.Format.Format_RGB32)
+    image.fill(0xFFFFFF)
+    dialog = ImageEditDialog(QPixmap.fromImage(image))
+    dialog.resize(700, 500)
+    dialog._calibration_footprint = parse_footprint(FOOTPRINT, "Resistor_SMD")
+    dialog._footprint_center = QPointF(500, 500)
+    dialog._footprint_pixels_per_mm = 10.0
+    dialog._set_edit_mode("footprint")
+    for zoom in (0.5, 2.0):
+        dialog._zoom = zoom
+        dialog._render()
+        app.processEvents()
+        radius = dialog._calibration_footprint.radius() * 10.0
+        handle = QPoint(
+            round((500 + radius) * dialog._display_scale),
+            round((500 + radius) * dialog._display_scale),
+        )
+        dialog._footprint_drag_mode = None
+        QTest.mousePress(dialog._canvas, Qt.MouseButton.LeftButton, pos=handle)
+        assert dialog._footprint_drag_mode == "scale"
+        QTest.mouseRelease(dialog._canvas, Qt.MouseButton.LeftButton, pos=handle)
     dialog.close()
 
 
@@ -1098,7 +1150,8 @@ def test_footprint_drag_moves_only_inside_footprint(
     assert dialog._footprint_center.x() > old_center.x()
     assert dialog._footprint_center.y() > old_center.y()
 
-    outside = QPoint(0, 0)
+    outside = QPoint(10, 10)
+    app.processEvents()
     QTest.mousePress(dialog._canvas, Qt.MouseButton.LeftButton, pos=outside)
     assert dialog._footprint_drag_mode is None
     dialog.close()
