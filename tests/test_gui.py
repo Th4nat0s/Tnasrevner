@@ -12,8 +12,8 @@ from types import SimpleNamespace
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtCore import QPoint, QSettings, Qt
-from PySide6.QtGui import QImage, QPixmap, QValidator
+from PySide6.QtCore import QPoint, QPointF, QSettings, Qt
+from PySide6.QtGui import QColor, QImage, QPixmap, QValidator
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
     QApplication,
@@ -1024,6 +1024,83 @@ def test_editing_existing_image_preserves_physical_scale(app: QApplication) -> N
 
     assert dialog.pixels_per_mm() == pytest.approx(25.0, rel=0.01)
     assert dialog.calibration_length_mm() == 40.0
+    dialog.close()
+
+
+def test_footprint_handle_is_rendered_at_display_scale_and_scales(
+    app: QApplication,
+) -> None:
+    """The visible corner handle matches hit-testing at fitted image scale."""
+    image = QImage(1000, 1000, QImage.Format.Format_RGB32)
+    image.fill(0xFFFFFF)
+    dialog = ImageEditDialog(QPixmap.fromImage(image))
+    dialog.resize(700, 500)
+    dialog._calibration_footprint = parse_footprint(FOOTPRINT, "Resistor_SMD")
+    dialog._footprint_center = QPointF(500, 500)
+    dialog._footprint_pixels_per_mm = 20.0
+    dialog._set_edit_mode("footprint")
+    dialog._render()
+    app.processEvents()
+
+    radius = dialog._calibration_footprint.radius() * 20.0
+    expected = QPoint(
+        round((500 + radius) * dialog._display_scale),
+        round((500 + radius) * dialog._display_scale),
+    )
+    rendered = dialog._canvas.pixmap().toImage()
+    yellow_pixels = [
+        QColor(rendered.pixel(x, y))
+        for x in range(
+            max(0, expected.x() - 4), min(rendered.width(), expected.x() + 5)
+        )
+        for y in range(
+            max(0, expected.y() - 4), min(rendered.height(), expected.y() + 5)
+        )
+    ]
+    assert any(
+        color.red() > 200 and color.green() > 200 and color.blue() < 100
+        for color in yellow_pixels
+    )
+
+    QTest.mousePress(dialog._canvas, Qt.MouseButton.LeftButton, pos=expected)
+    assert dialog._footprint_drag_mode == "scale"
+    old_scale = dialog._footprint_pixels_per_mm
+    QTest.mouseMove(dialog._canvas, expected + QPoint(20, 20))
+    assert dialog._footprint_pixels_per_mm > old_scale
+    QTest.mouseRelease(dialog._canvas, Qt.MouseButton.LeftButton, pos=expected)
+    dialog.close()
+
+
+def test_footprint_drag_moves_only_inside_footprint(
+    app: QApplication,
+) -> None:
+    """Dragging footprint body moves it; clicking outside does nothing."""
+    image = QImage(1000, 1000, QImage.Format.Format_RGB32)
+    image.fill(0xFFFFFF)
+    dialog = ImageEditDialog(QPixmap.fromImage(image))
+    dialog._calibration_footprint = parse_footprint(FOOTPRINT, "Resistor_SMD")
+    dialog._footprint_center = QPointF(500, 500)
+    dialog._footprint_pixels_per_mm = 10.0
+    dialog._set_edit_mode("footprint")
+    dialog._render()
+    app.processEvents()
+    old_center = QPointF(dialog._footprint_center)
+
+    center = QPoint(
+        round(500 * dialog._display_scale), round(500 * dialog._display_scale)
+    )
+    QTest.mousePress(dialog._canvas, Qt.MouseButton.LeftButton, pos=center)
+    assert dialog._footprint_drag_mode == "move"
+    QTest.mouseMove(dialog._canvas, center + QPoint(10, 5))
+    QTest.mouseRelease(
+        dialog._canvas, Qt.MouseButton.LeftButton, pos=center + QPoint(10, 5)
+    )
+    assert dialog._footprint_center.x() > old_center.x()
+    assert dialog._footprint_center.y() > old_center.y()
+
+    outside = QPoint(0, 0)
+    QTest.mousePress(dialog._canvas, Qt.MouseButton.LeftButton, pos=outside)
+    assert dialog._footprint_drag_mode is None
     dialog.close()
 
 

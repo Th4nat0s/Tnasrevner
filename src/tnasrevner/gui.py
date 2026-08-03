@@ -861,7 +861,11 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
                     self._footprint_rotation,
                     preview=True,
                 )
-                radius = footprint.radius() * self._footprint_pixels_per_mm
+                radius = (
+                    footprint.radius()
+                    * self._footprint_pixels_per_mm
+                    * self._display_scale
+                )
                 painter.setPen(QPen(QColor(255, 255, 0), 2, Qt.PenStyle.DashLine))
                 painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.drawRect(QRectF(-radius, -radius, radius * 2, radius * 2))
