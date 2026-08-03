@@ -2973,6 +2973,7 @@ class MainWindow(
         self._selected_schematic_terminal: tuple[str, str, str | None] | None = None
         self._pending_board_connection_pads: list[str] = []
         self._pads_visible = True
+        self._pad_display_mode = "both"
         self._pad_refresh_pending = False
         self._pending_pad_view_state: tuple[float, float, float] | None = None
         self._image_cache: dict[str, QPixmap] = {}
@@ -3166,25 +3167,18 @@ class MainWindow(
         ruler_button.setCheckable(True)
         self._ruler_button = ruler_button
         show_pads_button = QPushButton(panel)
-        show_pads_button.setCheckable(True)
-        show_pads_button.setChecked(True)
-        show_pads_button.setAccessibleName("Show pads")
+        show_pads_button.setAccessibleName("Pad display mode")
         show_pads_button.setObjectName("toolShowPads")
         show_pads_button.setFixedSize(40, 36)
         show_pads_button.setIcon(
             self.style().standardIcon(QStyle.StandardPixmap.SP_DialogYesButton)
         )
-        show_pads_button.setToolTip("Show or hide pad rectangles and connections")
+        show_pads_button.setToolTip("Pad + image")
         show_pads_button.setStatusTip(show_pads_button.toolTip())
-        show_pads_button.toggled.connect(self._set_pads_visible)
+        show_pads_button.clicked.connect(self._cycle_pad_display_mode)
+        self._show_pads_button = show_pads_button
         layout.addWidget(show_pads_button)
         layout.addSpacing(12)
-        add_button(
-            "Image",
-            QStyle.StandardPixmap.SP_DialogOpenButton,
-            "Choose Top or Bottom image: load, resize, or remove",
-            self.manage_picture,
-        )
         device_button = add_button(
             "Add Footprint",
             QStyle.StandardPixmap.SP_FileDialogDetailedView,
@@ -3219,6 +3213,12 @@ class MainWindow(
         )
         save_button.setIcon(_save_tool_icon())
         layout.addStretch()
+        add_button(
+            "Image",
+            QStyle.StandardPixmap.SP_DialogOpenButton,
+            "Choose Top or Bottom image: load, resize, or remove",
+            self.manage_picture,
+        )
         add_button(
             "Quit",
             QStyle.StandardPixmap.SP_DialogCloseButton,
@@ -4109,7 +4109,24 @@ class MainWindow(
     def _set_pads_visible(self, visible: bool) -> None:
         """Show or hide pad overlays while preserving the current view."""
         self._pads_visible = visible
+        self._pad_display_mode = "both" if visible else "image"
         LOGGER.info("Pad visibility=%s", visible)
+        self._schedule_pad_refresh(self._active_views()[0].view_state())
+
+    def _cycle_pad_display_mode(self) -> None:
+        """Cycle between pad+image, image-only, and pad-only display."""
+        modes = ("both", "image", "pads")
+        self._pad_display_mode = modes[(modes.index(self._pad_display_mode) + 1) % 3]
+        self._pads_visible = self._pad_display_mode != "image"
+        labels = {
+            "both": "Pad + image",
+            "image": "Image only",
+            "pads": "Pad only",
+        }
+        label = labels[self._pad_display_mode]
+        self._show_pads_button.setToolTip(label)
+        self._show_pads_button.setStatusTip(label)
+        self.statusBar().showMessage(f"Display: {label}", 2000)
         self._schedule_pad_refresh(self._active_views()[0].view_state())
 
     def _schedule_pad_refresh(self, state: tuple[float, float, float]) -> None:
@@ -5028,7 +5045,7 @@ class MainWindow(
 
     def _vector_labels_for_side(self, side: str) -> tuple[Pad, ...]:
         """Return visible pad labels for vector rendering in one view."""
-        if not self._pads_visible or not self.project:
+        if self._pad_display_mode == "image" or not self.project:
             return ()
         return tuple(pad for pad in self.project.pads if pad.side == side)
 
@@ -5580,8 +5597,16 @@ class MainWindow(
         pixmap = self._base_pixmap_for_asset(side)
         if pixmap.isNull():
             return pixmap
-        pixmap = QPixmap(pixmap)
-        self._draw_devices(pixmap, side)
+        if self._pad_display_mode == "pads":
+            canvas = QPixmap(pixmap.size())
+            canvas.fill(QColor(32, 33, 36))
+            pixmap = canvas
+        else:
+            pixmap = QPixmap(pixmap)
+        if self._pad_display_mode == "image":
+            return pixmap
+        if self._pad_display_mode == "both":
+            self._draw_devices(pixmap, side)
         self._draw_pads(pixmap, side)
         self._draw_connections(pixmap, side)
         return pixmap
@@ -5763,7 +5788,11 @@ class MainWindow(
         self, pixmap: QPixmap, side: str
     ) -> None:
         """Draw persisted pad markers over one board-side image."""
-        if not self._pads_visible or not self.project or not self.project.pads:
+        if (
+            self._pad_display_mode == "image"
+            or not self.project
+            or not self.project.pads
+        ):
             return
         painter = QPainter(pixmap)
         radius = max(5, min(pixmap.width(), pixmap.height()) // 100)
@@ -5808,7 +5837,11 @@ class MainWindow(
 
     def _draw_connections(self, pixmap: QPixmap, side: str) -> None:
         """Draw traces last: above image, footprint, and pad layers."""
-        if not self._pads_visible or not self.project or not self._selected_net:
+        if (
+            self._pad_display_mode == "image"
+            or not self.project
+            or not self._selected_net
+        ):
             return
         pads = [
             pad
