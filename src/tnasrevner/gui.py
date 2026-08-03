@@ -2166,7 +2166,6 @@ class ImageView(
         if not self._pad_labels:
             return
         painter = QPainter(pixmap)
-        radius = max(5, min(pixmap.width(), pixmap.height()) // 100)
         pads = self._pad_labels
         if self._connection_net:
             connected = [pad for pad in pads if pad.net == self._connection_net]
@@ -2183,7 +2182,9 @@ class ImageView(
                 else next(iter(centers), None)
             )
             if origin_id is not None:
-                painter.setPen(QPen(Qt.GlobalColor.white, max(2, radius // 2)))
+                connection_pen = QPen(Qt.GlobalColor.white, 1.5)
+                connection_pen.setCosmetic(True)
+                painter.setPen(connection_pen)
                 for pad_id, target in centers.items():
                     if pad_id != origin_id:
                         painter.drawLine(centers[origin_id], target)
@@ -2200,16 +2201,16 @@ class ImageView(
                 if pad.device_id is not None and pad.number == "1"
                 else Qt.GlobalColor.red
             )
-            painter.setPen(
-                QPen(
-                    (
-                        Qt.GlobalColor.white
-                        if pad.pad_id == self._connection_origin_id
-                        else Qt.GlobalColor.yellow
-                    ),
-                    max(2, radius // 2),
-                )
+            pad_pen = QPen(
+                (
+                    Qt.GlobalColor.white
+                    if pad.pad_id == self._connection_origin_id
+                    else Qt.GlobalColor.yellow
+                ),
+                2.0 if pad.pad_id == self._connection_origin_id else 1.0,
             )
+            pad_pen.setCosmetic(True)
+            painter.setPen(pad_pen)
             painter.save()
             painter.translate(center)
             painter.rotate(pad.rotation)
