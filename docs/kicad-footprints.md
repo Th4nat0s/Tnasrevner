@@ -36,9 +36,11 @@ require network access.
    recently selected footprints at the top and previews the highlighted geometry.
 4. Accept or edit the suggested unique reference. References follow the selected
    family and increment automatically, for example `C1`, then `C2`.
-5. Move the physically scaled preview over the Top or Bottom image.
-6. Right-click to rotate clockwise by 45 degrees; left-click to place; press Escape
-   to cancel.
+5. Move the physically scaled preview over the active Top, Bottom, or side-by-side
+   view. Starting from Top or Bottom keeps that single-side view active.
+6. Right-click to rotate clockwise by 45 degrees and left-click to place. The same
+   footprint immediately remains ready with the next unused reference; press Escape
+   to end the placement series.
 
 Placement creates every named footprint pad automatically. Pad identities combine
 the reference and KiCad pad number (`U1.1`, `U1.2`, and so on). Repeated physical

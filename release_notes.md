@@ -19,3 +19,5 @@
   automatic per-family references such as `C1`, `C2`, and `R1`.
 - Added a BOM view with editable device values and Shift-click actions to delete a
   complete KiCad device together with all generated pads.
+- Device placement now continues with the same footprint and the next unique
+  reference until Escape, while preserving an active Top or Bottom view.

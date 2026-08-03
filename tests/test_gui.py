@@ -3,7 +3,7 @@
 # Qt uses compiled extension modules; test fixtures intentionally inspect GUI
 # state to verify lifecycle behavior.
 # pylint: disable=wrong-import-position,no-name-in-module,redefined-outer-name
-# pylint: disable=unused-argument,protected-access
+# pylint: disable=unused-argument,protected-access,too-many-lines
 
 import os
 from pathlib import Path
@@ -275,7 +275,7 @@ def test_create_pad_from_tools_places_and_persists_marker(
 def test_add_device_rotates_and_creates_named_footprint_pads(
     window: MainWindow, tmp_path: Path
 ) -> None:
-    """Right-click rotates preview; left-click creates device and its pads."""
+    """Placement creates pads and stays armed with the next unique reference."""
     window.store = ProjectStore(tmp_path / "board.revp")
     window.project = ProjectDocument("Project", "Board")
     image = QImage(200, 200, QImage.Format.Format_RGB32)
@@ -323,11 +323,76 @@ def test_add_device_rotates_and_creates_named_footprint_pads(
     assert (
         window.store.read_asset(window.project.devices[0].footprint_path) == FOOTPRINT
     )
+    assert view._device_placement
+    assert window._pending_device is not None
+    assert window._pending_device.reference == "R2"
+    assert window._pending_device.rotation == 45
+
+    window._place_device("top", 0.7, 0.5)
+
+    assert [device.reference for device in window.project.devices] == ["R1", "R2"]
+    assert len({device.reference for device in window.project.devices}) == 2
+    assert [pad.name for pad in window.project.pads] == [
+        "R1.1",
+        "R1.2",
+        "R2.1",
+        "R2.2",
+    ]
+    assert window._pending_device is not None
+    assert window._pending_device.reference == "R3"
+    assert view._device_placement
+
+    QTest.keyClick(window, Qt.Key.Key_Escape)
+
+    assert window._pending_device is None
     assert not view._device_placement
     assert any(
         button.text() == "Add device"
         for button in window._tools_dock.widget().findChildren(QPushButton)
     )
+
+
+def test_add_device_keeps_current_single_side_view(
+    window: MainWindow, tmp_path: Path
+) -> None:
+    """Starting placement from Bottom must not force the side-by-side view."""
+    window.store = ProjectStore(tmp_path / "board.revp")
+    window.project = ProjectDocument("Project", "Board")
+    image = QImage(100, 100, QImage.Format.Format_RGB32)
+    image.fill(0xFFFFFF)
+    content = window._pixmap_bytes(QPixmap.fromImage(image))
+    for side in ("top", "bottom"):
+        path = f"assets/{side}.png"
+        window.store.write_asset(path, content)
+        window.project.images.append(
+            ImageAsset(
+                side,
+                path,
+                f"{side}.png",
+                calibration_line=(0.0, 0.5, 1.0, 0.5),
+                calibration_length_mm=10,
+            )
+        )
+    window._refresh_views()
+    window._tabs.setCurrentIndex(1)
+    source = FootprintReference("Capacitor_SMD", "C_0603", tmp_path / "C.kicad_mod")
+    footprint = parse_footprint(FOOTPRINT, source.library)
+
+    window._begin_device_placement("C1", source, footprint, FOOTPRINT, "a" * 40)
+
+    assert window._tabs.currentIndex() == 1
+    assert window._views["bottom"]._device_placement
+    assert not window._side_views["top"]._device_placement
+    assert not window._side_views["bottom"]._device_placement
+
+    window._place_device("bottom", 0.5, 0.5)
+
+    assert window._tabs.currentIndex() == 1
+    assert window.project.devices[0].side == "bottom"
+    assert window._pending_device is not None
+    assert window._pending_device.reference == "C2"
+    assert window._views["bottom"]._device_placement
+    window._cancel_device_placement()
 
 
 def test_add_device_selects_footprint_before_asking_reference(
@@ -478,6 +543,20 @@ def test_device_reference_is_suggested_and_incremented_by_family(
     )
     assert window._ask_device_reference(source) == "C2"
     assert suggestions == ["C1", "C2"]
+
+    window.project.devices.append(
+        Device(
+            "C3",
+            "top",
+            0.6,
+            0.5,
+            source.library,
+            source.name,
+            "assets/kicad/c3.kicad_mod",
+            "a" * 40,
+        )
+    )
+    assert window._next_device_reference(source) == "C4"
 
 
 def test_add_device_requires_saved_measurement_for_legacy_image(

@@ -1909,12 +1909,19 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         """Return the next unused numeric reference for a footprint family."""
         prefix = self._reference_prefix(source)
         highest = 0
+        used_references: set[str] = set()
         if self.project:
             for device in self.project.devices:
+                used_references.add(device.reference.casefold())
                 match = _NUMBERED_DEVICE_REFERENCE.fullmatch(device.reference)
                 if match and match.group(1).casefold() == prefix.casefold():
                     highest = max(highest, int(match.group(2)))
-        return f"{prefix}{highest + 1}"
+        index = highest + 1
+        reference = f"{prefix}{index}"
+        while reference.casefold() in used_references:
+            index += 1
+            reference = f"{prefix}{index}"
+        return reference
 
     def _remember_reference_prefix(
         self, source: FootprintReference, reference: str
@@ -2004,6 +2011,22 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
             return reference
         return None
 
+    def _device_placement_views(
+        self, calibrated: dict[str, tuple[ImageAsset, float]]
+    ) -> dict[str, ImageView]:
+        """Keep an active single-side view or choose the best calibrated view."""
+        current_tab = self._tabs.currentIndex()
+        current_side = {0: "top", 1: "bottom"}.get(current_tab)
+        if current_side in calibrated:
+            self._tabs.setCurrentIndex(current_tab)
+            return {current_side: self._views[current_side]}
+        if len(calibrated) == 2:
+            self._tabs.setCurrentIndex(2)
+            return self._side_views
+        side = next(iter(calibrated))
+        self._tabs.setCurrentIndex(0 if side == "top" else 1)
+        return {side: self._views[side]}
+
     def _begin_device_placement(
         self,
         reference: str,
@@ -2029,13 +2052,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         self._pending_device = PendingDevice(
             reference, source, footprint, content, revision
         )
-        if len(calibrated) == 2:
-            self._tabs.setCurrentIndex(2)
-            views = self._side_views
-        else:
-            side = next(iter(calibrated))
-            self._tabs.setCurrentIndex(0 if side == "top" else 1)
-            views = {side: self._views[side]}
+        views = self._device_placement_views(calibrated)
         for side, view in views.items():
             calibration = calibrated.get(side)
             if calibration and view.has_image():
@@ -2069,11 +2086,14 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         LOGGER.debug("Pending device rotated angle=%s", rotation)
 
     def _place_device(self, side: str, x: float, y: float) -> None:
-        """Persist a footprint instance and all its named pads."""
+        """Persist one footprint and immediately arm the next reference."""
         pending = self._pending_device
         if not self.project or not self.store or pending is None:
             return
-        view_state = self._active_views()[0].view_state()
+        view_context = (
+            self._tabs.currentIndex(),
+            self._active_views()[0].view_state(),
+        )
         image = next(
             (asset for asset in self.project.images if asset.side == side), None
         )
@@ -2091,6 +2111,11 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
             )
             return
         try:
+            if any(
+                existing.reference.casefold() == pending.reference.casefold()
+                for existing in self.project.devices
+            ):
+                raise ProjectFormatError(f"Device {pending.reference} already exists.")
             placed_pads = place_footprint_pads(
                 pending.footprint,
                 side,
@@ -2139,20 +2164,26 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         self.project.devices.append(device)
         self.project.pads.extend(generated)
         self._device_footprint_cache[device.footprint_path] = pending.footprint
-        self._pending_device = None
-        self._clear_device_previews()
+        self._pending_device = replace(
+            pending, reference=self._next_device_reference(pending.source)
+        )
         self._dirty = True
-        self.statusBar().clearMessage()
         LOGGER.info(
-            "Device placed id=%s reference=%s side=%s rotation=%s pads=%s",
+            "Device placed id=%s reference=%s side=%s rotation=%s pads=%s next=%s",
             device.device_id,
             device.reference,
             side,
             device.rotation,
             len(generated),
+            self._pending_device.reference,
         )
         self._refresh_views()
-        self._apply_active_view_state(view_state)
+        self._tabs.setCurrentIndex(view_context[0])
+        self._apply_active_view_state(view_context[1])
+        self.statusBar().showMessage(
+            f"Place {self._pending_device.reference}: left click to place, "
+            "right click rotates 45°, Esc ends the series."
+        )
         self._update_title()
 
     def _clear_device_previews(self) -> None:
