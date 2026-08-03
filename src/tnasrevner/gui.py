@@ -3438,12 +3438,13 @@ class MainWindow(
             self.store.write_asset(asset.path, self._pixmap_bytes(rotated))
 
         def rotate_point(x: float, y: float) -> tuple[float, float]:
-            return y, 1.0 - x
+            # QPixmap/QPainter +90° maps (x, y) to (1-y, x).
+            return 1.0 - y, x
 
         def rotate_rectangle(
             x: float, y: float, width: float, height: float
         ) -> tuple[float, float, float, float]:
-            return y, 1.0 - x - width, height, width
+            return 1.0 - y - height, x, height, width
 
         rotated_images = []
         for asset in self.project.images:
