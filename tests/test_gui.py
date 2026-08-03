@@ -29,7 +29,7 @@ from tnasrevner.gui import (
     ImageView,
     MainWindow,
 )
-from tnasrevner.kicad import FootprintReference, parse_footprint
+from tnasrevner.kicad import CacheResult, FootprintReference, parse_footprint
 from tnasrevner.project import (
     Device,
     ImageAsset,
@@ -468,6 +468,53 @@ def test_add_device_selects_footprint_before_asking_reference(
     assert order == ["footprint", "reference"]
     assert window._pending_device is not None
     assert window._pending_device.reference == "R1"
+
+
+def test_kicad_cache_failure_cancels_pending_import(
+    window: MainWindow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A first-run cache failure prevents the pending device workflow."""
+    warnings: list[str] = []
+    window._add_device_pending = True
+    monkeypatch.setattr(
+        "tnasrevner.gui.QMessageBox.warning",
+        lambda _parent, _title, message: warnings.append(message),
+    )
+
+    window._kicad_cache_failed("offline")
+
+    assert not window._add_device_pending
+    assert warnings == ["offline"]
+
+
+def test_kicad_cache_warning_keeps_pending_import_alive(
+    window: MainWindow,
+    app: QApplication,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stale-cache refresh failure warns but continues with valid cache."""
+    warnings: list[str] = []
+    opened: list[bool] = []
+    window._add_device_pending = True
+    monkeypatch.setattr(
+        "tnasrevner.gui.QMessageBox.warning",
+        lambda _parent, _title, message: warnings.append(message),
+    )
+    monkeypatch.setattr(window, "_open_footprint_picker", lambda: opened.append(True))
+
+    window._kicad_cache_ready(
+        CacheResult(
+            tmp_path / "cache",
+            "a" * 40,
+            refreshed=False,
+            warning="using existing cache",
+        )
+    )
+    app.processEvents()
+
+    assert warnings == ["using existing cache"]
+    assert opened == [True]
 
 
 def test_footprint_picker_pins_recent_choices_and_shows_preview(

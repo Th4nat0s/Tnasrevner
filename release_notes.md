@@ -13,6 +13,8 @@
 - Added rotating application diagnostics available through Tools > Log file.
 - Added KiCad footprint caching and Add device placement with 45° right-click
   rotation, calibrated physical sizing, and automatically named footprint pads.
+- Added first-run/monthly cache refresh, offline fallback, validated archive
+  handling, and GUI coverage for KiCad cache failures.
 - Fixed physical footprint sizing by retaining the exact calibration line and
   millimeter length; decimal input now accepts both dot and comma separators.
 - Added persistent five-item recent-footprint shortcuts, picker previews, and
