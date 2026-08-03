@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Refined image editing and toolbar UX: one Image action for Top/Bottom selection,
+  icon-only controls with hover help, visible crop kept/outside areas, Add Footprint,
+  Add Pad, and a dedicated floppy-disk Save icon.
+- Added Load and Remove actions beside image sizing controls in the image editor.
 - Completed minimal project lifecycle: create, save, close, reopen, and invalid
   `.revp` archive handling.
 - Added explicit Close project action with unsaved-change protection.

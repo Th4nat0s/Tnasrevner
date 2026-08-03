@@ -12,6 +12,9 @@ dependencies = ["PySide6>=6.7,<7"]
 [project.scripts]
 tnasrevner = "tnasrevner.gui:main"
 
+[tool.setuptools.package-data]
+tnasrevner = ["assets/*.svg"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]

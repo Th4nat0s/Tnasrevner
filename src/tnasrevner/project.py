@@ -17,7 +17,9 @@ CURRENT_FORMAT_VERSION = 1
 PROJECT_FILENAME = "project.json"
 PROJECT_ARCHIVE_SUFFIX = ".revp"
 _SIDES = frozenset({"top", "bottom"})
-_DISPLAY_MODES = frozenset({"top", "bottom", "side_by_side", "both", "nets", "bom"})
+_DISPLAY_MODES = frozenset(
+    {"top", "bottom", "side_by_side", "both", "nets", "bom", "schematic"}
+)
 _PAD_SHAPES = frozenset({"rect", "circle", "oval", "roundrect", "trapezoid"})
 
 
@@ -151,6 +153,7 @@ class Pad:  # pylint: disable=too-many-instance-attributes
     number: str | None = None
     shape: str = "rect"
     rotation: float = 0.0
+    function: str = ""
 
     def __post_init__(self) -> None:
         _required_string(self.name, "pad name")
@@ -159,6 +162,8 @@ class Pad:  # pylint: disable=too-many-instance-attributes
             raise ProjectFormatError("pad side must be 'top' or 'bottom'")
         if self.net is not None:
             _required_string(self.net, "pad net")
+        if not isinstance(self.function, str):
+            raise ProjectFormatError("pad function must be a string")
         if (self.device_id is None) != (self.number is None):
             raise ProjectFormatError("device pad requires device_id and number")
         if self.device_id is not None:
@@ -196,6 +201,7 @@ class Pad:  # pylint: disable=too-many-instance-attributes
             "number": self.number,
             "shape": self.shape,
             "rotation": self.rotation,
+            "function": self.function,
         }
 
     @classmethod
@@ -216,6 +222,7 @@ class Pad:  # pylint: disable=too-many-instance-attributes
             number=data.get("number"),
             shape=data.get("shape", "rect"),
             rotation=data.get("rotation", 0.0),
+            function=data.get("function", ""),
         )
 
 
@@ -239,9 +246,71 @@ def _pads_from_dict(data: list[Any]) -> list[Pad]:
     return migrated
 
 
+def _default_component_pin_function(
+    footprint_library: str,
+    footprint_name: str,
+    reference: str,
+    pin: "ComponentPin",
+) -> str:
+    """Provide a visible fallback function when legacy data left it empty."""
+    family = footprint_library.split("_", maxsplit=1)[0].casefold()
+    footprint = footprint_name.casefold()
+    if family == "capacitor" or "capacitor" in footprint:
+        if any(word in footprint for word in ("electro", "polar", "cp")):
+            return "+" if pin.number in {"1", "+"} else "-"
+        return "CNX"
+    if reference.casefold().startswith("u"):
+        return pin.net_id or f"Pin {pin.number}"
+    return pin.net_id or f"Pin {pin.number}"
+
+
+@dataclass(frozen=True)
+class ComponentPin:
+    """Logical component pin mapped to one physical footprint pad."""
+
+    number: str
+    pin_id: str
+    function: str = ""
+    footprint_pad: str | None = None
+    net_id: str | None = None
+
+    def __post_init__(self) -> None:
+        _required_string(self.number, "component pin number")
+        _required_string(self.pin_id, "component pin id")
+        if not isinstance(self.function, str):
+            raise ProjectFormatError("component pin function must be a string")
+        if self.footprint_pad is not None:
+            _required_string(self.footprint_pad, "component footprint pad")
+        if self.net_id is not None:
+            _required_string(self.net_id, "component pin net id")
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return JSON-compatible component pin data."""
+        return {
+            "number": self.number,
+            "pin_id": self.pin_id,
+            "function": self.function,
+            "footprint_pad": self.footprint_pad,
+            "net_id": self.net_id,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Any) -> "ComponentPin":
+        """Build a component pin from validated JSON-like data."""
+        if not isinstance(data, dict):
+            raise ProjectFormatError("component pin must be an object")
+        return cls(
+            number=_required_string(data.get("number"), "component pin number"),
+            pin_id=_required_string(data.get("pin_id"), "component pin id"),
+            function=data.get("function", ""),
+            footprint_pad=data.get("footprint_pad"),
+            net_id=data.get("net_id"),
+        )
+
+
 @dataclass(frozen=True)
 class Device:  # pylint: disable=too-many-instance-attributes
-    """A KiCad footprint instance placed on one board-side image."""
+    """A KiCad component/footprint instance placed on one board-side image."""
 
     reference: str
     side: str
@@ -254,6 +323,11 @@ class Device:  # pylint: disable=too-many-instance-attributes
     device_id: str = field(default_factory=lambda: str(uuid4()))
     rotation: float = 0.0
     value: str = ""
+    pins: list[ComponentPin] = field(default_factory=list)
+    schematic_x: float | None = None
+    schematic_y: float | None = None
+    schematic_rotation: float = 0.0
+    object_type: str = ""
 
     def __post_init__(self) -> None:
         _required_string(self.reference, "device reference")
@@ -266,6 +340,22 @@ class Device:  # pylint: disable=too-many-instance-attributes
         _required_string(self.source_revision, "device source_revision")
         if not isinstance(self.value, str):
             raise ProjectFormatError("device value must be a string")
+        if (self.schematic_x is None) != (self.schematic_y is None):
+            raise ProjectFormatError("schematic position must contain x and y")
+        if self.schematic_x is not None and not all(
+            isinstance(value, (int, float))
+            for value in (self.schematic_x, self.schematic_y)
+        ):
+            raise ProjectFormatError("schematic position must be numeric")
+        if not isinstance(self.schematic_rotation, (int, float)):
+            raise ProjectFormatError("schematic rotation must be numeric")
+        if not isinstance(self.object_type, str):
+            raise ProjectFormatError("device object type must be a string")
+        if not all(isinstance(pin, ComponentPin) for pin in self.pins):
+            raise ProjectFormatError("device pins must be component pin objects")
+        pin_numbers = [pin.number for pin in self.pins]
+        if len(set(pin_numbers)) != len(pin_numbers):
+            raise ProjectFormatError("component pin numbers must be unique")
         if self.side not in _SIDES:
             raise ProjectFormatError("device side must be 'top' or 'bottom'")
         if not all(
@@ -289,6 +379,11 @@ class Device:  # pylint: disable=too-many-instance-attributes
             "footprint_path": self.footprint_path,
             "source_revision": self.source_revision,
             "value": self.value,
+            "pins": [pin.to_dict() for pin in self.pins],
+            "schematic_x": self.schematic_x,
+            "schematic_y": self.schematic_y,
+            "schematic_rotation": self.schematic_rotation,
+            "object_type": self.object_type,
         }
 
     @classmethod
@@ -296,24 +391,43 @@ class Device:  # pylint: disable=too-many-instance-attributes
         """Build a device from validated JSON-like data."""
         if not isinstance(data, dict):
             raise ProjectFormatError("device must be an object")
+        pins = [ComponentPin.from_dict(pin) for pin in data.get("pins", [])]
+        reference = _required_string(data.get("reference"), "device reference")
+        footprint_library = _required_string(
+            data.get("footprint_library"), "device footprint_library"
+        )
+        footprint_name = _required_string(
+            data.get("footprint_name"), "device footprint_name"
+        )
+        pins = [
+            replace(
+                pin,
+                function=pin.function
+                or _default_component_pin_function(
+                    footprint_library, footprint_name, reference, pin
+                ),
+            )
+            for pin in pins
+        ]
         return cls(
             device_id=_required_string(data.get("device_id"), "device id"),
-            reference=_required_string(data.get("reference"), "device reference"),
+            reference=reference,
             side=_required_string(data.get("side"), "device side"),
             x=data.get("x"),
             y=data.get("y"),
             rotation=data.get("rotation", 0.0),
-            footprint_library=_required_string(
-                data.get("footprint_library"), "device footprint_library"
-            ),
-            footprint_name=_required_string(
-                data.get("footprint_name"), "device footprint_name"
-            ),
+            footprint_library=footprint_library,
+            footprint_name=footprint_name,
             footprint_path=_relative_asset_path(data.get("footprint_path")),
             source_revision=_required_string(
                 data.get("source_revision"), "device source_revision"
             ),
             value=data.get("value", ""),
+            pins=pins,
+            schematic_x=data.get("schematic_x"),
+            schematic_y=data.get("schematic_y"),
+            schematic_rotation=data.get("schematic_rotation", 0.0),
+            object_type=data.get("object_type", ""),
         )
 
 

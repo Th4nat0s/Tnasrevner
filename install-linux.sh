@@ -49,6 +49,25 @@ VENV_PYTHON="$PROJECT_ROOT/.venv/bin/python"
 "$VENV_PYTHON" -m pip install -r requirement-dev.txt
 "$VENV_PYTHON" -c 'from PySide6.QtWidgets import QApplication; from tnasrevner.gui import MainWindow; print("GUI import: OK")'
 
+DESKTOP_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+ICON_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/scalable/apps"
+mkdir -p "$DESKTOP_DIR"
+mkdir -p "$ICON_DIR"
+cp "$PROJECT_ROOT/src/tnasrevner/assets/tnasrevner.svg" "$ICON_DIR/tnasrevner.svg"
+cat > "$DESKTOP_DIR/tnasrevner.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Tnasrevner
+Comment=Reverse-engineering workspace for electronic circuit boards
+Exec=$PROJECT_ROOT/launch-linux.sh
+Icon=tnasrevner
+Terminal=false
+Categories=Development;Electronics;
+StartupWMClass=tnasrevner
+EOF
+update-desktop-database "$DESKTOP_DIR" >/dev/null 2>&1 || true
+echo "Desktop entry: $DESKTOP_DIR/tnasrevner.desktop"
+
 echo
 echo "Install complete. Run:"
 echo "  source .venv/bin/activate"

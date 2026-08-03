@@ -13,7 +13,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PySide6.QtCore import QPoint, QPointF, QSettings, Qt
-from PySide6.QtGui import QColor, QImage, QPixmap, QValidator
+from PySide6.QtGui import QColor, QImage, QPixmap, QValidator, QWheelEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
     QApplication,
@@ -31,6 +31,7 @@ from tnasrevner.gui import (
 )
 from tnasrevner.kicad import CacheResult, FootprintReference, parse_footprint
 from tnasrevner.project import (
+    ComponentPin,
     Device,
     ImageAsset,
     Pad,
@@ -223,6 +224,72 @@ def test_image_view_zoom_keeps_center_and_footprint_scale(
     view.close()
 
 
+def test_image_view_mouse_and_zoom_mapping(app: QApplication) -> None:
+    """Wheel zooms; pad clicks route actions; empty-space drag pans."""
+    view = ImageView("No image")
+    image = QImage(400, 400, QImage.Format.Format_RGB32)
+    image.fill(0xFFFFFF)
+    pad = Pad("P1", "top", 0.4, 0.4, "pad-1", 0.2, 0.2)
+    view.resize(240, 240)
+    view.set_pixmap(QPixmap.fromImage(image))
+    view.set_pad_labels((pad,))
+    view.show()
+    app.processEvents()
+
+    selected: list[tuple[float, float]] = []
+    connector: list[tuple[float, float]] = []
+    menus: list[tuple[float, float]] = []
+    net_edits: list[tuple[float, float]] = []
+    view.pad_clicked.connect(lambda x, y: selected.append((x, y)))
+    view.pad_connection_requested.connect(lambda x, y: connector.append((x, y)))
+    view.pad_menu_requested.connect(lambda x, y: menus.append((x, y)))
+    view.pad_context_requested.connect(lambda x, y: net_edits.append((x, y)))
+    center = QPoint(view._label.width() // 2, view._label.height() // 2)
+
+    QTest.mouseClick(view._label, Qt.MouseButton.LeftButton, pos=center)
+    QTest.mouseClick(
+        view._label,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.ShiftModifier,
+        center,
+    )
+    QTest.mouseClick(view._label, Qt.MouseButton.RightButton, pos=center)
+    QTest.mouseClick(
+        view._label,
+        Qt.MouseButton.RightButton,
+        Qt.KeyboardModifier.ShiftModifier,
+        center,
+    )
+
+    assert len(selected) == 1
+    assert len(connector) == 1
+    assert len(menus) == 1
+    assert len(net_edits) == 1
+
+    QTest.mouseDClick(view._label, Qt.MouseButton.LeftButton, pos=center)
+    assert len(selected) == 2
+
+    QTest.mousePress(view._label, Qt.MouseButton.LeftButton, pos=QPoint(5, 5))
+    assert view._drag_position is not None
+    QTest.mouseRelease(view._label, Qt.MouseButton.LeftButton, pos=QPoint(5, 5))
+    assert len(selected) == 2
+
+    old_scale = view._scale
+    wheel = QWheelEvent(
+        QPointF(center),
+        QPointF(view._label.mapToGlobal(center)),
+        QPoint(),
+        QPoint(0, 120),
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier,
+        Qt.ScrollPhase.ScrollUpdate,
+        False,
+    )
+    view.wheelEvent(wheel)
+    assert view._scale > old_scale
+    view.close()
+
+
 def test_save_persists_display_mode_zoom_and_pan(
     window: MainWindow, tmp_path: Path
 ) -> None:
@@ -253,6 +320,20 @@ def test_save_and_restore_bom_view(window: MainWindow, tmp_path: Path) -> None:
     assert window._tabs.currentIndex() == 5
 
 
+def test_save_and_restore_schematic_view(window: MainWindow, tmp_path: Path) -> None:
+    """The Schematic tab is a persisted project display mode."""
+    window.store = ProjectStore(tmp_path / "board.revp")
+    window.project = ProjectDocument("Project", "Board")
+    window._tabs.setCurrentIndex(6)
+
+    assert window.save_project()
+    assert window.project.display.mode == "schematic"
+
+    window._tabs.setCurrentIndex(0)
+    window._refresh_views()
+    assert window._tabs.currentIndex() == 6
+
+
 def test_create_pad_from_tools_places_and_persists_marker(
     window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -279,7 +360,7 @@ def test_create_pad_from_tools_places_and_persists_marker(
     assert window.project.pads[0].width == 0.2
     assert window.project.pads[0].height == 0.1
     assert any(
-        action.text() == "Create pad"
+        action.toolTip().startswith("Create a pad")
         for action in window._tools_dock.widget().findChildren(QPushButton)
     )
 
@@ -364,7 +445,7 @@ def test_add_device_rotates_and_creates_named_footprint_pads(
     assert window._pending_device is None
     assert not view._device_placement
     assert any(
-        button.text() == "Add device"
+        button.toolTip().startswith("Select and place")
         for button in window._tools_dock.widget().findChildren(QPushButton)
     )
 
@@ -485,6 +566,14 @@ def test_add_device_selects_footprint_before_asking_reference(
     assert order == ["footprint", "reference"]
     assert window._pending_device is not None
     assert window._pending_device.reference == "R1"
+
+
+def test_tools_palette_buttons_have_icons_and_hover_help(window: MainWindow) -> None:
+    """Every tool action exposes an icon and mouse-over description."""
+    buttons = window._tools_dock.widget().findChildren(QPushButton)
+    assert buttons
+    assert all(not button.icon().isNull() for button in buttons)
+    assert all(button.toolTip() for button in buttons)
 
 
 def test_kicad_cache_failure_cancels_pending_import(
@@ -623,6 +712,31 @@ def test_device_reference_is_suggested_and_incremented_by_family(
     assert window._next_device_reference(source) == "C4"
 
 
+def test_unknown_device_reference_uses_unassigned_ic_prefix(
+    window: MainWindow, tmp_path: Path
+) -> None:
+    """Unknown KiCad footprints use U?1, U?2 instead of pretending U1 is known."""
+    window.project = ProjectDocument("Project", "Board")
+    source = FootprintReference(
+        "Custom_Logic", "Mystery", tmp_path / "mystery.kicad_mod"
+    )
+
+    assert window._next_device_reference(source) == "U?1"
+    window.project.devices.append(
+        Device(
+            "U?1",
+            "top",
+            0.5,
+            0.5,
+            source.library,
+            source.name,
+            "assets/kicad/u1.kicad_mod",
+            "a" * 40,
+        )
+    )
+    assert window._next_device_reference(source) == "U?2"
+
+
 def test_add_device_requires_saved_measurement_for_legacy_image(
     window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -726,6 +840,25 @@ def test_clicking_pad_toggles_links_without_resetting_zoom(
     assert window._selected_pad_id is None
     assert window._views["top"]._scale == 3.0
 
+    view = window._views["top"]
+    window.show()
+    QApplication.processEvents()
+    point = QPoint(
+        round(0.55 * (view._label.width() - 1)),
+        round(0.55 * (view._label.height() - 1)),
+    )
+    QTest.mouseClick(view._label, Qt.MouseButton.LeftButton, pos=point)
+    QApplication.processEvents()
+    assert window._selected_pad_id == "two"
+    point = QPoint(
+        round(0.55 * (view._label.width() - 1)),
+        round(0.55 * (view._label.height() - 1)),
+    )
+    QTest.mouseDClick(view._label, Qt.MouseButton.LeftButton, pos=point)
+    QApplication.processEvents()
+    assert window._selected_pad_id is None
+    assert window._selected_net is None
+
     window._set_pads_visible(False)
     QApplication.processEvents()
     assert not window._pads_visible
@@ -745,12 +878,179 @@ def test_net_view_and_right_click_assignment(window: MainWindow) -> None:
     assert window.project.pads[0].net == "GND"
     assert window._net_table.item(0, 0).text() == "P1"
     assert window._net_table.item(0, 1).text() == "GND"
+    assert not window._net_table.item(0, 0).flags() & Qt.ItemFlag.ItemIsEditable
+    assert window._net_table.item(0, 1).flags() & Qt.ItemFlag.ItemIsEditable
+    assert not window._net_table.item(0, 2).flags() & Qt.ItemFlag.ItemIsEditable
+    assert window._net_table.item(0, 3).flags() & Qt.ItemFlag.ItemIsEditable
+    assert not window._net_table.item(0, 4).flags() & Qt.ItemFlag.ItemIsEditable
 
     window._connect_pad_to_net("top", 0.15, 0.15)
     assert window._net_dialog is not None
     window._net_dialog.reject()
     QApplication.processEvents()
     assert window._net_dialog is None
+
+
+def test_disconnect_other_pad_keeps_active_link_selection(window: MainWindow) -> None:
+    """Disconnecting a non-origin pad keeps origin NET visualization active."""
+    window.project = ProjectDocument(
+        "Project",
+        "Board",
+        pads=[
+            Pad("P1", "top", 0.1, 0.1, "one", 0.1, 0.1, "GND"),
+            Pad("P2", "top", 0.5, 0.5, "two", 0.1, 0.1, "GND"),
+        ],
+    )
+    window._selected_net = "GND"
+    window._selected_pad_id = "one"
+
+    window._assign_pad_net("two", "")
+
+    assert window.project.pads[0].net == "GND"
+    assert window.project.pads[1].net is None
+    assert window._selected_net == "GND"
+    assert window._selected_pad_id == "one"
+
+
+def test_shift_selected_terminals_create_generic_net(window: MainWindow) -> None:
+    """Two schematic terminals without nets receive the next automatic net."""
+    device = Device(
+        "U?1",
+        "top",
+        0.5,
+        0.5,
+        "Package_QFP",
+        "QFP",
+        "assets/kicad/u1.kicad_mod",
+        "a" * 40,
+        device_id="device",
+        pins=[ComponentPin("1", "IO", footprint_pad="1")],
+    )
+    window.project = ProjectDocument(
+        "Project",
+        "Board",
+        pads=[
+            Pad("U?1.1", "top", 0.1, 0.1, "generated", device_id="device", number="1"),
+            Pad("P1", "top", 0.3, 0.3, "standalone"),
+        ],
+        devices=[device],
+    )
+
+    window._connect_schematic_terminals(("pin", "device", "1"), ("pin", "device", "1"))
+    assert window.project.devices[0].pins[0].net_id == "N1"
+    assert window.project.pads[1].net is None
+
+    window._connect_schematic_terminals(
+        ("pin", "device", "1"), ("pad", "standalone", None)
+    )
+    assert {pad.net for pad in window.project.pads} == {"N1"}
+
+
+def test_shift_selected_board_pads_connect_immediately(
+    window: MainWindow, tmp_path: Path
+) -> None:
+    """Shift-click links a target to the selected origin before Escape."""
+    window.store = ProjectStore(tmp_path / "board.revp")
+    window.project = ProjectDocument(
+        "Project",
+        "Board",
+        pads=[
+            Pad("P1", "top", 0.1, 0.1, "one", 0.1, 0.1),
+            Pad("P2", "top", 0.5, 0.5, "two", 0.1, 0.1),
+        ],
+    )
+    image = QImage(100, 100, QImage.Format.Format_RGB32)
+    image.fill(0x202020)
+    window.store.write_asset(
+        "assets/top.png", window._pixmap_bytes(QPixmap.fromImage(image))
+    )
+    window.project.images.append(ImageAsset("top", "assets/top.png", "top.png"))
+    window._refresh_views()
+    window.show()
+    QApplication.processEvents()
+    view = window._views["top"]
+
+    origin = QPoint(
+        round(0.15 * (view._label.width() - 1)),
+        round(0.15 * (view._label.height() - 1)),
+    )
+    QTest.mouseClick(view._label, Qt.MouseButton.LeftButton, pos=origin)
+    QApplication.processEvents()
+    assert window._selected_pad_id == "one"
+
+    target = QPoint(
+        round(0.55 * (view._label.width() - 1)),
+        round(0.55 * (view._label.height() - 1)),
+    )
+    QTest.mouseClick(
+        view._label,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.ShiftModifier,
+        target,
+    )
+    QApplication.processEvents()
+    assert window._pending_board_connection_pads == ["one", "two"]
+    assert [pad.net for pad in window.project.pads] == ["N1", "N1"]
+    assert window._selected_net == "N1"
+    assert window._net_mode_label.isVisible()
+    assert view.cursor().shape() == Qt.CursorShape.CrossCursor
+    link_color = view._pixmap.toImage().pixelColor(35, 35)
+    assert min(link_color.red(), link_color.green(), link_color.blue()) > 200
+
+    trace_point = QPoint(
+        round(0.35 * (view._label.width() - 1)),
+        round(0.35 * (view._label.height() - 1)),
+    )
+    QTest.mouseClick(view._label, Qt.MouseButton.RightButton, pos=trace_point)
+    QApplication.processEvents()
+    assert window._pad_menu is not None
+    assert [action.text() for action in window._pad_menu.actions()] == ["Disconnect"]
+    window._pad_menu.actions()[0].trigger()
+    QApplication.processEvents()
+    assert [pad.net for pad in window.project.pads] == ["N1", None]
+    assert window._selected_net == "N1"
+    assert window._selected_pad_id == "one"
+
+    QTest.keyClick(window, Qt.Key.Key_Escape)
+
+    assert [pad.net for pad in window.project.pads] == ["N1", None]
+    assert not window._pending_board_connection_pads
+    assert not window._net_mode_label.isVisible()
+    assert view.cursor().shape() != Qt.CursorShape.CrossCursor
+
+
+def test_net_table_enter_keeps_nets_tab(window: MainWindow) -> None:
+    """Committing Net or Function edits must not jump back to Top."""
+    device = Device(
+        "U1",
+        "top",
+        0.5,
+        0.5,
+        "Package_QFP",
+        "QFP",
+        "assets/kicad/u1.kicad_mod",
+        "a" * 40,
+        device_id="device",
+        pins=[ComponentPin("1", "IO", footprint_pad="1")],
+    )
+    window.project = ProjectDocument(
+        "Project",
+        "Board",
+        pads=[
+            Pad("U1.1", "top", 0.1, 0.1, "generated", device_id="device", number="1")
+        ],
+        devices=[device],
+    )
+    window._refresh_net_table()
+    window._tabs.setCurrentIndex(4)
+
+    window._net_table.item(0, 1).setText("N1")
+    QApplication.processEvents()
+    assert window._tabs.currentIndex() == 4
+
+    window._net_table.item(0, 3).setText("GPIO")
+    QApplication.processEvents()
+    assert window._tabs.currentIndex() == 4
 
 
 def test_pad_refresh_reuses_cached_working_image(
@@ -889,6 +1189,44 @@ def test_shift_click_device_edits_bom_value_and_deletes_whole_footprint(
         window._pad_menu.close()
 
 
+def test_bom_value_and_object_dropdown_are_editable(
+    window: MainWindow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """BOM edits values and creates reusable object types through NEW."""
+    window.project = ProjectDocument(
+        "Project",
+        "Board",
+        devices=[
+            Device(
+                "C1",
+                "top",
+                0.5,
+                0.5,
+                "Capacitor_SMD",
+                "C_0603",
+                "assets/kicad/c1.kicad_mod",
+                "a" * 40,
+            )
+        ],
+    )
+    window._refresh_bom_table()
+
+    assert not window._bom_table.item(0, 0).flags() & Qt.ItemFlag.ItemIsEditable
+    assert not window._bom_table.item(0, 1).flags() & Qt.ItemFlag.ItemIsEditable
+    assert window._bom_table.item(0, 2).flags() & Qt.ItemFlag.ItemIsEditable
+    window._bom_table.item(0, 2).setText("100 nF")
+    assert window.project.devices[0].value == "100 nF"
+
+    monkeypatch.setattr(
+        "tnasrevner.gui.QInputDialog.getText",
+        lambda *_args, **_kwargs: ("Sensor", True),
+    )
+    combo = window._bom_table.cellWidget(0, 1)
+    combo.setCurrentText("NEW")
+    QApplication.processEvents()
+    assert window.project.devices[0].object_type == "Sensor"
+
+
 def test_pad_mouse_rectangle_releases_placement_mode(
     window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -952,7 +1290,7 @@ def test_import_image_stores_selected_side(
     monkeypatch.setattr(
         window,
         "_edit_imported_image",
-        lambda image: (image, 10.0, (0.1, 0.2, 0.8, 0.2), 7.0),
+        lambda image, **_kwargs: (image, 10.0, (0.1, 0.2, 0.8, 0.2), 7.0),
     )
 
     window.import_picture()
@@ -1041,6 +1379,60 @@ def test_editing_existing_image_preserves_physical_scale(app: QApplication) -> N
 
     assert dialog.pixels_per_mm() == pytest.approx(25.0, rel=0.01)
     assert dialog.calibration_length_mm() == 40.0
+    dialog.close()
+
+
+def test_scaling_footprint_does_not_recrop_existing_image(
+    app: QApplication,
+) -> None:
+    """Editing footprint scale preserves existing image dimensions."""
+    image = QImage(200, 100, QImage.Format.Format_RGB32)
+    image.fill(0xFFFFFF)
+    dialog = ImageEditDialog(QPixmap.fromImage(image))
+    dialog.resize(800, 600)
+    dialog._render()
+    dialog.prepare_existing_image(25.0, (0.1, 0.5, 0.6, 0.5), 40.0)
+    dialog._calibration_footprint = parse_footprint(FOOTPRINT, "Resistor_SMD")
+    dialog._footprint_center = QPointF(100, 50)
+    dialog._footprint_pixels_per_mm = 10.0
+    dialog._set_edit_mode("footprint")
+    dialog._render()
+    dialog.accept()
+
+    assert dialog.result_pixmap().size() == image.size()
+    dialog.close()
+
+
+def test_dragging_footprint_scale_preserves_existing_crop(
+    app: QApplication,
+) -> None:
+    """A real footprint-handle drag must not alter the existing crop."""
+    image = QImage(1000, 1000, QImage.Format.Format_RGB32)
+    image.fill(0xFFFFFF)
+    dialog = ImageEditDialog(QPixmap.fromImage(image))
+    dialog.resize(700, 500)
+    dialog._render()
+    dialog.prepare_existing_image(20.0, (0.1, 0.5, 0.6, 0.5), 25.0)
+    dialog._calibration_footprint = parse_footprint(FOOTPRINT, "Resistor_SMD")
+    dialog._footprint_center = QPointF(500, 500)
+    dialog._footprint_pixels_per_mm = 20.0
+    dialog._set_edit_mode("footprint")
+    dialog._render()
+    app.processEvents()
+
+    radius = dialog._calibration_footprint.radius() * 20.0
+    handle = QPoint(
+        round((500 + radius) * dialog._display_scale),
+        round((500 + radius) * dialog._display_scale),
+    )
+    QTest.mousePress(dialog._canvas, Qt.MouseButton.LeftButton, pos=handle)
+    QTest.mouseMove(dialog._canvas, pos=handle + QPoint(20, 20))
+    QTest.mouseRelease(
+        dialog._canvas, Qt.MouseButton.LeftButton, pos=handle + QPoint(20, 20)
+    )
+    dialog.accept()
+
+    assert dialog.result_pixmap().size() == image.size()
     dialog.close()
 
 

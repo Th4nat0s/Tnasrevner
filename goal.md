@@ -531,3 +531,34 @@ The following ideas should be evaluated only after the manual V1 workflow is sta
 - more schematic and netlist export formats;
 - collaboration and change-review features;
 - measurement, reporting, and annotated-image exports.
+
+## 24. Current implementation checkpoint — 2026-08-03
+
+### Delivered
+
+- Portable `.revp` project lifecycle with image assets, display state, pads, nets,
+  devices, BOM, and embedded KiCad footprint sources.
+- Top/bottom image workspace with zoom, pan, fit, centering, side-by-side, overlay,
+  rotation, crop editing, line calibration, and footprint-based physical sizing.
+- Consolidated image workflow: one Image action selects Top/Bottom; the editor
+  provides Load, Remove, Scale line, Scale footprint, Crop, rotation, zoom, and FIT.
+- Visible crop mask: kept pixels remain clear, excluded pixels are dimmed.
+- KiCad official-footprint cache with first-run download, 30-day refresh, atomic
+  replacement, metadata, validation, and offline fallback.
+- Manual pad/net workflow, footprint placement, generated pads, net visualization,
+  recent footprint picker entries, and BOM values.
+
+### Remaining before MVP
+
+- Layer count/model and board-level physical dimensions.
+- Resumable project initialization wizard.
+- Pad-state colors, explicit NC/plane states, progress, conflict validation.
+- Complete net editing model, vias, netlist export, and schematic generation.
+- Autosave, undo/redo, migration support (`REVP0000` tracked by issue #8), CI, and
+  packaging.
+
+### Evidence
+
+- 73 automated tests passing.
+- GUI/KiCad code formatted with Black and rated 10/10 by Pylint.
+- Open work is tracked in GitHub issue #8; issues #6 and #7 are closed.

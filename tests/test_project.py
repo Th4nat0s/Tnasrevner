@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from tnasrevner.project import (
+    ComponentPin,
     Device,
     DisplaySettings,
     ImageAsset,
@@ -148,7 +149,7 @@ def test_duplicate_image_sides_are_rejected() -> None:
 
 def test_pad_round_trip_and_validation() -> None:
     """Pads serialize with stable identity and reject invalid coordinates."""
-    pad = Pad("P1", "top", 0.25, 0.75, "pad-id", net="GND")
+    pad = Pad("P1", "top", 0.25, 0.75, "pad-id", net="GND", function="Power input")
     restored = Pad.from_dict(pad.to_dict())
 
     assert restored == pad
@@ -191,6 +192,7 @@ def test_kicad_device_and_generated_pads_round_trip(tmp_path: Path) -> None:
         "device-id",
         45,
         "10 kΩ",
+        object_type="Resistor",
     )
     project = ProjectDocument(
         "Project",
@@ -222,6 +224,47 @@ def test_kicad_device_and_generated_pads_round_trip(tmp_path: Path) -> None:
     assert loaded.pads[0].device_id == "device-id"
     assert loaded.pads[0].rotation == 45
     assert loaded.devices[0].value == "10 kΩ"
+
+
+def test_component_pin_identity_function_and_net_round_trip() -> None:
+    """Component pins preserve logical mapping separately from physical pads."""
+    pin = ComponentPin("1", "GND", "Ground", "1", "GND")
+    device = Device(
+        "U1",
+        "top",
+        0.5,
+        0.5,
+        "Package_QFP",
+        "QFP",
+        "assets/kicad/u1.kicad_mod",
+        "a" * 40,
+        pins=[pin],
+    )
+
+    restored = Device.from_dict(device.to_dict())
+
+    assert restored.pins == [pin]
+    assert restored.pins[0].pin_id == "GND"
+    assert restored.pins[0].net_id == "GND"
+
+
+def test_legacy_component_pin_functions_are_generated_on_load() -> None:
+    """Legacy pins with empty functions receive useful load-time fallbacks."""
+    data = {
+        "device_id": "device-id",
+        "reference": "U1",
+        "side": "top",
+        "x": 0.5,
+        "y": 0.5,
+        "footprint_library": "Package_QFP",
+        "footprint_name": "TQFP-32",
+        "footprint_path": "assets/kicad/u1.kicad_mod",
+        "source_revision": "a" * 40,
+        "pins": [{"number": "1", "pin_id": "1", "net_id": "GND"}],
+    }
+    loaded = Device.from_dict(data)
+
+    assert loaded.pins[0].function == "GND"
 
 
 def test_legacy_device_without_value_defaults_to_empty() -> None:

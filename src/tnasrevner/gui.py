@@ -6,6 +6,9 @@ from __future__ import annotations
 # inspect those names despite them being available at runtime.
 # pylint: disable=no-name-in-module,invalid-name
 # pylint: disable=too-many-lines
+# pylint: disable=too-many-locals,too-many-statements
+# pylint: disable=too-many-return-statements
+# pylint: disable=too-many-branches
 
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -56,6 +59,7 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QDockWidget,
     QDoubleSpinBox,
+    QComboBox,
     QFileDialog,
     QFormLayout,
     QHBoxLayout,
@@ -74,6 +78,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QProgressDialog,
     QRubberBand,
+    QStyle,
     QVBoxLayout,
     QWidget,
 )
@@ -89,6 +94,7 @@ from .kicad import (
     parse_footprint,
 )
 from .project import (
+    ComponentPin,
     Device,
     ImageAsset,
     Pad,
@@ -101,6 +107,52 @@ from .project import (
 def _application_icon() -> QIcon:
     """Load application icon from package data."""
     return QIcon(str(Path(__file__).with_name("assets") / "tnasrevner.svg"))
+
+
+def _center_tool_icon() -> QIcon:
+    """Create a clear crosshair icon for image centering."""
+    canvas = QPixmap(24, 24)
+    canvas.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(canvas)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setPen(QPen(QColor(80, 160, 220), 2))
+    painter.drawEllipse(QRectF(6, 6, 12, 12))
+    painter.drawLine(QPointF(12, 1), QPointF(12, 6))
+    painter.drawLine(QPointF(12, 18), QPointF(12, 23))
+    painter.drawLine(QPointF(1, 12), QPointF(6, 12))
+    painter.drawLine(QPointF(18, 12), QPointF(23, 12))
+    painter.end()
+    return QIcon(canvas)
+
+
+def _pad_tool_icon() -> QIcon:
+    """Create a yellow rectangle icon for adding a pad."""
+    canvas = QPixmap(24, 24)
+    canvas.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(canvas)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setPen(QPen(QColor(150, 110, 0), 2))
+    painter.setBrush(QColor(255, 220, 45))
+    painter.drawRoundedRect(QRectF(4, 7, 16, 10), 2, 2)
+    painter.end()
+    return QIcon(canvas)
+
+
+def _save_tool_icon() -> QIcon:
+    """Create a recognizable floppy-disk save icon."""
+    canvas = QPixmap(24, 24)
+    canvas.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(canvas)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setPen(QPen(QColor(35, 65, 100), 2))
+    painter.setBrush(QColor(70, 135, 205))
+    painter.drawRoundedRect(QRectF(4, 3, 16, 18), 2, 2)
+    painter.setPen(QPen(QColor(225, 240, 255), 1.5))
+    painter.setBrush(QColor(225, 240, 255))
+    painter.drawRect(QRectF(7, 4, 8, 6))
+    painter.drawRoundedRect(QRectF(7, 14, 10, 5), 1, 1)
+    painter.end()
+    return QIcon(canvas)
 
 
 LOGGER = logging.getLogger("tnasrevner")
@@ -274,6 +326,48 @@ class MeasurementSpinBox(QDoubleSpinBox):
         return super().valueFromText(text.replace(",", "."))
 
 
+class CropOverlay(QWidget):
+    """Show the crop rectangle while dimming pixels outside it."""
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        self._selection = QRect()
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+
+    def set_selection(self, selection: QRect | None) -> None:
+        """Update crop bounds in canvas coordinates."""
+        self._selection = selection or QRect()
+        self.update()
+
+    def paintEvent(  # pylint: disable=too-many-locals,too-many-statements
+        self, event
+    ) -> None:  # noqa: N802
+        """Paint dimmed outside area and highlighted crop boundary."""
+        del event
+        if self._selection.isNull():
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        selection = self._selection.intersected(self.rect())
+        shade = QColor(0, 0, 0, 125)
+        painter.fillRect(0, 0, self.width(), selection.top(), shade)
+        painter.fillRect(0, selection.bottom() + 1, self.width(), self.height(), shade)
+        painter.fillRect(
+            0, selection.top(), selection.left(), selection.height(), shade
+        )
+        painter.fillRect(
+            selection.right() + 1,
+            selection.top(),
+            self.width(),
+            selection.height(),
+            shade,
+        )
+        painter.setPen(QPen(QColor(255, 212, 42), 2, Qt.PenStyle.DashLine))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRect(QRectF(selection).adjusted(1, 1, -1, -1))
+        painter.end()
+
+
 class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-statements,too-many-return-statements,too-many-branches,too-many-locals
     QDialog
 ):
@@ -284,6 +378,8 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         image: QPixmap,
         parent: QWidget | None = None,
         footprint_selector: Callable[[QWidget], Footprint | None] | None = None,
+        load_callback: Callable[[], None] | None = None,
+        remove_callback: Callable[[], None] | None = None,
     ) -> None:  # pylint: disable=too-many-locals,too-many-statements
         super().__init__(parent)
         self.setWindowTitle("Edit imported image")
@@ -296,6 +392,8 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         self._display_scale = 1.0
         self._selection_start: QPoint | None = None
         self._selection = None
+        self._editing_existing_image = False
+        self._crop_selection_modified = False
         self._resize_edges: set[str] = set()
         self._calibration_start: QPoint | None = None
         self._calibration_end: QPoint | None = None
@@ -314,7 +412,7 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         self._canvas = QLabel()
         self._canvas.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._canvas.installEventFilter(self)
-        self._rubber_band = QRubberBand(QRubberBand.Shape.Rectangle, self._canvas)
+        self._rubber_band = CropOverlay(self._canvas)
         self._scroll = QScrollArea()
         self._scroll.setWidget(self._canvas)
         self._scroll.setWidgetResizable(False)
@@ -333,6 +431,20 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         self._calibration_button = calibration_button
         self._footprint_button = footprint_button
         self._crop_button = crop_button
+        load_image_button = QPushButton("Load")
+        load_image_button.setToolTip("Load another image for this side")
+        load_image_button.setEnabled(load_callback is not None)
+        if load_callback is not None:
+            load_image_button.clicked.connect(
+                lambda: self._close_for_image_action(load_callback)
+            )
+        remove_image_button = QPushButton("Remove")
+        remove_image_button.setToolTip("Remove image for this side")
+        remove_image_button.setEnabled(remove_callback is not None)
+        if remove_callback is not None:
+            remove_image_button.clicked.connect(
+                lambda: self._close_for_image_action(remove_callback)
+            )
         millimeters = MeasurementSpinBox()
         millimeters.setRange(0.0, 1_000_000.0)
         millimeters.setDecimals(3)
@@ -370,6 +482,8 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         controls.addWidget(calibration_button)
         controls.addWidget(footprint_button)
         controls.addWidget(crop_button)
+        controls.addWidget(load_image_button)
+        controls.addWidget(remove_image_button)
         controls.addWidget(QLabel("Real length"))
         controls.addWidget(millimeters)
         controls.addWidget(rotate_left)
@@ -396,6 +510,11 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         self._render()
         QTimer.singleShot(0, self._render)
 
+    def _close_for_image_action(self, callback: Callable[[], None]) -> None:
+        """Close editor before changing its project-side image."""
+        self.reject()
+        QTimer.singleShot(0, callback)
+
     def prepare_existing_image(
         self,
         pixels_per_mm: float,
@@ -405,12 +524,14 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         """Start editing with the existing crop and scale still valid."""
         if pixels_per_mm <= 0:
             return
-        width = max(2, self._canvas.width() - 2)
-        height = max(2, self._canvas.height() - 2)
-        self._set_selection(QPoint(1, 1), QPoint(width, height))
+        self._editing_existing_image = True
+        self._crop_selection_modified = False
+        width = max(2, self._canvas.width())
+        height = max(2, self._canvas.height())
+        self._set_selection(QPoint(0, 0), QPoint(width - 1, height - 1))
         if calibration_line is None:
-            start = QPoint(1, max(1, height // 2))
-            end = QPoint(width, max(1, height // 2))
+            start = QPoint(0, max(0, height // 2))
+            end = QPoint(width - 1, max(0, height // 2))
             self._set_calibration_line(start, end)
         else:
             # The calibration line may intentionally sit outside the crop. Keep
@@ -541,6 +662,7 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
             event.type() == QEvent.Type.MouseButtonPress
             and event.button() == Qt.MouseButton.LeftButton
         ):
+            self._crop_selection_modified = True
             position = event.position().toPoint()
             self._resize_edges = self._hit_edges(position)
             self._selection_start = position
@@ -597,7 +719,11 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
             )
             return
         selection = self._selection
-        source_rect = self._source_rect(selection)
+        source_rect = (
+            QRect(0, 0, self._source.width(), self._source.height())
+            if self._editing_existing_image and not self._crop_selection_modified
+            else self._source_rect(selection)
+        )
         calibration_line = self._active_calibration_line()
         if calibration_line is not None:
             start, end = calibration_line
@@ -906,6 +1032,10 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         painter.end()
         self._canvas.setPixmap(displayed)
         self._canvas.resize(displayed.size())
+        self._rubber_band.setGeometry(self._canvas.rect())
+        self._rubber_band.set_selection(self._selection)
+        if self._selection is not None:
+            self._rubber_band.show()
 
     def _set_selection(self, start: QPoint, end: QPoint) -> None:
         """Update selection rectangle constrained to displayed image."""
@@ -946,7 +1076,8 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
     def _update_selection(self, selection: QRect) -> None:
         """Apply selection geometry and update validation state."""
         self._selection = selection
-        self._rubber_band.setGeometry(self._selection)
+        self._rubber_band.setGeometry(self._canvas.rect())
+        self._rubber_band.set_selection(self._selection)
         self._rubber_band.show()
         self._update_confirm_state()
 
@@ -1301,7 +1432,9 @@ def _paint_footprint(  # pylint: disable=too-many-arguments,too-many-positional-
     painter.restore()
 
 
-class ImageView(QScrollArea):  # pylint: disable=too-many-instance-attributes
+class ImageView(
+    QScrollArea
+):  # pylint: disable=too-many-instance-attributes,too-many-public-methods
     """Scrollable image view with mouse-wheel zoom."""
 
     view_changed = Signal()
@@ -1309,6 +1442,8 @@ class ImageView(QScrollArea):  # pylint: disable=too-many-instance-attributes
     pad_clicked = Signal(float, float)
     pad_context_requested = Signal(float, float)
     pad_menu_requested = Signal(float, float)
+    trace_menu_requested = Signal(float, float)
+    pad_connection_requested = Signal(float, float)
     device_placed = Signal(float, float)
     device_rotated = Signal()
 
@@ -1326,6 +1461,8 @@ class ImageView(QScrollArea):  # pylint: disable=too-many-instance-attributes
         self._device_preview_point = (0.5, 0.5)
         self._pad_labels: tuple[Pad, ...] = ()
         self._mirror_pad_labels = False
+        self._connection_net: str | None = None
+        self._connection_origin_id: str | None = None
         self._label = QLabel(empty_text)
         self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._label.setMinimumSize(240, 180)
@@ -1372,12 +1509,31 @@ class ImageView(QScrollArea):  # pylint: disable=too-many-instance-attributes
         self._mirror_pad_labels = mirror_x
         self._render()
 
+    def set_trace_selection(self, net: str | None, origin_id: str | None) -> None:
+        """Store visible trace selection for hit testing."""
+        self._connection_net = net
+        self._connection_origin_id = origin_id
+
+    def trace_at(self, x: float, y: float) -> tuple[str, str] | None:
+        """Return trace endpoints near normalized image coordinates."""
+        if self._label.width() <= 1 or self._label.height() <= 1:
+            return None
+        point = QPointF(x * (self._label.width() - 1), y * (self._label.height() - 1))
+        return self._trace_at_point(point)
+
+    def set_connection_mode(self, enabled: bool) -> None:
+        """Use crosshair cursor while editing a pad connection."""
+        if enabled:
+            cursor = QCursor(Qt.CursorShape.CrossCursor)
+            self.setCursor(cursor)
+            self._label.setCursor(cursor)
+        else:
+            self.unsetCursor()
+            self._label.unsetCursor()
+
     def wheelEvent(self, event) -> None:  # noqa: N802  # pylint: disable=invalid-name
-        """Zoom image with Ctrl+wheel, preserving normal scroll behavior."""
-        if (
-            event.modifiers() & Qt.KeyboardModifier.ControlModifier
-            and not self._pixmap.isNull()
-        ):
+        """Zoom image with a mouse wheel or trackpad scroll gesture."""
+        if event.angleDelta().y() and not self._pixmap.isNull():
             self._zoom_by(
                 1.2 if event.angleDelta().y() > 0 else 1 / 1.2,
                 event.position().toPoint(),
@@ -1401,8 +1557,23 @@ class ImageView(QScrollArea):  # pylint: disable=too-many-instance-attributes
         self, watched, event
     ) -> bool:
         """Pan image by dragging it with the primary mouse button."""
-        if watched not in (self._label, self.viewport()):
+        label = getattr(self, "_label", None)
+        if label is None:
+            return False
+        if watched not in (label, self.viewport()):
             return super().eventFilter(watched, event)
+        if event.type() == QEvent.Type.MouseButtonDblClick:
+            point = self._label_point(watched, event.position().toPoint())
+            if (
+                event.button() == Qt.MouseButton.LeftButton
+                and not self._device_placement
+                and not self._pad_placement
+                and self._pad_at_point(point) is not None
+            ):
+                self.pad_clicked.emit(*self._normalized_point(point))
+                self._click_position = None
+                self._drag_position = None
+            return True
         if event.type() == QEvent.Type.MouseButtonPress:
             point = self._label_point(watched, event.position().toPoint())
             if (
@@ -1418,7 +1589,12 @@ class ImageView(QScrollArea):  # pylint: disable=too-many-instance-attributes
                     return True
             if event.button() == Qt.MouseButton.RightButton:
                 if not self._pixmap.isNull() and self._label.rect().contains(point):
-                    self.pad_context_requested.emit(*self._normalized_point(point))
+                    if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                        self.pad_context_requested.emit(*self._normalized_point(point))
+                    elif self._trace_at_point(point) is not None:
+                        self.trace_menu_requested.emit(*self._normalized_point(point))
+                    else:
+                        self.pad_menu_requested.emit(*self._normalized_point(point))
                     return True
                 return super().eventFilter(watched, event)
             if event.button() != Qt.MouseButton.LeftButton:
@@ -1427,8 +1603,9 @@ class ImageView(QScrollArea):  # pylint: disable=too-many-instance-attributes
                 event.modifiers() & Qt.KeyboardModifier.ShiftModifier
                 and not self._pixmap.isNull()
                 and self._label.rect().contains(point)
+                and self._pad_at_point(point) is not None
             ):
-                self.pad_menu_requested.emit(*self._normalized_point(point))
+                self.pad_connection_requested.emit(*self._normalized_point(point))
                 return True
             if self._pad_placement and not self._pixmap.isNull():
                 if self._label.rect().contains(point):
@@ -1437,9 +1614,13 @@ class ImageView(QScrollArea):  # pylint: disable=too-many-instance-attributes
                     self._pad_band.show()
                     LOGGER.debug("Pad drag started point=(%s,%s)", point.x(), point.y())
                     return True
-            self._click_position = point
-            self._drag_position = event.globalPosition().toPoint()
-            self.setCursor(QCursor(Qt.CursorShape.ClosedHandCursor))
+            if self._pad_at_point(point) is not None:
+                self._click_position = point
+                self._drag_position = None
+            else:
+                self._click_position = None
+                self._drag_position = event.globalPosition().toPoint()
+                self.setCursor(QCursor(Qt.CursorShape.ClosedHandCursor))
             return True
         if event.type() == QEvent.Type.MouseMove and self._device_placement:
             point = self._label_point(watched, event.position().toPoint())
@@ -1490,14 +1671,94 @@ class ImageView(QScrollArea):  # pylint: disable=too-many-instance-attributes
                     )
                     self.pad_selected.emit(x, y, right - x, bottom - y)
                 return True
-            if self._drag_position is not None and self._click_position is not None:
+            if self._click_position is not None:
                 if (point - self._click_position).manhattanLength() <= 3:
                     self.pad_clicked.emit(*self._normalized_point(point))
                 self._click_position = None
+                return True
+            if self._drag_position is not None:
                 self._drag_position = None
                 self.unsetCursor()
                 return True
         return super().eventFilter(watched, event)
+
+    def _pad_at_point(self, point: QPoint | QPointF) -> Pad | None:
+        """Return the visible pad under a displayed-image coordinate."""
+        pixel_point = point.toPoint() if isinstance(point, QPointF) else point
+        if not self._label.rect().contains(pixel_point):
+            return None
+        x, y = self._normalized_point(pixel_point)
+        image_width = max(1, self._label.width() - 1)
+        image_height = max(1, self._label.height() - 1)
+        for pad in reversed(self._pad_labels):
+            center_x = pad.x + pad.width / 2
+            center_y = pad.y + pad.height / 2
+            cosine = math.cos(math.radians(-pad.rotation))
+            sine = math.sin(math.radians(-pad.rotation))
+            delta_x = (x - center_x) * image_width
+            delta_y = (y - center_y) * image_height
+            local_x = delta_x * cosine - delta_y * sine
+            local_y = delta_x * sine + delta_y * cosine
+            width = max(1e-9, pad.width * image_width)
+            height = max(1e-9, pad.height * image_height)
+            if pad.shape in {"circle", "oval"}:
+                hit = (local_x / (width / 2)) ** 2 + (
+                    local_y / (height / 2)
+                ) ** 2 <= 1.0
+            else:
+                hit = abs(local_x) <= width / 2 and abs(local_y) <= height / 2
+            if hit:
+                return pad
+        return None
+
+    def _trace_at_point(self, point: QPoint | QPointF) -> tuple[str, str] | None:
+        """Return origin/target pad IDs when point touches a visible trace."""
+        if not self._connection_net or self._pad_at_point(point) is not None:
+            return None
+        pads = [pad for pad in self._pad_labels if pad.net == self._connection_net]
+        if len(pads) < 2:
+            return None
+        centers = {
+            pad.pad_id: QPointF(
+                (pad.x + pad.width / 2) * (self._label.width() - 1),
+                (pad.y + pad.height / 2) * (self._label.height() - 1),
+            )
+            for pad in pads
+        }
+        origin_id = (
+            self._connection_origin_id
+            if self._connection_origin_id in centers
+            else pads[0].pad_id
+        )
+        origin = centers[origin_id]
+        tolerance = max(6.0, min(self._label.width(), self._label.height()) * 0.012)
+        for pad in pads:
+            if pad.pad_id == origin_id:
+                continue
+            target = centers[pad.pad_id]
+            if self._distance_to_segment(point, origin, target) <= tolerance:
+                return origin_id, pad.pad_id
+        return None
+
+    @staticmethod
+    def _distance_to_segment(point: QPointF, start: QPointF, end: QPointF) -> float:
+        """Return shortest distance from point to a finite line segment."""
+        delta_x = end.x() - start.x()
+        delta_y = end.y() - start.y()
+        length_squared = delta_x * delta_x + delta_y * delta_y
+        if length_squared == 0:
+            return math.hypot(point.x() - start.x(), point.y() - start.y())
+        projection = max(
+            0.0,
+            min(
+                1.0,
+                ((point.x() - start.x()) * delta_x + (point.y() - start.y()) * delta_y)
+                / length_squared,
+            ),
+        )
+        nearest_x = start.x() + projection * delta_x
+        nearest_y = start.y() + projection * delta_y
+        return math.hypot(point.x() - nearest_x, point.y() - nearest_y)
 
     def set_pad_placement(self, enabled: bool) -> None:
         """Enable or disable click-to-place mode for a pad."""
@@ -1767,7 +2028,820 @@ class ImageView(QScrollArea):  # pylint: disable=too-many-instance-attributes
         return min(1.0, width_ratio, height_ratio)
 
 
-class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
+class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
+    """Paint an electrical schematic using simple IEC-style symbols."""
+
+    layout_changed = Signal(str, float, float)
+    net_connection_requested = Signal(object, object)
+    terminal_selected = Signal(object)
+    terminal_net_edit_requested = Signal(object)
+    terminal_menu_requested = Signal(object)
+    pan_requested = Signal(int, int)
+    connection_mode_changed = Signal(bool)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._project: ProjectDocument | None = None
+        self._zoom = 1.0
+        self._logical_width = 1400
+        self._logical_height = 1100
+        self._device_centers: dict[str, QPointF] = {}
+        self._drag_device_id: str | None = None
+        self._drag_offset = QPointF()
+        self._terminal_hits: list[tuple[QPointF, tuple[str, str, str | None]]] = []
+        self._pending_terminal: tuple[str, str, str | None] | None = None
+        self._pending_terminals: list[tuple[str, str, str | None]] = []
+        self._pending_wire_start: QPointF | None = None
+        self._pending_wire_end: QPointF | None = None
+        self._selected_net: str | None = None
+        self._pan_position: QPoint | None = None
+        self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.resize(self._logical_width, self._logical_height)
+        self.setAutoFillBackground(True)
+
+    def set_project(self, project: ProjectDocument | None) -> None:
+        """Replace the displayed project and repaint the schematic."""
+        self._project = project
+        self._resize_for_project()
+        self.update()
+
+    def set_selected_net(self, net: str | None) -> None:
+        """Highlight one selected electrical connection."""
+        self._selected_net = net
+        self.update()
+
+    def set_connection_mode(self, enabled: bool) -> None:
+        """Use crosshair cursor while editing schematic connections."""
+        if enabled:
+            self.setCursor(QCursor(Qt.CursorShape.CrossCursor))
+        else:
+            self.unsetCursor()
+
+    def _resize_for_project(self) -> None:
+        """Grow the logical sheet so every auto-placed symbol remains visible."""
+        devices = self._project.devices if self._project else []
+        independent_pads = (
+            [pad for pad in self._project.pads if not pad.device_id]
+            if self._project
+            else []
+        )
+        device_rows = max(1, math.ceil(len(devices) / 3))
+        pad_rows = math.ceil(len(independent_pads) / 6)
+        net_count = len(
+            {pin.net_id for device in devices for pin in device.pins if pin.net_id}
+            | {pad.net for pad in independent_pads if pad.net}
+        )
+        auto_height = 260 + (device_rows - 1) * 460 + 300 + pad_rows * 54
+        saved_bottom = max(
+            (
+                (device.schematic_y or 0) + self._symbol_size(device)[1] / 2 + 120
+                for device in devices
+            ),
+            default=0,
+        )
+        self._logical_width = max(1600, 1420 + net_count * 80)
+        self._logical_height = max(900, int(auto_height), int(saved_bottom))
+        self.resize(
+            round(self._logical_width * self._zoom),
+            round(self._logical_height * self._zoom),
+        )
+
+    def set_zoom(self, zoom: float) -> None:
+        """Resize the canvas while keeping its schematic geometry vector-based."""
+        self._zoom = max(0.5, min(4.0, zoom))
+        self.resize(
+            round(self._logical_width * self._zoom),
+            round(self._logical_height * self._zoom),
+        )
+        self.update()
+
+    def _center_for_device(self, device: Device, index: int) -> QPointF:
+        """Return persisted schematic position or a stable automatic position."""
+        if device.schematic_x is not None and device.schematic_y is not None:
+            return QPointF(device.schematic_x, device.schematic_y)
+        columns = 3
+        return QPointF(300 + (index % columns) * 460, 260 + (index // columns) * 460)
+
+    @classmethod
+    def _symbol_size(cls, device: Device) -> tuple[float, float]:
+        """Return the collision/display size of one schematic symbol."""
+        if cls._symbol_kind(device) == "uc":
+            pins = max(1, len(device.pins))
+            side_pins = max(1, math.ceil(pins / 4))
+            side = max(120.0, side_pins * 22.0 + 30.0)
+            return side, side
+        if cls._symbol_kind(device) == "connector":
+            return 150.0, max(100.0, len(device.pins) * 20.0 + 30.0)
+        if cls._symbol_kind(device) == "transistor":
+            return 150.0, 130.0
+        return 150.0, 120.0
+
+    @classmethod
+    def _device_bounds(cls, device: Device, center: QPointF) -> QRectF:
+        """Return a padded collision rectangle for one component."""
+        width, height = cls._symbol_size(device)
+        return QRectF(
+            center.x() - width / 2 - 12,
+            center.y() - height / 2 - 12,
+            width + 24,
+            height + 24,
+        )
+
+    @staticmethod
+    def _uc_endpoints(center: QPointF, pin_count: int, side: float) -> list[QPointF]:
+        """Place UC pins on all four square edges, never inside the body."""
+        side_pins = max(1, math.ceil(pin_count / 4))
+        points: list[QPointF] = []
+        half = side / 2
+        for index in range(pin_count):
+            edge = index // side_pins
+            offset = (index % side_pins + 1) / (side_pins + 1) * side - half
+            if edge == 0:
+                points.append(QPointF(center.x() - half, center.y() + offset))
+            elif edge == 1:
+                points.append(QPointF(center.x() + offset, center.y() - half))
+            elif edge == 2:
+                points.append(QPointF(center.x() + half, center.y() - offset))
+            else:
+                points.append(QPointF(center.x() - offset, center.y() + half))
+        return points
+
+    @staticmethod
+    def _pin_label(pin: ComponentPin) -> str:
+        """Return a compact pin number/name suitable for schematic symbols."""
+        semantic = ""
+        if pin.function and pin.function != f"Pin {pin.number}":
+            semantic = pin.function
+        elif pin.pin_id != pin.number:
+            semantic = pin.pin_id
+        return f"{pin.number} {semantic}".strip()
+
+    def _draw_uc_pins(
+        self,
+        painter: QPainter,
+        pins: list[ComponentPin],
+        side: float,
+    ) -> list[QPointF]:
+        """Draw UC pin names inside and terminal wires outside the square."""
+        half = side / 2
+        edge_points = self._uc_endpoints(QPointF(0, 0), len(pins), side)
+        endpoints: list[QPointF] = []
+        metrics = painter.fontMetrics()
+        for pin, edge in zip(pins, edge_points, strict=True):
+            label = self._pin_label(pin)
+            if math.isclose(edge.x(), -half):
+                outward = QPointF(-1, 0)
+                painter.drawText(int(-half + 7), int(edge.y() + 5), label)
+            elif math.isclose(edge.x(), half):
+                outward = QPointF(1, 0)
+                painter.drawText(
+                    int(half - metrics.horizontalAdvance(label) - 7),
+                    int(edge.y() + 5),
+                    label,
+                )
+            elif math.isclose(edge.y(), -half):
+                outward = QPointF(0, -1)
+                painter.save()
+                painter.translate(edge.x() + 5, -half + 7)
+                painter.rotate(90)
+                painter.drawText(0, 0, label)
+                painter.restore()
+            else:
+                outward = QPointF(0, 1)
+                painter.save()
+                painter.translate(edge.x() - 5, half - 7)
+                painter.rotate(-90)
+                painter.drawText(0, 0, label)
+                painter.restore()
+            endpoint = edge + outward * 24
+            painter.drawLine(edge, endpoint)
+            endpoints.append(endpoint)
+        return endpoints
+
+    def _device_at(self, point: QPointF) -> str | None:
+        """Return the component under a logical canvas point."""
+        if self._project is None:
+            return None
+        devices = {device.device_id: device for device in self._project.devices}
+        for device_id, center in reversed(tuple(self._device_centers.items())):
+            device = devices.get(device_id)
+            if device is not None and self._device_bounds(device, center).contains(
+                point
+            ):
+                return device_id
+        return None
+
+    def _terminal_at(
+        self, point: QPointF
+    ) -> tuple[tuple[str, str, str | None], QPointF] | None:
+        """Return the nearest schematic terminal around a logical point."""
+        candidates = [
+            (QLineF(point, terminal_point).length(), terminal, terminal_point)
+            for terminal_point, terminal in self._terminal_hits
+            if QLineF(point, terminal_point).length() <= 18.0
+        ]
+        if not candidates:
+            return None
+        _distance, terminal, terminal_point = min(candidates, key=lambda item: item[0])
+        return terminal, terminal_point
+
+    def _clear_pending_wire(self) -> None:
+        """Cancel the interactive net wire preview."""
+        self._pending_terminal = None
+        self._pending_terminals = []
+        self._pending_wire_start = None
+        self._pending_wire_end = None
+        self.set_connection_mode(False)
+        self.connection_mode_changed.emit(False)
+        self.update()
+
+    def finish_connection(self) -> bool:
+        """Leave connector mode after its links were created incrementally."""
+        if not self._pending_terminals:
+            return False
+        self._clear_pending_wire()
+        return True
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        """Start dragging a schematic component."""
+        point = event.position() / self._zoom
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and event.modifiers() & Qt.KeyboardModifier.ShiftModifier
+        ):
+            hit = self._terminal_at(point)
+            if hit is None:
+                self._clear_pending_wire()
+                return
+            terminal, terminal_point = hit
+            if self._pending_terminal is None:
+                self.set_connection_mode(True)
+                self.connection_mode_changed.emit(True)
+                self._pending_terminal = terminal
+                self._pending_terminals = [terminal]
+                self._pending_wire_start = terminal_point
+                self._pending_wire_end = point
+            elif terminal not in self._pending_terminals:
+                self._pending_terminals.append(terminal)
+                self._pending_terminal = terminal
+                self._pending_wire_start = terminal_point
+                self._pending_wire_end = point
+                self.net_connection_requested.emit(self._pending_terminals[0], terminal)
+            self.setFocus()
+            event.accept()
+            self.update()
+            return
+        terminal_hit = self._terminal_at(point)
+        if (
+            event.button() == Qt.MouseButton.RightButton
+            and event.modifiers() & Qt.KeyboardModifier.ShiftModifier
+            and terminal_hit is not None
+        ):
+            terminal, _terminal_point = terminal_hit
+            self.terminal_net_edit_requested.emit(terminal)
+            event.accept()
+            return
+        if (
+            event.button() == Qt.MouseButton.RightButton
+            and event.modifiers() == Qt.KeyboardModifier.NoModifier
+            and terminal_hit is not None
+        ):
+            terminal, _terminal_point = terminal_hit
+            self.terminal_menu_requested.emit(terminal)
+            event.accept()
+            return
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and event.modifiers() == Qt.KeyboardModifier.NoModifier
+        ):
+            if terminal_hit is not None:
+                terminal, _terminal_point = terminal_hit
+                if self._pending_terminals:
+                    if terminal not in self._pending_terminals:
+                        self._pending_terminals.append(terminal)
+                        self.net_connection_requested.emit(
+                            self._pending_terminals[0], terminal
+                        )
+                    self._pending_terminal = terminal
+                    self._pending_wire_start = terminal_hit[1]
+                    self._pending_wire_end = point
+                    self.update()
+                else:
+                    self.terminal_selected.emit(terminal)
+                event.accept()
+                return
+        device_id = self._device_at(point)
+        if event.button() == Qt.MouseButton.RightButton and device_id is not None:
+            if self._project is not None:
+                self._project.devices = [
+                    (
+                        replace(
+                            device,
+                            schematic_rotation=(device.schematic_rotation + 90.0)
+                            % 360.0,
+                        )
+                        if device.device_id == device_id
+                        else device
+                    )
+                    for device in self._project.devices
+                ]
+                self.update()
+                self.layout_changed.emit(device_id, 0.0, 0.0)
+            event.accept()
+            return
+        if event.button() != Qt.MouseButton.LeftButton:
+            super().mousePressEvent(event)
+            return
+        if device_id is None:
+            self._pan_position = event.globalPosition().toPoint()
+            self.setCursor(QCursor(Qt.CursorShape.ClosedHandCursor))
+            event.accept()
+            return
+        self._drag_device_id = device_id
+        self._drag_offset = point - self._device_centers[device_id]
+        event.accept()
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        """Move the selected component on the schematic grid."""
+        if self._pending_terminal is not None:
+            self._pending_wire_end = event.position() / self._zoom
+            self.update()
+            event.accept()
+            return
+        if self._pan_position is not None:
+            current = event.globalPosition().toPoint()
+            delta = current - self._pan_position
+            self._pan_position = current
+            self.pan_requested.emit(delta.x(), delta.y())
+            event.accept()
+            return
+        if self._drag_device_id is None or self._project is None:
+            return
+        point = event.position() / self._zoom - self._drag_offset
+        device = next(
+            (
+                item
+                for item in self._project.devices
+                if item.device_id == self._drag_device_id
+            ),
+            None,
+        )
+        if device is None:
+            return
+        width, height = self._symbol_size(device)
+        point.setX(
+            max(width / 2 + 12, min(self._logical_width - width / 2 - 12, point.x()))
+        )
+        point.setY(
+            max(height / 2 + 12, min(self._logical_height - height / 2 - 12, point.y()))
+        )
+        for other in self._project.devices:
+            if other.device_id == device.device_id:
+                continue
+            other_center = self._device_centers.get(other.device_id)
+            if other_center is not None and self._device_bounds(
+                other, other_center
+            ).intersects(self._device_bounds(device, point)):
+                return
+        self._device_centers[self._drag_device_id] = point
+        self._project.devices = [
+            (
+                replace(device, schematic_x=point.x(), schematic_y=point.y())
+                if device.device_id == self._drag_device_id
+                else device
+            )
+            for device in self._project.devices
+        ]
+        self.update()
+        self.layout_changed.emit(self._drag_device_id, point.x(), point.y())
+        event.accept()
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        """Finish component dragging."""
+        self._drag_device_id = None
+        self._pan_position = None
+        self.unsetCursor()
+        super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        """Finish connector mode explicitly with Escape."""
+        if event.key() == Qt.Key.Key_Escape and self.finish_connection():
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    @staticmethod
+    def _symbol_kind(device: Device) -> str:
+        """Classify a component from KiCad metadata and its reference."""
+        family = _footprint_family(device.footprint_library).casefold().replace(" ", "")
+        name = device.footprint_name.casefold()
+        reference = device.reference.casefold()
+        object_type = device.object_type.casefold().replace(" ", "")
+        family = object_type or family
+        if "connector" in family or "terminal" in family or reference.startswith("j"):
+            return "connector"
+        if "battery" in family or reference.startswith("bt"):
+            return "battery"
+        if "switch" in family or reference.startswith("sw"):
+            return "switch"
+        if "transistor" in family or "mosfet" in name or reference.startswith("q"):
+            return "transistor"
+        if "diode" in family or "led" in family or reference.startswith("d"):
+            return "led" if "led" in family or "led" in name else "diode"
+        if "capacitor" in family or "capacitor" in name or reference.startswith("c"):
+            return "capacitor"
+        if "resistor" in family or "resistor" in name or reference.startswith("r"):
+            return "resistor"
+        return "uc"
+
+    @staticmethod
+    def _draw_resistor(painter: QPainter, center: QPointF) -> None:
+        """Draw a horizontal resistor symbol."""
+        x, y = center.x(), center.y()
+        painter.drawLine(QPointF(x - 58, y), QPointF(x - 34, y))
+        painter.drawLine(QPointF(x + 34, y), QPointF(x + 58, y))
+        points = [QPointF(x - 34, y)]
+        for offset, height in ((-24, -12), (-12, 12), (0, -12), (12, 12), (24, 0)):
+            points.append(QPointF(x + offset, y + height))
+        painter.drawPolyline(points)
+
+    @staticmethod
+    def _draw_capacitor(painter: QPainter, center: QPointF) -> None:
+        """Draw a horizontal capacitor symbol."""
+        x, y = center.x(), center.y()
+        painter.drawLine(QPointF(x - 58, y), QPointF(x - 8, y))
+        painter.drawLine(QPointF(x + 8, y), QPointF(x + 58, y))
+        painter.drawLine(QPointF(x - 8, y - 22), QPointF(x - 8, y + 22))
+        painter.drawLine(QPointF(x + 8, y - 22), QPointF(x + 8, y + 22))
+
+    @staticmethod
+    def _draw_diode(painter: QPainter, center: QPointF, led: bool = False) -> None:
+        """Draw a diode or LED symbol."""
+        x, y = center.x(), center.y()
+        painter.drawLine(QPointF(x - 58, y), QPointF(x - 18, y))
+        painter.drawLine(QPointF(x + 18, y), QPointF(x + 58, y))
+        painter.drawPolygon(
+            [QPointF(x - 18, y - 22), QPointF(x - 18, y + 22), QPointF(x + 18, y)]
+        )
+        painter.drawLine(QPointF(x + 18, y - 24), QPointF(x + 18, y + 24))
+        if led:
+            painter.drawLine(QPointF(x - 4, y - 28), QPointF(x + 8, y - 40))
+            painter.drawLine(QPointF(x + 8, y - 40), QPointF(x + 5, y - 32))
+            painter.drawLine(QPointF(x + 12, y - 24), QPointF(x + 24, y - 36))
+            painter.drawLine(QPointF(x + 24, y - 36), QPointF(x + 21, y - 28))
+
+    @staticmethod
+    def _draw_battery(painter: QPainter, center: QPointF) -> None:
+        """Draw a two-cell battery symbol."""
+        x, y = center.x(), center.y()
+        painter.drawLine(QPointF(x - 58, y), QPointF(x - 18, y))
+        painter.drawLine(QPointF(x + 18, y), QPointF(x + 58, y))
+        painter.drawLine(QPointF(x - 12, y - 28), QPointF(x - 12, y + 28))
+        painter.drawLine(QPointF(x - 2, y - 16), QPointF(x - 2, y + 16))
+        painter.drawLine(QPointF(x + 2, y - 16), QPointF(x + 2, y + 16))
+        painter.drawLine(QPointF(x + 12, y - 28), QPointF(x + 12, y + 28))
+        painter.drawText(int(x - 8), int(y - 34), "+")
+
+    @staticmethod
+    def _draw_switch(painter: QPainter, center: QPointF) -> None:
+        """Draw an open switch symbol."""
+        x, y = center.x(), center.y()
+        painter.drawLine(QPointF(x - 58, y), QPointF(x - 30, y))
+        painter.drawLine(QPointF(x + 30, y), QPointF(x + 58, y))
+        painter.drawEllipse(QPointF(x - 30, y - 3), 3, 3)
+        painter.drawEllipse(QPointF(x + 30, y - 3), 3, 3)
+        painter.drawLine(QPointF(x - 30, y), QPointF(x + 20, y - 24))
+
+    @staticmethod
+    def _draw_connector(
+        painter: QPainter, center: QPointF, pin_count: int
+    ) -> list[QPointF]:
+        """Draw a connector block with one-sided numbered pins."""
+        x, y = center.x(), center.y()
+        height = max(54, pin_count * 20 + 18)
+        box = QRectF(x - 42, y - height / 2, 84, height)
+        painter.drawRect(box)
+        painter.drawText(box, Qt.AlignmentFlag.AlignCenter, "CNX")
+        endpoints = []
+        for index in range(pin_count):
+            pin_y = y + (index - (pin_count - 1) / 2) * 20
+            painter.drawLine(QPointF(x + 42, pin_y), QPointF(x + 68, pin_y))
+            endpoints.append(QPointF(x + 68, pin_y))
+        return endpoints
+
+    @staticmethod
+    def _draw_transistor(painter: QPainter, center: QPointF) -> list[QPointF]:
+        """Draw a compact BJT-style transistor symbol with three terminals."""
+        x, y = center.x(), center.y()
+        painter.drawEllipse(center, 30, 30)
+        painter.drawLine(QPointF(x - 58, y), QPointF(x - 20, y))
+        painter.drawLine(QPointF(x + 5, y - 20), QPointF(x + 58, y - 48))
+        painter.drawLine(QPointF(x + 5, y + 20), QPointF(x + 58, y + 48))
+        painter.drawLine(QPointF(x - 4, y - 20), QPointF(x - 4, y + 20))
+        return [
+            QPointF(x - 58, y),
+            QPointF(x + 58, y - 48),
+            QPointF(x + 58, y + 48),
+        ]
+
+    def _draw_device(
+        self,
+        painter: QPainter,
+        device: Device,
+        center: QPointF,
+        net_points: dict[str, list[tuple[QPointF, QPointF]]],
+    ) -> None:
+        """Draw one symbol and collect its connected terminal positions."""
+        pins = device.pins or [ComponentPin("?", "unmapped")]
+        kind = self._symbol_kind(device)
+        painter.setPen(QPen(QColor("#e7edf5"), 2))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.save()
+        painter.translate(center)
+        painter.rotate(device.schematic_rotation)
+        origin = QPointF(0, 0)
+        if kind == "resistor":
+            self._draw_resistor(painter, origin)
+            endpoints = [
+                QPointF(-58, 0),
+                QPointF(58, 0),
+            ]
+        elif kind == "capacitor":
+            self._draw_capacitor(painter, origin)
+            endpoints = [
+                QPointF(-58, 0),
+                QPointF(58, 0),
+            ]
+        elif kind in {"diode", "led"}:
+            self._draw_diode(painter, origin, led=kind == "led")
+            endpoints = [
+                QPointF(-58, 0),
+                QPointF(58, 0),
+            ]
+        elif kind == "battery":
+            self._draw_battery(painter, origin)
+            endpoints = [
+                QPointF(-58, 0),
+                QPointF(58, 0),
+            ]
+        elif kind == "switch":
+            self._draw_switch(painter, origin)
+            endpoints = [
+                QPointF(-58, 0),
+                QPointF(58, 0),
+            ]
+        elif kind == "connector":
+            endpoints = self._draw_connector(painter, origin, len(pins))
+        elif kind == "transistor":
+            endpoints = self._draw_transistor(painter, origin)
+        else:
+            side = self._symbol_size(device)[0]
+            box = QRectF(-side / 2, -side / 2, side, side)
+            painter.drawRect(box)
+            painter.drawText(box, Qt.AlignmentFlag.AlignCenter, "UC")
+            endpoints = self._draw_uc_pins(painter, pins, side)
+        transform = QTransform()
+        transform.translate(center.x(), center.y())
+        transform.rotate(device.schematic_rotation)
+        endpoints = [transform.map(endpoint) for endpoint in endpoints]
+        painter.restore()
+        painter.setPen(QColor("#f2f6fa"))
+        painter.drawText(int(center.x() - 70), int(center.y() - 48), device.reference)
+        if device.value:
+            painter.setPen(QColor("#aeb7c4"))
+            painter.drawText(int(center.x() - 70), int(center.y() + 58), device.value)
+        for index, pin in enumerate(pins):
+            endpoint = endpoints[min(index, len(endpoints) - 1)]
+            self._terminal_hits.append(
+                (endpoint, ("pin", device.device_id, pin.number))
+            )
+            painter.setPen(QColor("#c5d2dd"))
+            delta_x = endpoint.x() - center.x()
+            delta_y = endpoint.y() - center.y()
+            if kind != "uc":
+                if abs(delta_x) >= abs(delta_y):
+                    text_x = endpoint.x() - (74 if delta_x < 0 else -8)
+                    text_y = endpoint.y() - 5
+                else:
+                    text_x = endpoint.x() - 12
+                    text_y = endpoint.y() - (10 if delta_y < 0 else -20)
+                painter.drawText(int(text_x), int(text_y), self._pin_label(pin))
+            if pin.net_id:
+                if abs(delta_x) >= abs(delta_y):
+                    outward = QPointF(-1 if delta_x < 0 else 1, 0)
+                else:
+                    outward = QPointF(0, -1 if delta_y < 0 else 1)
+                net_points.setdefault(pin.net_id, []).append((endpoint, outward))
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        """Draw real component symbols, terminals, and net wires."""
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.scale(self._zoom, self._zoom)
+        painter.setClipRect(QRectF(0, 0, self._logical_width, self._logical_height))
+        painter.fillRect(self.rect(), QColor("#20242b"))
+        if self._project is None:
+            painter.setPen(QColor("#aeb7c4"))
+            painter.drawText(
+                QRect(0, 0, self._logical_width, self._logical_height),
+                Qt.AlignmentFlag.AlignCenter,
+                "No project",
+            )
+            return
+        devices = sorted(
+            self._project.devices,
+            key=lambda device: (
+                0 if len(device.pins) > 4 else 1,
+                _reference_sort_key(device.reference),
+            ),
+        )
+        pads = sorted(self._project.pads, key=lambda pad: pad.name)
+        self._terminal_hits = []
+        net_names = sorted(
+            {pin.net_id for device in devices for pin in device.pins if pin.net_id}
+            | {pad.net for pad in pads if pad.net}
+        )
+        painter.setPen(QColor("#e7edf5"))
+        painter.drawText(18, 28, "Schematic")
+        if not devices and not pads:
+            painter.setPen(QColor("#aeb7c4"))
+            painter.drawText(18, 62, "Place components or pads to build the schematic.")
+            return
+
+        net_points: dict[str, list[tuple[QPointF, QPointF]]] = {}
+        for index, device in enumerate(devices):
+            center = self._center_for_device(device, index)
+            self._device_centers[device.device_id] = center
+            self._draw_device(
+                painter,
+                device,
+                center,
+                net_points,
+            )
+        independent_pads = [pad for pad in pads if not pad.device_id]
+        pad_start_y = 260 + math.ceil(len(devices) / 3) * 460
+        for index, pad in enumerate(independent_pads):
+            pad_point = QPointF(
+                180 + (index % 6) * 190,
+                pad_start_y + (index // 6) * 54,
+            )
+            painter.setPen(QPen(QColor("#e7edf5"), 2))
+            painter.drawRect(QRectF(pad_point.x() - 18, pad_point.y() - 10, 36, 20))
+            painter.drawText(int(pad_point.x() - 12), int(pad_point.y() - 16), pad.name)
+            self._terminal_hits.append(
+                (pad_point + QPointF(18, 0), ("pad", pad.pad_id, None))
+            )
+            if pad.net:
+                net_points.setdefault(pad.net, []).append(
+                    (pad_point + QPointF(18, 0), QPointF(1, 0))
+                )
+        painter.setPen(QPen(QColor("#e4b363"), 2))
+        painter.setBrush(QColor("#e4b363"))
+        for name in net_names:
+            selected = name == self._selected_net
+            painter.setPen(
+                QPen(
+                    QColor("#66c2ff") if selected else QColor("#e4b363"),
+                    3 if selected else 2,
+                )
+            )
+            painter.setBrush(QColor("#66c2ff") if selected else QColor("#e4b363"))
+            points = net_points.get(name, [])
+            if not points:
+                continue
+            stubs = []
+            for point, outward in points:
+                stub = point + outward * 26
+                painter.drawLine(point, stub)
+                stubs.append(stub)
+            if len(stubs) == 2:
+                middle_x = (stubs[0].x() + stubs[1].x()) / 2
+                painter.drawLine(stubs[0], QPointF(middle_x, stubs[0].y()))
+                painter.drawLine(
+                    QPointF(middle_x, stubs[0].y()),
+                    QPointF(middle_x, stubs[1].y()),
+                )
+                painter.drawLine(QPointF(middle_x, stubs[1].y()), stubs[1])
+                painter.drawEllipse(QPointF(middle_x, stubs[0].y()), 3, 3)
+                painter.drawText(int(middle_x + 7), int(stubs[0].y() - 6), name)
+            else:
+                for stub, (_point, outward) in zip(stubs, points, strict=True):
+                    text_x = stub.x() + (7 if outward.x() >= 0 else -48)
+                    text_y = stub.y() + (16 if outward.y() > 0 else -6)
+                    painter.drawText(int(text_x), int(text_y), name)
+
+        if self._pending_wire_start is not None and self._pending_wire_end is not None:
+            start = self._pending_wire_start
+            end = self._pending_wire_end
+            middle_x = (start.x() + end.x()) / 2
+            painter.setPen(QPen(QColor("#66c2ff"), 2, Qt.PenStyle.DashLine))
+            painter.drawLine(start, QPointF(middle_x, start.y()))
+            painter.drawLine(QPointF(middle_x, start.y()), QPointF(middle_x, end.y()))
+            painter.drawLine(QPointF(middle_x, end.y()), end)
+
+        orphan_y = 82 + len(devices) * 150
+        for pad in pads:
+            if pad.device_id or pad.net:
+                continue
+            painter.setPen(QColor("#aeb7c4"))
+            painter.drawText(24, orphan_y, f"Pad {pad.name} (unconnected)")
+            orphan_y += 22
+
+
+class SchematicView(QScrollArea):
+    """Scrollable, zoomable schematic viewport."""
+
+    layout_changed = Signal(str, float, float)
+    net_connection_requested = Signal(object, object)
+    terminal_selected = Signal(object)
+    terminal_net_edit_requested = Signal(object)
+    terminal_menu_requested = Signal(object)
+    connection_mode_changed = Signal(bool)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._zoom = 1.0
+        self._canvas = SchematicCanvas()
+        self._canvas.layout_changed.connect(self.layout_changed)
+        self._canvas.net_connection_requested.connect(self.net_connection_requested)
+        self._canvas.terminal_selected.connect(self.terminal_selected)
+        self._canvas.terminal_net_edit_requested.connect(
+            self.terminal_net_edit_requested
+        )
+        self._canvas.terminal_menu_requested.connect(self.terminal_menu_requested)
+        self._canvas.connection_mode_changed.connect(self.connection_mode_changed)
+        self._canvas.pan_requested.connect(self._pan_by)
+        self.setWidget(self._canvas)
+        self.setWidgetResizable(False)
+        self.setMinimumSize(520, 320)
+        self.setToolTip(
+            "Wheel/pinch: zoom; Shift+click: connector mode; Esc: finish; "
+            "Shift+right-click: edit net"
+        )
+
+    def set_project(self, project: ProjectDocument | None) -> None:
+        """Set the project rendered by the schematic canvas."""
+        self._canvas.set_project(project)
+
+    def set_selected_net(self, net: str | None) -> None:
+        """Highlight one selected net in the schematic canvas."""
+        self._canvas.set_selected_net(net)
+
+    def set_connection_mode(self, enabled: bool) -> None:
+        """Set schematic cursor for connection editing."""
+        self._canvas.set_connection_mode(enabled)
+
+    def finish_connection(self) -> bool:
+        """Finish a pending Shift-click connector session."""
+        return self._canvas.finish_connection()
+
+    def event(self, event) -> bool:  # noqa: N802
+        """Zoom schematic with native trackpad pinch gestures."""
+        if (
+            event.type() == QEvent.Type.NativeGesture
+            and event.gestureType() == Qt.NativeGestureType.ZoomNativeGesture
+        ):
+            self._zoom_by(max(0.01, 1.0 + event.value()))
+            return True
+        return super().event(event)
+
+    def wheelEvent(self, event) -> None:  # noqa: N802
+        """Zoom around the mouse position with the wheel."""
+        if event.angleDelta().y() == 0:
+            super().wheelEvent(event)
+            return
+        factor = 1.2 if event.angleDelta().y() > 0 else 1 / 1.2
+        self._zoom_by(factor, event.position().toPoint())
+        event.accept()
+
+    def _zoom_by(self, factor: float, cursor: QPoint | None = None) -> None:
+        """Apply one zoom step around the cursor or viewport center."""
+        old_zoom = self._zoom
+        self._zoom = max(0.5, min(4.0, self._zoom * factor))
+        if self._zoom == old_zoom:
+            return
+        cursor = cursor or QPoint(
+            self.viewport().width() // 2, self.viewport().height() // 2
+        )
+        source_x = (self.horizontalScrollBar().value() + cursor.x()) / old_zoom
+        source_y = (self.verticalScrollBar().value() + cursor.y()) / old_zoom
+        self._canvas.set_zoom(self._zoom)
+        self.horizontalScrollBar().setValue(round(source_x * self._zoom - cursor.x()))
+        self.verticalScrollBar().setValue(round(source_y * self._zoom - cursor.y()))
+
+    def _pan_by(self, delta_x: int, delta_y: int) -> None:
+        """Pan the schematic when dragging outside terminals/components."""
+        self.horizontalScrollBar().setValue(
+            self.horizontalScrollBar().value() - delta_x
+        )
+        self.verticalScrollBar().setValue(self.verticalScrollBar().value() - delta_y)
+
+
+class MainWindow(
+    QMainWindow
+):  # pylint: disable=too-many-instance-attributes,too-many-locals,too-many-statements
     """Minimal project and board-picture workspace."""
 
     def __init__(  # pylint: disable=too-many-statements
@@ -1786,6 +2860,8 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         self._add_device_pending = False
         self._selected_net: str | None = None
         self._selected_pad_id: str | None = None
+        self._selected_schematic_terminal: tuple[str, str, str | None] | None = None
+        self._pending_board_connection_pads: list[str] = []
         self._pads_visible = True
         self._pad_refresh_pending = False
         self._pending_pad_view_state: tuple[float, float, float] | None = None
@@ -1828,14 +2904,30 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         self._tabs.addTab(side_by_side, "Top + bottom")
         self._overlay_view = ImageView("No top/bottom images")
         self._tabs.addTab(self._overlay_view, "Both")
-        self._net_table = QTableWidget(0, 2)
-        self._net_table.setHorizontalHeaderLabels(["Pad", "Net"])
-        self._net_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._net_table = QTableWidget(0, 5)
+        self._net_table.setHorizontalHeaderLabels(
+            ["Pad", "Net", "Pin", "Function", "Component"]
+        )
+        self._net_table.cellChanged.connect(self._net_table_cell_changed)
         self._tabs.addTab(self._net_table, "Nets")
         self._bom_table = QTableWidget(0, 3)
         self._bom_table.setHorizontalHeaderLabels(["Reference", "Object", "Value"])
-        self._bom_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._bom_table.cellChanged.connect(self._bom_table_cell_changed)
         self._tabs.addTab(self._bom_table, "BOM")
+        self._schematic_view = SchematicView()
+        self._schematic_view.layout_changed.connect(self._schematic_layout_changed)
+        self._schematic_view.net_connection_requested.connect(
+            self._connect_schematic_terminals
+        )
+        self._schematic_view.terminal_selected.connect(self._select_schematic_terminal)
+        self._schematic_view.terminal_net_edit_requested.connect(
+            self._edit_schematic_terminal_net
+        )
+        self._schematic_view.terminal_menu_requested.connect(
+            self._show_schematic_terminal_menu
+        )
+        self._schematic_view.connection_mode_changed.connect(self._set_connection_mode)
+        self._tabs.addTab(self._schematic_view, "Schematic")
         for view in (*self._views.values(), *self._side_views.values()):
             view.view_changed.connect(lambda view=view: self._sync_board_views(view))
         for side, view in self._views.items():
@@ -1852,6 +2944,12 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
             )
             view.pad_menu_requested.connect(
                 lambda x, y, side=side: self._defer_pad_menu(side, x, y)
+            )
+            view.trace_menu_requested.connect(
+                lambda x, y, side=side: self._defer_trace_menu(side, x, y)
+            )
+            view.pad_connection_requested.connect(
+                lambda x, y, side=side: self._select_board_connection_pad(side, x, y)
             )
             view.device_placed.connect(
                 lambda x, y, side=side: self._place_device(side, x, y)
@@ -1871,6 +2969,12 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
             )
             view.pad_menu_requested.connect(
                 lambda x, y, side=side: self._defer_pad_menu(side, x, y)
+            )
+            view.trace_menu_requested.connect(
+                lambda x, y, side=side: self._defer_trace_menu(side, x, y)
+            )
+            view.pad_connection_requested.connect(
+                lambda x, y, side=side: self._select_board_connection_pad(side, x, y)
             )
             view.device_placed.connect(
                 lambda x, y, side=side: self._place_device(side, x, y)
@@ -1897,63 +3001,128 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         dock.setObjectName("toolsDock")
         panel = QWidget(dock)
         layout = QVBoxLayout(panel)
-        actual_button = QPushButton("1:1", panel)
-        actual_button.setToolTip("Actual image size")
-        actual_button.clicked.connect(self._actual_size)
-        layout.addWidget(actual_button)
-        fit_button = QPushButton("FIT", panel)
-        fit_button.setToolTip("Fit image in view")
-        fit_button.clicked.connect(self._fit_images)
-        layout.addWidget(fit_button)
-        center_button = QPushButton("◎", panel)
-        center_button.setToolTip("Center image")
-        center_button.clicked.connect(self._center_images)
-        layout.addWidget(center_button)
-        layout.addSpacing(12)
-        import_button = QPushButton("Import image", panel)
-        import_button.setToolTip("Import image, then choose Top or Bottom")
-        import_button.clicked.connect(self.import_picture)
-        layout.addWidget(import_button)
-        remove_button = QPushButton("Remove image", panel)
-        remove_button.setToolTip("Remove a Top or Bottom image")
-        remove_button.clicked.connect(self.remove_picture)
-        layout.addWidget(remove_button)
-        edit_button = QPushButton("Edit image", panel)
-        edit_button.setToolTip("Adjust crop or rotate an imported image")
-        edit_button.clicked.connect(self.edit_picture)
-        layout.addWidget(edit_button)
-        device_button = QPushButton("Add device", panel)
-        device_button.setToolTip("Select and place a KiCad footprint")
-        device_button.clicked.connect(self.add_device)
-        layout.addWidget(device_button)
-        self._add_device_button = device_button
-        pad_button = QPushButton("Create pad", panel)
-        pad_button.setToolTip("Create a pad on the Top or Bottom image")
-        pad_button.clicked.connect(self.create_pad)
-        layout.addWidget(pad_button)
-        show_pads_button = QPushButton("Show pads", panel)
+
+        def add_button(
+            text: str,
+            icon: QStyle.StandardPixmap,
+            tooltip: str,
+            callback: Callable[[], None],
+        ) -> QPushButton:
+            """Add icon, tooltip, and hover feedback to palette button."""
+            button = QPushButton(panel)
+            button.setIcon(self.style().standardIcon(icon))
+            button.setAccessibleName(text)
+            button.setObjectName(
+                f"tool{''.join(character for character in text.title() if character.isalnum())}"
+            )
+            button.setFixedSize(40, 36)
+            button.setToolTip(tooltip)
+            button.setStatusTip(tooltip)
+            button.clicked.connect(callback)
+            layout.addWidget(button)
+            return button
+
+        add_button(
+            "1:1",
+            QStyle.StandardPixmap.SP_ComputerIcon,
+            "Actual image size",
+            self._actual_size,
+        )
+        add_button(
+            "FIT",
+            QStyle.StandardPixmap.SP_DesktopIcon,
+            "Fit image in view",
+            self._fit_images,
+        )
+        center_button = add_button(
+            "Center",
+            QStyle.StandardPixmap.SP_DialogResetButton,
+            "Center image",
+            self._center_images,
+        )
+        center_button.setIcon(_center_tool_icon())
+        show_pads_button = QPushButton(panel)
         show_pads_button.setCheckable(True)
         show_pads_button.setChecked(True)
+        show_pads_button.setAccessibleName("Show pads")
+        show_pads_button.setObjectName("toolShowPads")
+        show_pads_button.setFixedSize(40, 36)
+        show_pads_button.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_DialogYesButton)
+        )
         show_pads_button.setToolTip("Show or hide pad rectangles and connections")
+        show_pads_button.setStatusTip(show_pads_button.toolTip())
         show_pads_button.toggled.connect(self._set_pads_visible)
         layout.addWidget(show_pads_button)
-        log_button = QPushButton("Log file", panel)
-        log_button.setToolTip("Show diagnostic log file path")
-        log_button.clicked.connect(self._show_log_path)
-        layout.addWidget(log_button)
-        save_button = QPushButton("Save", panel)
-        save_button.setToolTip("Save project")
-        save_button.clicked.connect(self.save_project)
-        layout.addWidget(save_button)
+        layout.addSpacing(12)
+        add_button(
+            "Image",
+            QStyle.StandardPixmap.SP_DialogOpenButton,
+            "Choose Top or Bottom image: load, resize, or remove",
+            self.manage_picture,
+        )
+        device_button = add_button(
+            "Add Footprint",
+            QStyle.StandardPixmap.SP_FileDialogDetailedView,
+            "Select and place a KiCad footprint",
+            self.add_device,
+        )
+        device_button.setIcon(
+            QIcon.fromTheme(
+                "list-add",
+                self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogNewFolder),
+            )
+        )
+        self._add_device_button = device_button
+        pad_button = add_button(
+            "Add Pad",
+            QStyle.StandardPixmap.SP_FileDialogNewFolder,
+            "Create a pad on the Top or Bottom image",
+            self.create_pad,
+        )
+        pad_button.setIcon(_pad_tool_icon())
+        add_button(
+            "Log file",
+            QStyle.StandardPixmap.SP_FileDialogInfoView,
+            "Show diagnostic log file path",
+            self._show_log_path,
+        )
+        save_button = add_button(
+            "Save",
+            QStyle.StandardPixmap.SP_DialogSaveButton,
+            "Save project",
+            self.save_project,
+        )
+        save_button.setIcon(_save_tool_icon())
         layout.addStretch()
-        quit_button = QPushButton("Quit", panel)
-        quit_button.setToolTip("Quit Tnasrevner")
-        quit_button.clicked.connect(self.close)
-        layout.addWidget(quit_button)
+        add_button(
+            "Quit",
+            QStyle.StandardPixmap.SP_DialogCloseButton,
+            "Quit Tnasrevner",
+            self.close,
+        )
+        self._net_mode_label = QLabel("Net edition - Esc to Stop", panel)
+        self._net_mode_label.setObjectName("netModeLabel")
+        self._net_mode_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._net_mode_label.setStyleSheet("color: #66c2ff; font-weight: 600;")
+        self._net_mode_label.setVisible(False)
+        layout.addWidget(self._net_mode_label)
+        panel.setStyleSheet(
+            "QPushButton { padding: 6px 8px; }"
+            "QPushButton:hover { background: palette(highlight); "
+            "color: palette(highlighted-text); }"
+        )
         panel.setLayout(layout)
         dock.setWidget(panel)
         self._tools_dock = dock
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
+
+    def _set_connection_mode(self, enabled: bool) -> None:
+        """Update cursor and palette status for connection editing."""
+        for view in (*self._views.values(), *self._side_views.values()):
+            view.set_connection_mode(enabled)
+        self._schematic_view.set_connection_mode(enabled)
+        self._net_mode_label.setVisible(enabled)
 
     def _create_view_menu(self) -> None:
         """Create menu actions for restoring optional panels."""
@@ -2193,6 +3362,9 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
     def _reference_prefix(self, source: FootprintReference) -> str:
         """Choose a remembered or conventional reference prefix."""
         family = _footprint_family_key(source.library)
+        default_prefix = _DEFAULT_REFERENCE_PREFIXES.get(family)
+        if default_prefix is None:
+            return "U?"
         if self.project:
             for device in reversed(self.project.devices):
                 if _footprint_family_key(device.footprint_library) != family:
@@ -2203,7 +3375,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         remembered = self._settings.value(f"{_REFERENCE_PREFIX_KEY}/{family}")
         if isinstance(remembered, str) and re.fullmatch(r"[A-Za-z]+", remembered):
             return remembered
-        return _DEFAULT_REFERENCE_PREFIXES.get(family, "U")
+        return default_prefix
 
     def _next_device_reference(self, source: FootprintReference) -> str:
         """Return the next unused numeric reference for a footprint family."""
@@ -2283,7 +3455,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         while self.project is not None:
             reference, accepted = QInputDialog.getText(
                 self,
-                "Add device",
+                "Add Footprint",
                 "Reference:",
                 text=suggestion,
             )
@@ -2438,6 +3610,15 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
                 pending.revision,
                 device_id=device_id,
                 rotation=pending.rotation,
+                object_type=_footprint_family(pending.footprint.library),
+                pins=[
+                    ComponentPin(
+                        number=placed.number,
+                        pin_id=placed.number,
+                        footprint_pad=placed.number,
+                    )
+                    for placed in placed_pads
+                ],
             )
             generated = [
                 Pad(
@@ -2641,6 +3822,9 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
 
     def _select_pad(self, side: str, x: float, y: float) -> None:
         """Toggle same-net connections without changing the current view."""
+        if self._pending_board_connection_pads:
+            self._select_board_connection_pad(side, x, y)
+            return
         view_state = self._active_views()[0].view_state()
         pad = self._pad_at(side, x, y)
         if pad and pad.pad_id == self._selected_pad_id:
@@ -2660,6 +3844,74 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         )
         self._schedule_pad_refresh(view_state)
 
+    def _select_board_connection_pad(self, side: str, x: float, y: float) -> None:
+        """Connect each new Shift-clicked pad to the session origin immediately."""
+        pad = self._pad_at(side, x, y)
+        if pad is None:
+            return
+        self._set_connection_mode(True)
+        view_state = self._active_views()[0].view_state()
+        if not self._pending_board_connection_pads:
+            selected = next(
+                (
+                    item
+                    for item in self.project.pads
+                    if item.pad_id == self._selected_pad_id
+                ),
+                None,
+            )
+            if selected is not None:
+                self._pending_board_connection_pads.append(selected.pad_id)
+            else:
+                self._pending_board_connection_pads.append(pad.pad_id)
+                self._selected_pad_id = pad.pad_id
+                self._selected_net = pad.net
+                self.statusBar().showMessage(
+                    "Connector mode: origin selected; Shift-click another pad."
+                )
+                self._schedule_pad_refresh(view_state)
+                return
+        if pad.pad_id in self._pending_board_connection_pads:
+            return
+        origin = next(
+            (
+                item
+                for item in self.project.pads
+                if item.pad_id == self._pending_board_connection_pads[0]
+            ),
+            None,
+        )
+        if origin is None:
+            self._pending_board_connection_pads = []
+            return
+        self._pending_board_connection_pads.append(pad.pad_id)
+        self._selected_pad_id = origin.pad_id
+        self._set_connection_mode(True)
+        self._connect_schematic_terminals(
+            self._pad_terminal(origin), self._pad_terminal(pad)
+        )
+        self._apply_active_view_state(view_state)
+        count = len(self._pending_board_connection_pads)
+        self.statusBar().showMessage(
+            f"Connector mode: {count} pad(s) linked; Esc finishes."
+        )
+
+    @staticmethod
+    def _pad_terminal(pad: Pad) -> tuple[str, str, str | None]:
+        """Convert a physical pad into its schematic terminal identity."""
+        if pad.device_id and pad.number:
+            return "pin", pad.device_id, pad.number
+        return "pad", pad.pad_id, None
+
+    def _finish_board_connection(self) -> bool:
+        """Leave board connector mode; links were created after every click."""
+        if not self._pending_board_connection_pads:
+            return False
+        self._pending_board_connection_pads = []
+        self._set_connection_mode(False)
+        self.statusBar().showMessage("Connector mode finished.", 3000)
+        return True
+
     def _set_pads_visible(self, visible: bool) -> None:
         """Show or hide pad overlays while preserving the current view."""
         self._pads_visible = visible
@@ -2678,10 +3930,12 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
     def _finish_pad_refresh(self) -> None:
         """Run one coalesced pad refresh outside mouse event handlers."""
         state = self._pending_pad_view_state
+        current_tab = self._tabs.currentIndex()
         self._pending_pad_view_state = None
         self._pad_refresh_pending = False
         LOGGER.debug("Pad refresh started state=%s", state)
         self._refresh_views()
+        self._tabs.setCurrentIndex(current_tab)
         if state is not None:
             self._apply_active_view_state(state)
 
@@ -2693,7 +3947,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
                 view.apply_view_state(state)
         finally:
             self._syncing_views = False
-        if self._tabs.currentIndex() not in (3, 4, 5):
+        if self._tabs.currentIndex() not in (3, 4, 5, 6):
             self._sync_board_views(self._active_views()[0])
 
     def _connect_pad_to_net(self, side: str, x: float, y: float) -> None:
@@ -2731,13 +3985,47 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         pad = next((item for item in self.project.pads if item.pad_id == pad_id), None)
         if pad is None:
             return
+        active_net = self._selected_net
+        active_pad_id = self._selected_pad_id
         net = value.strip() or None
         self.project.pads = [
             replace(item, net=net) if item.pad_id == pad_id else item
             for item in self.project.pads
         ]
-        self._selected_net = net
-        self._selected_pad_id = pad_id
+        changed_pad = next(
+            (item for item in self.project.pads if item.pad_id == pad_id), None
+        )
+        if changed_pad is not None and changed_pad.device_id and changed_pad.number:
+            self.project.devices = [
+                (
+                    replace(
+                        device,
+                        pins=[
+                            (
+                                replace(pin, net_id=net)
+                                if pin.number == changed_pad.number
+                                else pin
+                            )
+                            for pin in device.pins
+                        ],
+                    )
+                    if device.device_id == changed_pad.device_id
+                    else device
+                )
+                for device in self.project.devices
+            ]
+        keep_active_selection = (
+            net is None
+            and active_net == pad.net
+            and active_pad_id is not None
+            and active_pad_id != pad_id
+        )
+        if keep_active_selection:
+            self._selected_net = active_net
+            self._selected_pad_id = active_pad_id
+        else:
+            self._selected_net = net
+            self._selected_pad_id = pad_id
         LOGGER.info("Pad net assigned id=%s pad=%s net=%s", pad_id, pad.name, net)
         self._dirty = True
         self._schedule_pad_refresh(self._active_views()[0].view_state())
@@ -2757,8 +4045,12 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         """Open the pad/device action menu after returning from the mouse event."""
         QTimer.singleShot(0, lambda: self._show_pad_menu(side, x, y))
 
+    def _defer_trace_menu(self, side: str, x: float, y: float) -> None:
+        """Open the trace action menu after returning from the mouse event."""
+        QTimer.singleShot(0, lambda: self._show_trace_menu(side, x, y))
+
     def _show_pad_menu(self, side: str, x: float, y: float) -> None:
-        """Show non-blocking actions for the pad or device under Shift+click."""
+        """Show non-blocking actions for the right-clicked pad or device."""
         pad = self._pad_at(side, x, y)
         device = (
             next(
@@ -2789,6 +4081,11 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
             value_action.triggered.connect(
                 lambda: self._edit_device_value(device.device_id)
             )
+            if pad is not None and pad.number is not None:
+                pin_action = menu.addAction("Edit pin ID/function…")
+                pin_action.triggered.connect(
+                    lambda: self._edit_component_pin(device.device_id, pad.number)
+                )
         if pad is not None:
             connect_action = menu.addAction("Connect to net")
             disconnect_action = menu.addAction("Disconnect")
@@ -2807,6 +4104,110 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
             device.device_id if device else None,
         )
         menu.popup(QCursor.pos())
+
+    def _show_trace_menu(self, side: str, x: float, y: float) -> None:
+        """Show Disconnect for the selected trace under the cursor."""
+        view = self._views.get(side) or self._side_views.get(side)
+        if view is None:
+            return
+        trace = view.trace_at(x, y)
+        if trace is None:
+            return
+        if self._pad_menu is not None:
+            self._pad_menu.close()
+        menu = QMenu(self)
+        disconnect_action = menu.addAction("Disconnect")
+        disconnect_action.triggered.connect(
+            lambda _checked=False, second=trace[1]: self._disconnect_trace(second)
+        )
+        menu.aboutToHide.connect(lambda menu=menu: self._pad_menu_closed(menu))
+        self._pad_menu = menu
+        menu.popup(QCursor.pos())
+
+    def _disconnect_trace(self, pad_id: str) -> None:
+        """Remove one trace endpoint while preserving remaining NET links."""
+        if not self.project or not self._selected_net:
+            return
+        target = next((pad for pad in self.project.pads if pad.pad_id == pad_id), None)
+        if target is None or target.net != self._selected_net:
+            return
+        net = self._selected_net
+        self.project.pads = [
+            replace(pad, net=None) if pad.pad_id == pad_id else pad
+            for pad in self.project.pads
+        ]
+        if target.device_id and target.number:
+            self.project.devices = [
+                (
+                    replace(
+                        device,
+                        pins=[
+                            (
+                                replace(pin, net_id=None)
+                                if pin.number == target.number
+                                else pin
+                            )
+                            for pin in device.pins
+                        ],
+                    )
+                    if device.device_id == target.device_id
+                    else device
+                )
+                for device in self.project.devices
+            ]
+        remaining = [pad for pad in self.project.pads if pad.net == net]
+        self._selected_net = net if remaining else None
+        self._dirty = True
+        self._schedule_pad_refresh(self._active_views()[0].view_state())
+        self._schematic_view.set_selected_net(self._selected_net)
+        self._update_title()
+        self.statusBar().showMessage("Trace disconnected.", 3000)
+
+    def _edit_component_pin(self, device_id: str, number: str) -> None:
+        """Edit logical ID and function for one KiCad component pin."""
+        if not self.project:
+            return
+        device = next(
+            (item for item in self.project.devices if item.device_id == device_id),
+            None,
+        )
+        if device is None:
+            return
+        pins = list(device.pins)
+        pin_index = next(
+            (index for index, pin in enumerate(pins) if pin.number == number), None
+        )
+        if pin_index is None:
+            pins.append(ComponentPin(number, number, footprint_pad=number))
+            pin_index = len(pins) - 1
+        pin = pins[pin_index]
+        pin_id, accepted = QInputDialog.getText(
+            self,
+            "Component pin",
+            f"Pin ID for {device.reference}.{number}:",
+            text=pin.pin_id,
+        )
+        if not accepted:
+            return
+        function, accepted = QInputDialog.getText(
+            self,
+            "Component pin",
+            f"Function for {device.reference}.{number}:",
+            text=pin.function,
+        )
+        if not accepted:
+            return
+        pins[pin_index] = replace(
+            pin,
+            pin_id=pin_id.strip() or number,
+            function=function.strip(),
+        )
+        self.project.devices = [
+            replace(item, pins=pins) if item.device_id == device_id else item
+            for item in self.project.devices
+        ]
+        self._dirty = True
+        self._update_title()
 
     def _pad_menu_closed(self, menu: QMenu) -> None:
         """Release a closed asynchronous pad menu."""
@@ -2951,10 +4352,10 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
             action.triggered.connect(handler)
             action.setShortcut(shortcut)
             file_menu.addAction(action)
-        self._import_action = QAction("Import image", self)
+        self._import_action = QAction("Manage image", self)
         self._import_action.setShortcut("I")
-        self._import_action.setToolTip("Import image, then choose Top or Bottom")
-        self._import_action.triggered.connect(self.import_picture)
+        self._import_action.setToolTip("Load, resize, or remove a Top or Bottom image")
+        self._import_action.triggered.connect(self.manage_picture)
         file_menu.addAction(self._import_action)
         file_menu.addSeparator()
         quit_action = QAction("Quit", self)
@@ -2964,6 +4365,12 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
     def keyPressEvent(self, event) -> None:  # noqa: N802
         """Switch board view with `T`, `B`, or a double press."""
         key = event.key()
+        if key == Qt.Key.Key_Escape:
+            connected = self._finish_board_connection()
+            connected = self._schematic_view.finish_connection() or connected
+            if connected:
+                event.accept()
+                return
         if key == Qt.Key.Key_Escape and self._pending_device is not None:
             self._cancel_device_placement()
             event.accept()
@@ -3068,6 +4475,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
             "both",
             "nets",
             "bom",
+            "schematic",
         )[self._tabs.currentIndex()]
         display_view = self._active_views()[0]
         (
@@ -3136,7 +4544,22 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
             return
         event.accept()
 
-    def import_picture(self) -> None:
+    def manage_picture(self) -> None:
+        """Choose a side, then load it or open its image editor."""
+        if not self.project or not self.store:
+            QMessageBox.information(
+                self, "No project", "Create or open a project first."
+            )
+            return
+        side = self._choose_image_side()
+        if side is None:
+            return
+        if any(image.side == side for image in self.project.images):
+            self.edit_picture(side)
+        else:
+            self.import_picture(side)
+
+    def import_picture(self, side: str | None = None) -> None:
         """Import an image, then ask whether it belongs to top or bottom."""
         if not self.project or not self.store:
             QMessageBox.information(
@@ -3157,10 +4580,10 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
                 self, "Import failed", "Selected file is not a readable image."
             )
             return
-        side = self._choose_image_side()
+        side = side or self._choose_image_side()
         if side is None:
             return
-        edited = self._edit_imported_image(QPixmap(str(source_path)))
+        edited = self._edit_imported_image(QPixmap(str(source_path)), side=side)
         if edited is None:
             return
         edited_image, pixels_per_mm, calibration_line, calibration_length_mm = edited
@@ -3192,14 +4615,14 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         self._refresh_views()
         self._update_title()
 
-    def remove_picture(self) -> None:
+    def remove_picture(self, side: str | None = None) -> None:
         """Remove selected Top or Bottom image after explicit side choice."""
         if not self.project or not self.store:
             QMessageBox.information(
                 self, "No project", "Create or open a project first."
             )
             return
-        side = self._choose_image_side()
+        side = side or self._choose_image_side()
         if side is None:
             return
         asset = next(
@@ -3219,14 +4642,14 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         self._refresh_views()
         self._update_title()
 
-    def edit_picture(self) -> None:
+    def edit_picture(self, side: str | None = None) -> None:
         """Reopen the working image for crop and rotation adjustments."""
         if not self.project or not self.store:
             QMessageBox.information(
                 self, "No project", "Create or open a project first."
             )
             return
-        side = self._choose_image_side()
+        side = side or self._choose_image_side()
         if side is None:
             return
         asset = next(
@@ -3249,6 +4672,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
             asset.pixels_per_mm,
             asset.calibration_line,
             asset.calibration_length_mm,
+            side=side,
         )
         if edited is None:
             return
@@ -3282,6 +4706,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         pixels_per_mm: float | None = None,
         calibration_line: tuple[float, float, float, float] | None = None,
         calibration_length_mm: float | None = None,
+        side: str | None = None,
     ) -> (
         tuple[
             QPixmap,
@@ -3293,7 +4718,11 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
     ):
         """Open editor and return image plus scale, or `None` on cancel."""
         dialog = ImageEditDialog(
-            image, self, footprint_selector=self._select_calibration_footprint
+            image,
+            self,
+            footprint_selector=self._select_calibration_footprint,
+            load_callback=(lambda: self.import_picture(side)) if side else None,
+            remove_callback=(lambda: self.remove_picture(side)) if side else None,
         )
         if pixels_per_mm is not None:
             dialog.prepare_existing_image(
@@ -3336,10 +4765,12 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         """Refresh all views from one composed pixmap per board side."""
         images = {side: self._pixmap_for_asset(side) for side in ("top", "bottom")}
         for side, view in self._views.items():
+            view.set_trace_selection(self._selected_net, self._selected_pad_id)
             view.set_pad_labels(self._vector_labels_for_side(side))
             view.set_pixmap(images[side])
         self._refresh_overlay(images)
         for side, view in self._side_views.items():
+            view.set_trace_selection(self._selected_net, self._selected_pad_id)
             view.set_pad_labels(self._vector_labels_for_side(side))
             view.set_pixmap(images[side])
         overlay_labels = self._vector_labels_for_side("top") + tuple(
@@ -3353,6 +4784,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         self._overlay_view.set_pad_labels(overlay_labels)
         self._refresh_net_table()
         self._refresh_bom_table()
+        self._schematic_view.set_project(self.project)
         if self.project:
             self._tabs.setCurrentIndex(
                 {
@@ -3362,6 +4794,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
                     "both": 3,
                     "nets": 4,
                     "bom": 5,
+                    "schematic": 6,
                 }[self.project.display.mode]
             )
             state = (
@@ -3375,7 +4808,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
                     view.apply_view_state(state)
             finally:
                 self._syncing_views = False
-            if self._tabs.currentIndex() not in (3, 4, 5):
+            if self._tabs.currentIndex() not in (3, 4, 5, 6):
                 self._sync_board_views(self._active_views()[0])
         else:
             self._sync_board_views(self._views["top"])
@@ -3388,14 +4821,175 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         return tuple(pad for pad in self.project.pads if pad.side == side)
 
     def _refresh_net_table(self) -> None:
-        """Show each stable pad name and its assigned electrical net."""
+        """Show pads, logical pins, functions, and assigned nets."""
+        self._ensure_component_pins()
         pads = (
             sorted(self.project.pads, key=lambda pad: pad.name) if self.project else []
         )
-        self._net_table.setRowCount(len(pads))
-        for row, pad in enumerate(pads):
-            self._net_table.setItem(row, 0, QTableWidgetItem(pad.name))
-            self._net_table.setItem(row, 1, QTableWidgetItem(pad.net or ""))
+        self._net_table.blockSignals(True)
+        try:
+            self._net_table.setRowCount(len(pads))
+            for row, pad in enumerate(pads):
+                pad_item = QTableWidgetItem(pad.name)
+                pad_item.setFlags(pad_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                pad_item.setData(Qt.ItemDataRole.UserRole, pad.pad_id)
+                self._net_table.setItem(row, 0, pad_item)
+                pin, device = self._component_pin_for_pad(pad)
+                pin_text = pin.pin_id if pin is not None else ""
+                function_text = (
+                    pin.function
+                    if pin is not None and pin.function
+                    else (
+                        self._default_pin_function(device, pin)
+                        if pin is not None
+                        else pad.function
+                    )
+                )
+                for column, value in (
+                    (1, pad.net or ""),
+                    (2, pin_text),
+                    (3, function_text),
+                    (4, device.reference if device is not None else ""),
+                ):
+                    item = QTableWidgetItem(value)
+                    if column in (2, 4):
+                        item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                    item.setData(
+                        Qt.ItemDataRole.UserRole,
+                        (
+                            (pad.pad_id, device.device_id, pin.number)
+                            if pin is not None and device is not None
+                            else (pad.pad_id, None, pad.number)
+                        ),
+                    )
+                    self._net_table.setItem(row, column, item)
+        finally:
+            self._net_table.blockSignals(False)
+
+    def _ensure_component_pins(self) -> None:
+        """Migrate loaded footprint pads into complete component pin records."""
+        if not self.project:
+            return
+        pads_by_device: dict[str, list[Pad]] = {}
+        for pad in self.project.pads:
+            if pad.device_id and pad.number:
+                pads_by_device.setdefault(pad.device_id, []).append(pad)
+        devices: list[Device] = []
+        changed = False
+        for device in self.project.devices:
+            pins = list(device.pins)
+            for pad in pads_by_device.get(device.device_id, []):
+                pin_index = next(
+                    (
+                        index
+                        for index, pin in enumerate(pins)
+                        if pin.number == pad.number
+                    ),
+                    None,
+                )
+                if pin_index is None:
+                    pin = ComponentPin(
+                        pad.number,
+                        pad.number,
+                        footprint_pad=pad.number,
+                    )
+                    function = self._default_pin_function(device, pin)
+                    pins.append(replace(pin, function=function) if function else pin)
+                    changed = True
+                    continue
+                pin = pins[pin_index]
+                if not pin.function:
+                    function = self._default_pin_function(device, pin)
+                    if function:
+                        pins[pin_index] = replace(pin, function=function)
+                        changed = True
+            devices.append(
+                replace(device, pins=pins) if pins != device.pins else device
+            )
+        if changed:
+            self.project.devices = devices
+            self._dirty = True
+
+    def _component_pin_for_pad(
+        self, pad: Pad
+    ) -> tuple[ComponentPin | None, Device | None]:
+        """Find the logical pin and owning component for one physical pad."""
+        if not self.project or not pad.device_id or not pad.number:
+            return None, None
+        device = next(
+            (item for item in self.project.devices if item.device_id == pad.device_id),
+            None,
+        )
+        if device is None:
+            return None, None
+        pin = next((item for item in device.pins if item.number == pad.number), None)
+        return pin, device
+
+    @staticmethod
+    def _default_pin_function(device: Device | None, pin: ComponentPin | None) -> str:
+        """Return a useful electrical label when a pin function is empty."""
+        if device is None or pin is None:
+            return ""
+        family = _footprint_family(device.footprint_library).casefold()
+        footprint = device.footprint_name.casefold()
+        if "capacitor" in family or "capacitor" in footprint:
+            if any(word in footprint for word in ("electro", "polar", "cp")):
+                return "+" if pin.number in {"1", "+"} else "-"
+            return "CNX"
+        return pin.net_id or f"Pin {pin.number}"
+
+    def _net_table_cell_changed(self, row: int, column: int) -> None:
+        """Persist function or net edits made in the Nets tab."""
+        if not self.project or column not in (1, 3):
+            return
+        pad_item = self._net_table.item(row, 0)
+        value_item = self._net_table.item(row, column)
+        if pad_item is None or value_item is None:
+            return
+        pad_id = pad_item.data(Qt.ItemDataRole.UserRole)
+        if not isinstance(pad_id, str):
+            return
+        value = value_item.text().strip()
+        pad = next((item for item in self.project.pads if item.pad_id == pad_id), None)
+        _, device = self._component_pin_for_pad(pad) if pad else (None, None)
+        if column == 1:
+            self._assign_pad_net(pad_id, value)
+            return
+        if pad is None:
+            return
+        if device is None:
+            self.project.pads = [
+                replace(item, function=value) if item.pad_id == pad_id else item
+                for item in self.project.pads
+            ]
+            self._dirty = True
+            self._schematic_view.set_project(self.project)
+            self._update_title()
+            return
+        if not pad.number:
+            return
+        pins = list(device.pins)
+        pin_index = next(
+            (index for index, item in enumerate(pins) if item.number == pad.number),
+            None,
+        )
+        if pin_index is None:
+            pins.append(ComponentPin(pad.number, pad.number, footprint_pad=pad.number))
+            pin_index = len(pins) - 1
+        current = pins[pin_index]
+        pins[pin_index] = replace(
+            current,
+            function=value,
+        )
+        self.project.devices = [
+            replace(item, pins=pins) if item.device_id == device.device_id else item
+            for item in self.project.devices
+        ]
+        self._dirty = True
+        current_tab = self._tabs.currentIndex()
+        self._refresh_views()
+        self._tabs.setCurrentIndex(current_tab)
+        self._update_title()
 
     def _refresh_bom_table(self) -> None:
         """Show every placed KiCad device and its editable value."""
@@ -3407,13 +5001,337 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
             if self.project
             else []
         )
-        self._bom_table.setRowCount(len(devices))
-        for row, device in enumerate(devices):
-            self._bom_table.setItem(row, 0, QTableWidgetItem(device.reference))
-            self._bom_table.setItem(
-                row, 1, QTableWidgetItem(_footprint_family(device.footprint_library))
+        object_types = sorted(
+            {
+                device.object_type or _footprint_family(device.footprint_library)
+                for device in devices
+            },
+            key=str.casefold,
+        )
+        self._bom_table.blockSignals(True)
+        try:
+            self._bom_table.setRowCount(len(devices))
+            for row, device in enumerate(devices):
+                reference_item = QTableWidgetItem(device.reference)
+                reference_item.setFlags(
+                    reference_item.flags() & ~Qt.ItemFlag.ItemIsEditable
+                )
+                reference_item.setData(Qt.ItemDataRole.UserRole, device.device_id)
+                self._bom_table.setItem(row, 0, reference_item)
+                combo = QComboBox()
+                combo.addItems(object_types)
+                combo.addItem("NEW")
+                current_type = device.object_type or _footprint_family(
+                    device.footprint_library
+                )
+                object_item = QTableWidgetItem(current_type)
+                object_item.setFlags(object_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                self._bom_table.setItem(row, 1, object_item)
+                combo.setCurrentText(current_type)
+                combo.currentTextChanged.connect(
+                    lambda text, device_id=device.device_id, combo=combo: self._bom_object_changed(
+                        device_id, combo, text
+                    )
+                )
+                self._bom_table.setCellWidget(row, 1, combo)
+                self._bom_table.setItem(row, 2, QTableWidgetItem(device.value))
+        finally:
+            self._bom_table.blockSignals(False)
+
+    def _bom_table_cell_changed(self, row: int, column: int) -> None:
+        """Persist edits from the BOM Value column only."""
+        if not self.project or column != 2:
+            return
+        reference_item = self._bom_table.item(row, 0)
+        value_item = self._bom_table.item(row, 2)
+        if reference_item is None or value_item is None:
+            return
+        device_id = reference_item.data(Qt.ItemDataRole.UserRole)
+        if not isinstance(device_id, str):
+            return
+        self.project.devices = [
+            (
+                replace(device, value=value_item.text())
+                if device.device_id == device_id
+                else device
             )
-            self._bom_table.setItem(row, 2, QTableWidgetItem(device.value))
+            for device in self.project.devices
+        ]
+        self._dirty = True
+        self._schematic_view.set_project(self.project)
+        self._update_title()
+
+    def _bom_object_changed(
+        self, device_id: str, combo: QComboBox, selected: str
+    ) -> None:
+        """Persist an existing object type or create one through NEW."""
+        if not self.project:
+            return
+        device = next(
+            (item for item in self.project.devices if item.device_id == device_id), None
+        )
+        if device is None:
+            return
+        previous = device.object_type or _footprint_family(device.footprint_library)
+        object_type = selected
+        if selected == "NEW":
+            object_type, accepted = QInputDialog.getText(
+                self,
+                "New object type",
+                "Object name:",
+            )
+            object_type = object_type.strip()
+            if not accepted or not object_type:
+                combo.blockSignals(True)
+                combo.setCurrentText(previous)
+                combo.blockSignals(False)
+                return
+        self.project.devices = [
+            (
+                replace(item, object_type=object_type)
+                if item.device_id == device_id
+                else item
+            )
+            for item in self.project.devices
+        ]
+        self._dirty = True
+        self._schematic_view.set_project(self.project)
+        self._update_title()
+        QTimer.singleShot(0, self._refresh_bom_table)
+
+    @Slot(str, float, float)
+    def _schematic_layout_changed(self, _device_id: str, _x: float, _y: float) -> None:
+        """Mark schematic drag/rotation changes for project persistence."""
+        self._dirty = True
+        self._update_title()
+
+    def _terminal_net(self, terminal: tuple[str, str, str | None]) -> str | None:
+        """Return the net currently assigned to one schematic terminal."""
+        if not self.project:
+            return None
+        kind, object_id, number = terminal
+        if kind == "pad":
+            pad = next(
+                (item for item in self.project.pads if item.pad_id == object_id), None
+            )
+            return pad.net if pad else None
+        device = next(
+            (item for item in self.project.devices if item.device_id == object_id), None
+        )
+        if device is None:
+            return None
+        pin = next((item for item in device.pins if item.number == number), None)
+        return pin.net_id if pin else None
+
+    @staticmethod
+    def _validated_terminal(value: object) -> tuple[str, str, str | None] | None:
+        """Validate a terminal identifier received from a Qt object signal."""
+        if not isinstance(value, tuple) or len(value) != 3:
+            return None
+        kind, object_id, number = value
+        if kind not in {"pin", "pad"} or not isinstance(object_id, str):
+            return None
+        if number is not None and not isinstance(number, str):
+            return None
+        return kind, object_id, number
+
+    @Slot(object)
+    def _select_schematic_terminal(self, value: object) -> None:
+        """Toggle the net highlighted by a plain terminal click."""
+        if not self.project:
+            return
+        terminal = self._validated_terminal(value)
+        if terminal is None:
+            return
+        if terminal == self._selected_schematic_terminal:
+            self._selected_schematic_terminal = None
+            self._selected_net = None
+            self._selected_pad_id = None
+        else:
+            self._selected_schematic_terminal = terminal
+            self._selected_net = self._terminal_net(terminal)
+            kind, object_id, number = terminal
+            if kind == "pad":
+                self._selected_pad_id = object_id
+            else:
+                pad = next(
+                    (
+                        item
+                        for item in self.project.pads
+                        if item.device_id == object_id and item.number == number
+                    ),
+                    None,
+                )
+                self._selected_pad_id = pad.pad_id if pad else None
+        self._schematic_view.set_selected_net(self._selected_net)
+
+    def _assign_schematic_terminal_net(
+        self, terminal: tuple[str, str, str | None], net: str | None
+    ) -> None:
+        """Assign one explicit net and synchronize its physical/generated pad."""
+        if not self.project:
+            return
+        kind, object_id, number = terminal
+        if kind == "pad":
+            self.project.pads = [
+                replace(pad, net=net) if pad.pad_id == object_id else pad
+                for pad in self.project.pads
+            ]
+        else:
+            self.project.devices = [
+                (
+                    replace(
+                        device,
+                        pins=[
+                            replace(pin, net_id=net) if pin.number == number else pin
+                            for pin in device.pins
+                        ],
+                    )
+                    if device.device_id == object_id
+                    else device
+                )
+                for device in self.project.devices
+            ]
+            self.project.pads = [
+                (
+                    replace(pad, net=net)
+                    if pad.device_id == object_id and pad.number == number
+                    else pad
+                )
+                for pad in self.project.pads
+            ]
+        self._dirty = True
+        self._schematic_view.set_project(self.project)
+        self._refresh_net_table()
+        self._update_title()
+
+    @Slot(object)
+    def _edit_schematic_terminal_net(self, value: object) -> None:
+        """Open direct net-name editing for a Shift-right-clicked terminal."""
+        terminal = self._validated_terminal(value)
+        if terminal is None:
+            return
+        current = self._terminal_net(terminal) or ""
+        net, accepted = QInputDialog.getText(
+            self,
+            "Connect terminal to net",
+            "Net name:",
+            text=current,
+        )
+        if accepted:
+            self._assign_schematic_terminal_net(terminal, net.strip() or None)
+
+    @Slot(object)
+    def _show_schematic_terminal_menu(self, value: object) -> None:
+        """Show available actions for a right-clicked schematic terminal."""
+        terminal = self._validated_terminal(value)
+        if terminal is None:
+            return
+        if self._pad_menu is not None:
+            self._pad_menu.close()
+        menu = QMenu(self)
+        connect_action = menu.addAction("Connect to net…")
+        disconnect_action = menu.addAction("Disconnect")
+        disconnect_action.setEnabled(self._terminal_net(terminal) is not None)
+        connect_action.triggered.connect(
+            lambda: self._edit_schematic_terminal_net(terminal)
+        )
+        disconnect_action.triggered.connect(
+            lambda: self._assign_schematic_terminal_net(terminal, None)
+        )
+        kind, object_id, number = terminal
+        if kind == "pin" and number is not None:
+            edit_action = menu.addAction("Edit pin ID/function…")
+            edit_action.triggered.connect(
+                lambda: self._edit_component_pin(object_id, number)
+            )
+        elif kind == "pad":
+            delete_action = menu.addAction("Delete pad")
+            delete_action.triggered.connect(lambda: self._delete_pad(object_id))
+        menu.aboutToHide.connect(lambda menu=menu: self._pad_menu_closed(menu))
+        self._pad_menu = menu
+        menu.popup(QCursor.pos())
+
+    def _next_generic_net_name(self) -> str:
+        """Return the first unused automatic net name N1, N2, etc."""
+        if not self.project:
+            return "N1"
+        used = {
+            net.casefold()
+            for net in (
+                [pad.net for pad in self.project.pads]
+                + [pin.net_id for device in self.project.devices for pin in device.pins]
+            )
+            if net
+        }
+        index = 1
+        while f"n{index}" in used:
+            index += 1
+        return f"N{index}"
+
+    @Slot(object, object)
+    def _connect_schematic_terminals(self, first: object, second: object) -> None:
+        """Create or merge a net between two selected terminals."""
+        if not self.project:
+            return
+        first = self._validated_terminal(first)
+        second = self._validated_terminal(second)
+        if first is None or second is None:
+            return
+        first_net = self._terminal_net(first)
+        second_net = self._terminal_net(second)
+        target_net = first_net or second_net or self._next_generic_net_name()
+        merged_net = second_net if first_net and second_net != first_net else None
+        terminals = {first, second}
+        self.project.pads = [
+            replace(
+                pad,
+                net=(
+                    target_net
+                    if ("pad", pad.pad_id, None) in terminals
+                    or (merged_net is not None and pad.net == merged_net)
+                    else pad.net
+                ),
+            )
+            for pad in self.project.pads
+        ]
+        devices: list[Device] = []
+        for device in self.project.devices:
+            pins = [
+                replace(
+                    pin,
+                    net_id=(
+                        target_net
+                        if ("pin", device.device_id, pin.number) in terminals
+                        or (merged_net is not None and pin.net_id == merged_net)
+                        else pin.net_id
+                    ),
+                )
+                for pin in device.pins
+            ]
+            devices.append(replace(device, pins=pins))
+        self.project.devices = devices
+        pin_terminals = {
+            (object_id, number)
+            for kind, object_id, number in terminals
+            if kind == "pin"
+        }
+        self.project.pads = [
+            (
+                replace(pad, net=target_net)
+                if pad.device_id and (pad.device_id, pad.number) in pin_terminals
+                else pad
+            )
+            for pad in self.project.pads
+        ]
+        self._selected_net = target_net
+        self._dirty = True
+        current_tab = self._tabs.currentIndex()
+        self._refresh_views()
+        self._tabs.setCurrentIndex(current_tab)
+        self._schematic_view.set_selected_net(self._selected_net)
+        self._update_title()
+        self.statusBar().showMessage(f"Connected terminals to net {target_net}.", 3000)
 
     def _refresh_overlay(self, images: dict[str, QPixmap]) -> None:
         """Compose top and mirrored bottom images into the Both view."""
@@ -3453,6 +5371,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         pixmap = QPixmap(pixmap)
         self._draw_devices(pixmap, side)
         self._draw_pads(pixmap, side)
+        self._draw_connections(pixmap, side)
         return pixmap
 
     def _draw_devices(self, pixmap: QPixmap, side: str) -> None:
@@ -3637,26 +5556,6 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         painter = QPainter(pixmap)
         radius = max(5, min(pixmap.width(), pixmap.height()) // 100)
         pads = [pad for pad in self.project.pads if pad.side == side]
-        if self._selected_net:
-            centers = {
-                pad.pad_id: QPoint(
-                    round((pad.x + pad.width / 2) * (pixmap.width() - 1)),
-                    round((pad.y + pad.height / 2) * (pixmap.height() - 1)),
-                )
-                for pad in pads
-                if pad.net == self._selected_net
-            }
-            origin_id = (
-                self._selected_pad_id if self._selected_pad_id in centers else None
-            )
-            if origin_id is None and centers:
-                origin_id = next(iter(centers))
-            origin = centers.get(origin_id or "")
-            painter.setPen(QPen(Qt.GlobalColor.white, max(2, radius // 2)))
-            if origin is not None:
-                for pad_id, target in centers.items():
-                    if pad_id != origin_id:
-                        painter.drawLine(origin, target)
         painter.setOpacity(0.45)
         for pad in pads:
             pin_one = pad.device_id is not None and pad.number == "1"
@@ -3693,6 +5592,42 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
                 painter.drawRect(rectangle)
             painter.restore()
             painter.setOpacity(0.45)
+        painter.end()
+
+    def _draw_connections(self, pixmap: QPixmap, side: str) -> None:
+        """Draw traces last: above image, footprint, and pad layers."""
+        if not self._pads_visible or not self.project or not self._selected_net:
+            return
+        pads = [
+            pad
+            for pad in self.project.pads
+            if pad.side == side and pad.net == self._selected_net
+        ]
+        if len(pads) < 2:
+            return
+        centers = {
+            pad.pad_id: QPoint(
+                round((pad.x + pad.width / 2) * (pixmap.width() - 1)),
+                round((pad.y + pad.height / 2) * (pixmap.height() - 1)),
+            )
+            for pad in pads
+        }
+        origin_id = (
+            self._selected_pad_id
+            if self._selected_pad_id in centers
+            else pads[0].pad_id
+        )
+        origin = centers[origin_id]
+        painter = QPainter(pixmap)
+        painter.setPen(
+            QPen(
+                Qt.GlobalColor.white,
+                max(2, min(pixmap.width(), pixmap.height()) // 200),
+            )
+        )
+        for pad_id, target in centers.items():
+            if pad_id != origin_id:
+                painter.drawLine(origin, target)
         painter.end()
 
     def _update_title(self) -> None:
