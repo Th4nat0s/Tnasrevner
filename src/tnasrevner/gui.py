@@ -3575,6 +3575,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
             ):
                 font.setPixelSize(font.pixelSize() - 1)
                 painter.setFont(font)
+            painter.setPen(QColor(20, 20, 20) if pin_one else Qt.GlobalColor.yellow)
             painter.drawText(
                 QRect(
                     round(-label_width / 2),
