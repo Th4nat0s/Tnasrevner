@@ -7,29 +7,37 @@ from __future__ import annotations
 # pylint: disable=no-name-in-module,invalid-name
 # pylint: disable=too-many-lines
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 import logging
 from logging.handlers import RotatingFileHandler
+import math
 from pathlib import Path
+import re
 import sys
 from time import monotonic
+from uuid import uuid4
 
 from PySide6.QtCore import (
     QBuffer,
     QEvent,
     QIODevice,
     QLineF,
+    QObject,
     QPoint,
     QPointF,
     QRect,
+    QRectF,
     QStandardPaths,
+    QThread,
     QTimer,
     Qt,
     Signal,
+    Slot,
     qInstallMessageHandler,
 )
 from PySide6.QtGui import (
     QAction,
+    QColor,
     QCloseEvent,
     QCursor,
     QPainter,
@@ -49,6 +57,8 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QMenu,
@@ -57,15 +67,46 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QPushButton,
+    QProgressDialog,
     QRubberBand,
     QVBoxLayout,
     QWidget,
 )
 
-from .project import ImageAsset, Pad, ProjectDocument, ProjectFormatError, ProjectStore
+from .kicad import (
+    CacheResult,
+    Footprint,
+    FootprintReference,
+    KiCadCacheError,
+    KiCadFootprintCache,
+    KiCadFormatError,
+    place_footprint_pads,
+    parse_footprint,
+)
+from .project import (
+    Device,
+    ImageAsset,
+    Pad,
+    ProjectDocument,
+    ProjectFormatError,
+    ProjectStore,
+)
 
 LOGGER = logging.getLogger("tnasrevner")
 _LOG_PATH: Path | None = None
+_DEVICE_REFERENCE = re.compile(r"[A-Za-z][A-Za-z0-9_.+\-]{0,63}\Z")
+
+
+def _application_data_directory(create: bool = True) -> Path:
+    """Return the application data directory, creating it when requested."""
+    directory = Path(
+        QStandardPaths.writableLocation(
+            QStandardPaths.StandardLocation.AppLocalDataLocation
+        )
+    )
+    if create:
+        directory.mkdir(parents=True, exist_ok=True)
+    return directory
 
 
 def _qt_message_handler(mode, _context, message) -> None:
@@ -78,12 +119,7 @@ def _configure_logging() -> Path:
     global _LOG_PATH  # pylint: disable=global-statement
     if _LOG_PATH is not None:
         return _LOG_PATH
-    directory = Path(
-        QStandardPaths.writableLocation(
-            QStandardPaths.StandardLocation.AppLocalDataLocation
-        )
-    )
-    directory.mkdir(parents=True, exist_ok=True)
+    directory = _application_data_directory()
     _LOG_PATH = directory / "tnasrevner.log"
     handler = RotatingFileHandler(
         _LOG_PATH, maxBytes=2_000_000, backupCount=3, encoding="utf-8"
@@ -673,6 +709,222 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         )
 
 
+class FootprintPickerDialog(QDialog):  # pylint: disable=too-few-public-methods
+    """Search and select one cached KiCad footprint."""
+
+    _MAX_RESULTS = 750
+
+    def __init__(
+        self,
+        references: tuple[FootprintReference, ...],
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Select KiCad footprint")
+        self.resize(680, 520)
+        self._references = references
+        self._visible_references: list[FootprintReference] = []
+        self._search = QLineEdit(self)
+        self._search.setPlaceholderText("Search library or footprint name…")
+        self._list = QListWidget(self)
+        self._status = QLabel(self)
+        self._buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
+            parent=self,
+        )
+        self._buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(False)
+        layout = QVBoxLayout(self)
+        layout.addWidget(self._search)
+        layout.addWidget(self._list)
+        layout.addWidget(self._status)
+        layout.addWidget(self._buttons)
+        self._search.textChanged.connect(self._refresh_results)
+        self._list.currentRowChanged.connect(
+            lambda row: self._buttons.button(
+                QDialogButtonBox.StandardButton.Ok
+            ).setEnabled(row >= 0)
+        )
+        self._list.itemDoubleClicked.connect(lambda _item: self.accept())
+        self._buttons.accepted.connect(self.accept)
+        self._buttons.rejected.connect(self.reject)
+        self._refresh_results("")
+        self._search.setFocus()
+
+    def selected_reference(self) -> FootprintReference | None:
+        """Return the selected cached footprint reference."""
+        row = self._list.currentRow()
+        return self._visible_references[row] if row >= 0 else None
+
+    def _refresh_results(self, query: str) -> None:
+        words = query.casefold().split()
+        matches = [
+            reference
+            for reference in self._references
+            if all(word in reference.identifier.casefold() for word in words)
+        ]
+        self._visible_references = matches[: self._MAX_RESULTS]
+        self._list.clear()
+        for reference in self._visible_references:
+            self._list.addItem(QListWidgetItem(reference.identifier))
+        shown = len(self._visible_references)
+        self._status.setText(f"{shown} shown / {len(matches)} matches")
+        if shown:
+            self._list.setCurrentRow(0)
+
+
+class KiCadCacheWorker(QObject):  # pylint: disable=too-few-public-methods
+    """Prepare the footprint cache away from the GUI event loop."""
+
+    completed = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, cache: KiCadFootprintCache) -> None:
+        super().__init__()
+        self._cache = cache
+
+    @Slot()
+    def run(self) -> None:
+        """Run one cache update and report its result."""
+        try:
+            self.completed.emit(self._cache.ensure_ready())
+        except KiCadCacheError as error:
+            self.failed.emit(str(error))
+
+
+@dataclass(frozen=True)
+class PendingDevice:
+    """Footprint and metadata waiting for a click on a board image."""
+
+    reference: str
+    source: FootprintReference
+    footprint: Footprint
+    content: bytes
+    revision: str
+    rotation: float = 0.0
+
+
+class FootprintPreview(QWidget):  # pylint: disable=too-few-public-methods
+    """Transparent footprint preview following the placement pointer."""
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        self._footprint: Footprint | None = None
+        self._pixels_per_mm = 1.0
+        self._effective_scale = 1.0
+        self._side = "top"
+        self._rotation = 0.0
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.hide()
+
+    def configure(
+        self,
+        footprint: Footprint,
+        pixels_per_mm: float,
+        effective_scale: float,
+        side: str,
+        rotation: float,
+    ) -> None:
+        """Configure geometry and physical display scale."""
+        self._footprint = footprint
+        self._pixels_per_mm = pixels_per_mm
+        self._effective_scale = effective_scale
+        self._side = side
+        self._rotation = rotation
+        self._resize_for_footprint()
+        self.show()
+        self.raise_()
+        self.update()
+
+    def set_effective_scale(self, effective_scale: float) -> None:
+        """Follow image zoom without changing the footprint's real scale."""
+        self._effective_scale = effective_scale
+        self._resize_for_footprint()
+        self.update()
+
+    def set_rotation(self, rotation: float) -> None:
+        """Rotate the preview around its footprint anchor."""
+        self._rotation = rotation
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        """Draw footprint graphics and pads over the image."""
+        del event
+        if self._footprint is None:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.translate(self.width() / 2, self.height() / 2)
+        _paint_footprint(
+            painter,
+            self._footprint,
+            self._pixels_per_mm * self._effective_scale,
+            self._side,
+            self._rotation,
+            preview=True,
+        )
+        painter.end()
+
+    def _resize_for_footprint(self) -> None:
+        if self._footprint is None:
+            return
+        radius = self._footprint.radius() * self._pixels_per_mm * self._effective_scale
+        diameter = max(24, min(5000, math.ceil(radius * 2 + 20)))
+        center = self.geometry().center()
+        self.resize(diameter, diameter)
+        self.move(center.x() - diameter // 2, center.y() - diameter // 2)
+
+
+def _paint_footprint(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    painter: QPainter,
+    footprint: Footprint,
+    pixels_per_mm: float,
+    side: str,
+    rotation: float,
+    preview: bool = False,
+) -> None:
+    """Draw parsed footprint geometry around the painter's current origin."""
+    painter.save()
+    painter.rotate(rotation)
+    painter.scale(-pixels_per_mm if side == "bottom" else pixels_per_mm, pixels_per_mm)
+    pad_pen = QPen(QColor(255, 225, 0, 230 if preview else 180), 1.5)
+    pad_pen.setCosmetic(True)
+    painter.setPen(pad_pen)
+    painter.setBrush(QColor(255, 80, 40, 120 if preview else 70))
+    for pad in footprint.pads:
+        painter.save()
+        painter.translate(pad.x, pad.y)
+        painter.rotate(pad.rotation)
+        rectangle = QRectF(-pad.width / 2, -pad.height / 2, pad.width, pad.height)
+        if pad.shape in {"circle", "oval"}:
+            painter.drawEllipse(rectangle)
+        elif pad.shape == "roundrect":
+            painter.drawRoundedRect(rectangle, 20, 20, Qt.SizeMode.RelativeSize)
+        else:
+            painter.drawRect(rectangle)
+        painter.restore()
+    outline_pen = QPen(QColor(0, 255, 255, 240 if preview else 180), 1.5)
+    outline_pen.setCosmetic(True)
+    painter.setPen(outline_pen)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    for graphic in footprint.graphics:
+        coordinates = graphic.coordinates
+        if graphic.kind == "line":
+            painter.drawLine(QLineF(*coordinates))
+        elif graphic.kind == "rect":
+            painter.drawRect(
+                QRectF(
+                    QPointF(coordinates[0], coordinates[1]),
+                    QPointF(coordinates[2], coordinates[3]),
+                ).normalized()
+            )
+        elif graphic.kind == "circle":
+            radius = math.hypot(
+                coordinates[2] - coordinates[0], coordinates[3] - coordinates[1]
+            )
+            painter.drawEllipse(QPointF(coordinates[0], coordinates[1]), radius, radius)
+    painter.restore()
+
+
 class ImageView(QScrollArea):  # pylint: disable=too-many-instance-attributes
     """Scrollable image view with mouse-wheel zoom."""
 
@@ -681,6 +933,8 @@ class ImageView(QScrollArea):  # pylint: disable=too-many-instance-attributes
     pad_clicked = Signal(float, float)
     pad_context_requested = Signal(float, float)
     pad_menu_requested = Signal(float, float)
+    device_placed = Signal(float, float)
+    device_rotated = Signal()
 
     def __init__(self, empty_text: str) -> None:
         super().__init__()
@@ -691,11 +945,16 @@ class ImageView(QScrollArea):  # pylint: disable=too-many-instance-attributes
         self._pad_placement = False
         self._pad_start: QPoint | None = None
         self._click_position: QPoint | None = None
+        self._device_placement = False
+        self._device_preview_point = (0.5, 0.5)
         self._label = QLabel(empty_text)
         self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._label.setMinimumSize(240, 180)
+        self._label.setMouseTracking(True)
         self._label.installEventFilter(self)
+        self._device_preview = FootprintPreview(self._label)
         self.viewport().installEventFilter(self)
+        self.viewport().setMouseTracking(True)
         self._pad_band = QRubberBand(QRubberBand.Shape.Rectangle, self._label)
         self._pad_band.setAttribute(
             Qt.WidgetAttribute.WA_TransparentForMouseEvents, True
@@ -751,7 +1010,7 @@ class ImageView(QScrollArea):  # pylint: disable=too-many-instance-attributes
             return True
         return super().event(event)
 
-    def eventFilter(  # noqa: N802  # pylint: disable=too-many-return-statements,too-many-branches
+    def eventFilter(  # noqa: N802  # pylint: disable=too-many-return-statements,too-many-branches,too-many-statements
         self, watched, event
     ) -> bool:
         """Pan image by dragging it with the primary mouse button."""
@@ -759,6 +1018,17 @@ class ImageView(QScrollArea):  # pylint: disable=too-many-instance-attributes
             return super().eventFilter(watched, event)
         if event.type() == QEvent.Type.MouseButtonPress:
             point = self._label_point(watched, event.position().toPoint())
+            if (
+                self._device_placement
+                and not self._pixmap.isNull()
+                and self._label.rect().contains(point)
+            ):
+                if event.button() == Qt.MouseButton.RightButton:
+                    self.device_rotated.emit()
+                    return True
+                if event.button() == Qt.MouseButton.LeftButton:
+                    self.device_placed.emit(*self._normalized_point(point))
+                    return True
             if event.button() == Qt.MouseButton.RightButton:
                 if not self._pixmap.isNull() and self._label.rect().contains(point):
                     self.pad_context_requested.emit(*self._normalized_point(point))
@@ -783,6 +1053,15 @@ class ImageView(QScrollArea):  # pylint: disable=too-many-instance-attributes
             self._click_position = point
             self._drag_position = event.globalPosition().toPoint()
             self.setCursor(QCursor(Qt.CursorShape.ClosedHandCursor))
+            return True
+        if event.type() == QEvent.Type.MouseMove and self._device_placement:
+            point = self._label_point(watched, event.position().toPoint())
+            if self._label.rect().contains(point):
+                self._device_preview_point = self._normalized_point(point)
+                self._position_device_preview()
+                self._device_preview.show()
+            else:
+                self._device_preview.hide()
             return True
         if event.type() == QEvent.Type.MouseMove and self._pad_start is not None:
             point = self._clamp_point(
@@ -835,6 +1114,8 @@ class ImageView(QScrollArea):  # pylint: disable=too-many-instance-attributes
 
     def set_pad_placement(self, enabled: bool) -> None:
         """Enable or disable click-to-place mode for a pad."""
+        if enabled:
+            self.clear_device_placement()
         self._pad_placement = enabled
         if not enabled:
             self._pad_start = None
@@ -842,6 +1123,48 @@ class ImageView(QScrollArea):  # pylint: disable=too-many-instance-attributes
             self._click_position = None
             self._drag_position = None
             self.unsetCursor()
+
+    def set_device_placement(
+        self,
+        footprint: Footprint,
+        pixels_per_mm: float,
+        side: str,
+        rotation: float,
+    ) -> None:
+        """Enable click placement with a physically scaled footprint preview."""
+        self.set_pad_placement(False)
+        self._device_placement = True
+        self._device_preview_point = (0.5, 0.5)
+        self._device_preview.configure(
+            footprint,
+            pixels_per_mm,
+            self._fit_scale() * self._scale,
+            side,
+            rotation,
+        )
+        self._position_device_preview()
+        self.setCursor(QCursor(Qt.CursorShape.CrossCursor))
+
+    def set_device_rotation(self, rotation: float) -> None:
+        """Update the active footprint preview rotation."""
+        if self._device_placement:
+            self._device_preview.set_rotation(rotation)
+
+    def clear_device_placement(self) -> None:
+        """Disable footprint placement and hide its preview."""
+        self._device_placement = False
+        self._device_preview.hide()
+        self.unsetCursor()
+
+    def _position_device_preview(self) -> None:
+        center = QPoint(
+            round(self._device_preview_point[0] * max(1, self._label.width() - 1)),
+            round(self._device_preview_point[1] * max(1, self._label.height() - 1)),
+        )
+        self._device_preview.move(
+            center.x() - self._device_preview.width() // 2,
+            center.y() - self._device_preview.height() // 2,
+        )
 
     def _label_point(self, watched, point: QPoint) -> QPoint:
         """Convert an event point to label coordinates."""
@@ -902,6 +1225,7 @@ class ImageView(QScrollArea):  # pylint: disable=too-many-instance-attributes
         if self._pixmap.isNull():
             self._label.setPixmap(QPixmap())
             self._label.setText(self._empty_text)
+            self._device_preview.hide()
             return
         self._label.setText("")
         fit_scale = self._fit_scale()
@@ -913,6 +1237,9 @@ class ImageView(QScrollArea):  # pylint: disable=too-many-instance-attributes
             )
         )
         self._label.resize(self._label.pixmap().size())
+        if self._device_placement:
+            self._device_preview.set_effective_scale(fit_scale * self._scale)
+            self._position_device_preview()
 
     def resizeEvent(self, event) -> None:  # noqa: N802  # pylint: disable=invalid-name
         """Keep the image fitted after resizing its view."""
@@ -972,7 +1299,9 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
     """Minimal project and board-picture workspace."""
 
     def __init__(  # pylint: disable=too-many-statements
-        self, show_startup: bool = True
+        self,
+        show_startup: bool = True,
+        footprint_cache: KiCadFootprintCache | None = None,
     ) -> None:
         super().__init__()
         self.project: ProjectDocument | None = None
@@ -980,12 +1309,23 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         self._dirty = False
         self._syncing_views = False
         self._pending_pad: Pad | None = None
+        self._pending_device: PendingDevice | None = None
+        self._pending_device_reference: str | None = None
         self._selected_net: str | None = None
         self._selected_pad_id: str | None = None
         self._pads_visible = True
         self._pad_refresh_pending = False
         self._pending_pad_view_state: tuple[float, float, float] | None = None
         self._image_cache: dict[str, QPixmap] = {}
+        self._device_footprint_cache: dict[str, Footprint] = {}
+        self._footprint_cache = footprint_cache or KiCadFootprintCache(
+            _application_data_directory(create=False) / "kicad-footprints"
+        )
+        self._kicad_cache_thread: QThread | None = None
+        self._kicad_cache_worker: KiCadCacheWorker | None = None
+        self._kicad_progress: QProgressDialog | None = None
+        self._kicad_revision: str | None = None
+        self._close_when_cache_finishes = False
         self._net_dialog: QInputDialog | None = None
         self._pad_menu: QMenu | None = None
         self._last_view_key: int | None = None
@@ -1031,6 +1371,10 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
             view.pad_menu_requested.connect(
                 lambda x, y, side=side: self._defer_pad_menu(side, x, y)
             )
+            view.device_placed.connect(
+                lambda x, y, side=side: self._place_device(side, x, y)
+            )
+            view.device_rotated.connect(self._rotate_pending_device)
         for side, view in self._side_views.items():
             view.pad_selected.connect(
                 lambda x, y, width, height, side=side: self._place_pad(
@@ -1046,6 +1390,10 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
             view.pad_menu_requested.connect(
                 lambda x, y, side=side: self._defer_pad_menu(side, x, y)
             )
+            view.device_placed.connect(
+                lambda x, y, side=side: self._place_device(side, x, y)
+            )
+            view.device_rotated.connect(self._rotate_pending_device)
         self.setCentralWidget(self._tabs)
         self._create_actions()
         self._create_tool_palette()
@@ -1057,6 +1405,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         self._heartbeat_timer.start()
         if show_startup:
             QTimer.singleShot(0, self._startup_choice)
+            QTimer.singleShot(1_000, self._prefetch_footprints)
 
     def _create_tool_palette(self) -> None:  # pylint: disable=too-many-statements
         """Create the right-side view control palette."""
@@ -1089,6 +1438,11 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         edit_button.setToolTip("Adjust crop or rotate an imported image")
         edit_button.clicked.connect(self.edit_picture)
         layout.addWidget(edit_button)
+        device_button = QPushButton("Add device", panel)
+        device_button.setToolTip("Select and place a KiCad footprint")
+        device_button.clicked.connect(self.add_device)
+        layout.addWidget(device_button)
+        self._add_device_button = device_button
         pad_button = QPushButton("Create pad", panel)
         pad_button.setToolTip("Create a pad on the Top or Bottom image")
         pad_button.clicked.connect(self.create_pad)
@@ -1166,6 +1520,320 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         for view in self._active_views():
             view.center_image()
 
+    def _prefetch_footprints(self) -> None:
+        """Download or refresh the KiCad footprint cache after application start."""
+        if not self._footprint_cache.is_ready_and_fresh():
+            self._start_kicad_cache_update(interactive=False)
+
+    def add_device(self) -> None:
+        """Collect a reference, select a footprint, and arm image placement."""
+        if not self.project or not self.store:
+            QMessageBox.information(
+                self, "No project", "Create or open a project first."
+            )
+            return
+        if not any(image.pixels_per_mm for image in self.project.images):
+            QMessageBox.information(
+                self,
+                "No calibrated image",
+                "Import and calibrate a board image before adding a device.",
+            )
+            return
+        reference, accepted = QInputDialog.getText(
+            self, "Add device", "Reference (for example U1):"
+        )
+        reference = reference.strip()
+        if not accepted:
+            return
+        if not _DEVICE_REFERENCE.fullmatch(reference):
+            QMessageBox.warning(
+                self,
+                "Invalid reference",
+                "Use 1–64 letters, digits, '.', '_', '+', or '-', starting with a letter.",
+            )
+            return
+        if any(
+            device.reference.casefold() == reference.casefold()
+            for device in self.project.devices
+        ):
+            QMessageBox.warning(
+                self, "Duplicate reference", f"Device {reference} already exists."
+            )
+            return
+        self._pending_device_reference = reference
+        if self._footprint_cache.is_ready_and_fresh():
+            self._kicad_revision = self._footprint_cache.current_revision()
+            self._open_footprint_picker()
+        else:
+            self._start_kicad_cache_update(interactive=True)
+
+    def _start_kicad_cache_update(self, interactive: bool) -> None:
+        """Start one asynchronous first-run/monthly cache operation."""
+        if interactive:
+            self._show_kicad_progress()
+        if self._kicad_cache_thread is not None:
+            return
+        thread = QThread(self)
+        worker = KiCadCacheWorker(self._footprint_cache)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.completed.connect(self._kicad_cache_ready)
+        worker.failed.connect(self._kicad_cache_failed)
+        worker.completed.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        worker.completed.connect(worker.deleteLater)
+        worker.failed.connect(worker.deleteLater)
+        thread.finished.connect(self._kicad_cache_thread_finished)
+        self._kicad_cache_thread = thread
+        self._kicad_cache_worker = worker
+        LOGGER.info("KiCad footprint cache update started")
+        thread.start()
+
+    def _show_kicad_progress(self) -> None:
+        if self._kicad_progress is not None:
+            return
+        progress = QProgressDialog("Preparing KiCad footprint library…", "", 0, 0, self)
+        progress.setWindowTitle("KiCad footprints")
+        progress.setCancelButton(None)
+        progress.setWindowModality(Qt.WindowModality.NonModal)
+        progress.setMinimumDuration(0)
+        progress.show()
+        self._kicad_progress = progress
+
+    def _close_kicad_progress(self) -> None:
+        if self._kicad_progress is not None:
+            self._kicad_progress.close()
+            self._kicad_progress.deleteLater()
+            self._kicad_progress = None
+
+    @Slot(object)
+    def _kicad_cache_ready(self, result: object) -> None:
+        """Continue pending device creation after cache preparation."""
+        self._close_kicad_progress()
+        if not isinstance(result, CacheResult):
+            self._kicad_cache_failed("KiCad cache returned an invalid result.")
+            return
+        self._kicad_revision = result.revision
+        LOGGER.info(
+            "KiCad footprint cache ready revision=%s refreshed=%s warning=%s",
+            result.revision,
+            result.refreshed,
+            result.warning,
+        )
+        if result.warning:
+            if self._pending_device_reference:
+                QMessageBox.warning(self, "KiCad cache", result.warning)
+            else:
+                LOGGER.warning("%s", result.warning)
+        if self._pending_device_reference:
+            QTimer.singleShot(0, self._open_footprint_picker)
+
+    @Slot(str)
+    def _kicad_cache_failed(self, message: str) -> None:
+        """Report failure when no valid footprint cache is available."""
+        self._close_kicad_progress()
+        LOGGER.warning("KiCad footprint cache unavailable: %s", message)
+        if self._pending_device_reference:
+            QMessageBox.warning(self, "KiCad footprints unavailable", message)
+            self._pending_device_reference = None
+
+    @Slot()
+    def _kicad_cache_thread_finished(self) -> None:
+        """Release finished worker/thread references."""
+        thread = self._kicad_cache_thread
+        self._kicad_cache_thread = None
+        self._kicad_cache_worker = None
+        if thread is None:
+            return
+        thread.deleteLater()
+        if self._close_when_cache_finishes:
+            QTimer.singleShot(0, self.close)
+
+    def _open_footprint_picker(self) -> None:
+        reference = self._pending_device_reference
+        if reference is None:
+            return
+        try:
+            catalog = self._footprint_cache.catalog()
+        except KiCadCacheError as error:
+            QMessageBox.warning(self, "KiCad footprints unavailable", str(error))
+            self._pending_device_reference = None
+            return
+        dialog = FootprintPickerDialog(catalog, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            self._pending_device_reference = None
+            return
+        source = dialog.selected_reference()
+        if source is None:
+            self._pending_device_reference = None
+            return
+        try:
+            footprint, content = self._footprint_cache.load(source)
+        except (KiCadCacheError, KiCadFormatError) as error:
+            QMessageBox.warning(self, "Invalid footprint", str(error))
+            self._pending_device_reference = None
+            return
+        revision = self._kicad_revision or self._footprint_cache.current_revision()
+        if revision is None:
+            QMessageBox.warning(
+                self, "KiCad cache", "The footprint source revision is missing."
+            )
+            self._pending_device_reference = None
+            return
+        self._pending_device_reference = None
+        self._begin_device_placement(reference, source, footprint, content, revision)
+
+    def _begin_device_placement(
+        self,
+        reference: str,
+        source: FootprintReference,
+        footprint: Footprint,
+        content: bytes,
+        revision: str,
+    ) -> None:
+        """Arm every calibrated board-side view for footprint placement."""
+        if not self.project:
+            return
+        calibrated = {
+            image.side: image
+            for image in self.project.images
+            if image.pixels_per_mm is not None
+        }
+        if not calibrated:
+            return
+        self._cancel_device_placement(clear_status=False)
+        self._pending_device = PendingDevice(
+            reference, source, footprint, content, revision
+        )
+        if len(calibrated) == 2:
+            self._tabs.setCurrentIndex(2)
+            views = self._side_views
+        else:
+            side = next(iter(calibrated))
+            self._tabs.setCurrentIndex(0 if side == "top" else 1)
+            views = {side: self._views[side]}
+        for side, view in views.items():
+            image = calibrated.get(side)
+            if image and image.pixels_per_mm is not None and view.has_image():
+                view.set_device_placement(footprint, image.pixels_per_mm, side, 0.0)
+        self.statusBar().showMessage(
+            f"Place {reference}: left click to place, right click rotates 45°, Esc cancels."
+        )
+        LOGGER.info(
+            "Device placement armed reference=%s footprint=%s",
+            reference,
+            footprint.identifier,
+        )
+
+    def _rotate_pending_device(self) -> None:
+        """Rotate the pending footprint clockwise by exactly 45 degrees."""
+        if self._pending_device is None:
+            return
+        rotation = (self._pending_device.rotation + 45.0) % 360.0
+        self._pending_device = replace(self._pending_device, rotation=rotation)
+        for view in (*self._views.values(), *self._side_views.values()):
+            view.set_device_rotation(rotation)
+        self.statusBar().showMessage(
+            f"{self._pending_device.reference}: {rotation:g}° — left click to place."
+        )
+        LOGGER.debug("Pending device rotated angle=%s", rotation)
+
+    def _place_device(self, side: str, x: float, y: float) -> None:
+        """Persist a footprint instance and all its named pads."""
+        pending = self._pending_device
+        if not self.project or not self.store or pending is None:
+            return
+        view_state = self._active_views()[0].view_state()
+        image = next(
+            (
+                asset
+                for asset in self.project.images
+                if asset.side == side and asset.pixels_per_mm is not None
+            ),
+            None,
+        )
+        pixmap = self._base_pixmap_for_asset(side)
+        if image is None or image.pixels_per_mm is None or pixmap.isNull():
+            QMessageBox.warning(
+                self, "Cannot place device", "The selected image is not calibrated."
+            )
+            return
+        try:
+            placed_pads = place_footprint_pads(
+                pending.footprint,
+                side,
+                x,
+                y,
+                pending.rotation,
+                pixmap.width(),
+                pixmap.height(),
+                image.pixels_per_mm,
+            )
+            device_id = str(uuid4())
+            device = Device(
+                pending.reference,
+                side,
+                x,
+                y,
+                pending.footprint.library,
+                pending.footprint.name,
+                f"assets/kicad/{device_id}.kicad_mod",
+                pending.revision,
+                device_id=device_id,
+                rotation=pending.rotation,
+            )
+            generated = [
+                Pad(
+                    f"{pending.reference}.{placed.number}",
+                    side,
+                    placed.x,
+                    placed.y,
+                    width=placed.width,
+                    height=placed.height,
+                    device_id=device.device_id,
+                    number=placed.number,
+                    shape=placed.shape,
+                    rotation=placed.rotation,
+                )
+                for placed in placed_pads
+            ]
+            existing_names = {pad.name for pad in self.project.pads}
+            if any(pad.name in existing_names for pad in generated):
+                raise ProjectFormatError("Generated device pad name already exists.")
+            self.store.write_asset(device.footprint_path, pending.content)
+        except (KiCadFormatError, ProjectFormatError) as error:
+            QMessageBox.warning(self, "Cannot place device", str(error))
+            return
+        self.project.devices.append(device)
+        self.project.pads.extend(generated)
+        self._device_footprint_cache[device.footprint_path] = pending.footprint
+        self._pending_device = None
+        self._clear_device_previews()
+        self._dirty = True
+        self.statusBar().clearMessage()
+        LOGGER.info(
+            "Device placed id=%s reference=%s side=%s rotation=%s pads=%s",
+            device.device_id,
+            device.reference,
+            side,
+            device.rotation,
+            len(generated),
+        )
+        self._refresh_views()
+        self._apply_active_view_state(view_state)
+        self._update_title()
+
+    def _clear_device_previews(self) -> None:
+        for view in (*self._views.values(), *self._side_views.values()):
+            view.clear_device_placement()
+
+    def _cancel_device_placement(self, clear_status: bool = True) -> None:
+        """Cancel a pending footprint without changing project data."""
+        self._pending_device = None
+        self._clear_device_previews()
+        if clear_status:
+            self.statusBar().clearMessage()
+
     def create_pad(self) -> None:
         """Start rectangle placement on the currently visible board view."""
         if not self.project:
@@ -1173,6 +1841,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
                 self, "No project", "Create or open a project first."
             )
             return
+        self._cancel_device_placement()
         name = self._next_pad_name()
         LOGGER.info(
             "Create pad requested name=%s tab=%s", name, self._tabs.currentIndex()
@@ -1244,14 +1913,34 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         """Return the pad containing normalized coordinates, if any."""
         if not self.project:
             return None
+        pixmap = self._base_pixmap_for_asset(side)
+        image_width = pixmap.width() if not pixmap.isNull() else 1
+        image_height = pixmap.height() if not pixmap.isNull() else 1
         for pad in reversed(self.project.pads):
-            if (
-                pad.side == side
-                and pad.x <= x <= pad.x + pad.width
-                and pad.y <= y <= pad.y + pad.height
+            if pad.side == side and self._pad_contains(
+                pad, x, y, image_width, image_height
             ):
                 return pad
         return None
+
+    @staticmethod
+    def _pad_contains(
+        pad: Pad, x: float, y: float, image_width: int, image_height: int
+    ) -> bool:
+        """Hit-test a potentially rotated pad in normalized coordinates."""
+        center_x = pad.x + pad.width / 2
+        center_y = pad.y + pad.height / 2
+        cosine = math.cos(math.radians(-pad.rotation))
+        sine = math.sin(math.radians(-pad.rotation))
+        delta_x = (x - center_x) * image_width
+        delta_y = (y - center_y) * image_height
+        local_x = delta_x * cosine - delta_y * sine
+        local_y = delta_x * sine + delta_y * cosine
+        width = pad.width * image_width
+        height = pad.height * image_height
+        if pad.shape in {"circle", "oval"}:
+            return (local_x / (width / 2)) ** 2 + (local_y / (height / 2)) ** 2 <= 1.0
+        return abs(local_x) <= width / 2 and abs(local_y) <= height / 2
 
     def _select_pad(self, side: str, x: float, y: float) -> None:
         """Toggle same-net connections without changing the current view."""
@@ -1450,6 +2139,10 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
     def keyPressEvent(self, event) -> None:  # noqa: N802
         """Switch board view with `T`, `B`, or a double press."""
         key = event.key()
+        if key == Qt.Key.Key_Escape and self._pending_device is not None:
+            self._cancel_device_placement()
+            event.accept()
+            return
         if key not in (Qt.Key.Key_T, Qt.Key.Key_B):
             super().keyPressEvent(event)
             return
@@ -1482,6 +2175,8 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
             dialog.project_name.text(), dialog.board_name.text()
         )
         self._image_cache.clear()
+        self._device_footprint_cache.clear()
+        self._cancel_device_placement()
         self._dirty = True
         self._refresh_views()
         self._update_title()
@@ -1503,6 +2198,8 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
             return
         self.store, self.project, self._dirty = store, project, False
         self._image_cache.clear()
+        self._device_footprint_cache.clear()
+        self._cancel_device_placement()
         self._refresh_views()
         self._update_title()
 
@@ -1542,6 +2239,8 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         self.project = None
         self.store = None
         self._image_cache.clear()
+        self._device_footprint_cache.clear()
+        self._cancel_device_placement()
         self._dirty = False
         self._refresh_views()
         self._update_title()
@@ -1567,10 +2266,23 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         self, event: QCloseEvent
     ) -> None:  # noqa: N802  # pylint: disable=invalid-name
         """Prevent accidental loss of unsaved project changes."""
-        if self._confirm_pending_changes():
+        if self._close_when_cache_finishes:
             event.accept()
-        else:
+            return
+        if not self._confirm_pending_changes():
             event.ignore()
+            return
+        if (
+            self._kicad_cache_thread is not None
+            and self._kicad_cache_thread.isRunning()
+        ):
+            self._pending_device_reference = None
+            self._close_kicad_progress()
+            self._close_when_cache_finishes = True
+            self.hide()
+            event.ignore()
+            return
+        event.accept()
 
     def import_picture(self) -> None:
         """Import an image, then ask whether it belongs to top or bottom."""
@@ -1824,13 +2536,68 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         self._overlay_view.set_pixmap(canvas)
 
     def _pixmap_for_asset(self, side: str) -> QPixmap:
-        """Copy one cached working image and draw current pad overlays."""
+        """Copy one cached working image and draw device/pad overlays."""
         pixmap = self._base_pixmap_for_asset(side)
         if pixmap.isNull():
             return pixmap
         pixmap = QPixmap(pixmap)
+        self._draw_devices(pixmap, side)
         self._draw_pads(pixmap, side)
         return pixmap
+
+    def _draw_devices(self, pixmap: QPixmap, side: str) -> None:
+        """Draw every persisted KiCad footprint at calibrated physical scale."""
+        if not self.project or not self.store:
+            return
+        image = next(
+            (asset for asset in self.project.images if asset.side == side), None
+        )
+        if image is None or image.pixels_per_mm is None:
+            return
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        for device in self.project.devices:
+            if device.side != side:
+                continue
+            footprint = self._footprint_for_device(device)
+            if footprint is None:
+                continue
+            painter.save()
+            painter.translate(
+                device.x * (pixmap.width() - 1),
+                device.y * (pixmap.height() - 1),
+            )
+            _paint_footprint(
+                painter,
+                footprint,
+                image.pixels_per_mm,
+                side,
+                device.rotation,
+            )
+            painter.restore()
+        painter.end()
+
+    def _footprint_for_device(self, device: Device) -> Footprint | None:
+        """Decode and cache an embedded footprint used by a placed device."""
+        cached = self._device_footprint_cache.get(device.footprint_path)
+        if cached is not None:
+            return cached
+        if self.store is None:
+            return None
+        try:
+            footprint = parse_footprint(
+                self.store.read_asset(device.footprint_path),
+                device.footprint_library,
+            )
+        except (ProjectFormatError, KiCadFormatError) as error:
+            LOGGER.warning(
+                "Cannot render device footprint path=%s error=%s",
+                device.footprint_path,
+                error,
+            )
+            return None
+        self._device_footprint_cache[device.footprint_path] = footprint
+        return footprint
 
     def _base_pixmap_for_asset(self, side: str) -> QPixmap:
         """Load and cache one undecorated working image."""
@@ -1916,10 +2683,22 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
             top = round(pad.y * (pixmap.height() - 1))
             right = max(left + 2, round((pad.x + pad.width) * (pixmap.width() - 1)))
             bottom = max(top + 2, round((pad.y + pad.height) * (pixmap.height() - 1)))
-            painter.drawRect(QRect(left, top, right - left, bottom - top))
+            width, height = right - left, bottom - top
+            center = QPointF(left + width / 2, top + height / 2)
+            painter.save()
+            painter.translate(center)
+            painter.rotate(pad.rotation)
+            rectangle = QRectF(-width / 2, -height / 2, width, height)
+            if pad.shape in {"circle", "oval"}:
+                painter.drawEllipse(rectangle)
+            elif pad.shape == "roundrect":
+                painter.drawRoundedRect(rectangle, 20, 20, Qt.SizeMode.RelativeSize)
+            else:
+                painter.drawRect(rectangle)
+            painter.restore()
             painter.setOpacity(1.0)
             painter.drawText(
-                QRect(left, top, right - left, bottom - top),
+                QRect(left, top, width, height),
                 Qt.AlignmentFlag.AlignCenter,
                 pad.name,
             )

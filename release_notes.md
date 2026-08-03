@@ -11,3 +11,5 @@
 - Added persisted rectangular pad creation from Tools, automatic P-naming,
   right-click net assignment, electrical-net connection lines, and a Nets table.
 - Added rotating application diagnostics available through Tools > Log file.
+- Added KiCad footprint caching and Add device placement with 45° right-click
+  rotation, calibrated physical sizing, and automatically named footprint pads.

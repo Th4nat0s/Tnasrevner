@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 from tnasrevner.gui import ImageEditDialog, ImageView, MainWindow
+from tnasrevner.kicad import FootprintReference, parse_footprint
 from tnasrevner.project import (
     ImageAsset,
     Pad,
@@ -31,6 +32,13 @@ from tnasrevner.project import (
     ProjectFormatError,
     ProjectStore,
 )
+
+FOOTPRINT = b"""(footprint "R_0603"
+  (version 20240108) (generator test) (layer "F.Cu")
+  (fp_rect (start -1.5 -0.8) (end 1.5 0.8)
+    (stroke (width 0.15) (type default)) (fill none) (layer "F.SilkS"))
+  (pad "1" smd rect (at -0.8 0) (size 1 1) (layers "F.Cu"))
+  (pad "2" smd rect (at 0.8 0) (size 1 1) (layers "F.Cu")))"""
 
 
 @pytest.fixture(scope="module")
@@ -202,6 +210,55 @@ def test_create_pad_from_tools_places_and_persists_marker(
     window._views["top"].pad_selected.emit(0.6, 0.2, 0.15, 0.15)
 
     assert [pad.name for pad in window.project.pads] == ["P1", "P2"]
+
+
+def test_add_device_rotates_and_creates_named_footprint_pads(
+    window: MainWindow, tmp_path: Path
+) -> None:
+    """Right-click rotates preview; left-click creates device and its pads."""
+    window.store = ProjectStore(tmp_path / "board.revp")
+    window.project = ProjectDocument("Project", "Board")
+    image = QImage(200, 200, QImage.Format.Format_RGB32)
+    image.fill(0xFFFFFF)
+    window.store.write_asset(
+        "assets/top.png", window._pixmap_bytes(QPixmap.fromImage(image))
+    )
+    window.project.images.append(
+        ImageAsset("top", "assets/top.png", "top.png", pixels_per_mm=10)
+    )
+    window._refresh_views()
+    source = FootprintReference("Resistor_SMD", "R_0603", tmp_path / "R_0603.kicad_mod")
+    footprint = parse_footprint(FOOTPRINT, source.library)
+
+    window._begin_device_placement("R1", source, footprint, FOOTPRINT, "a" * 40)
+    view = window._views["top"]
+    QTest.mouseClick(
+        view._label,
+        Qt.MouseButton.RightButton,
+        pos=QPoint(view._label.width() // 2, view._label.height() // 2),
+    )
+    QTest.mouseClick(
+        view._label,
+        Qt.MouseButton.LeftButton,
+        pos=QPoint(view._label.width() // 2, view._label.height() // 2),
+    )
+
+    assert len(window.project.devices) == 1
+    assert window.project.devices[0].reference == "R1"
+    assert window.project.devices[0].rotation == 45
+    assert [pad.name for pad in window.project.pads] == ["R1.1", "R1.2"]
+    assert all(
+        pad.device_id == window.project.devices[0].device_id
+        for pad in window.project.pads
+    )
+    assert (
+        window.store.read_asset(window.project.devices[0].footprint_path) == FOOTPRINT
+    )
+    assert not view._device_placement
+    assert any(
+        button.text() == "Add device"
+        for button in window._tools_dock.widget().findChildren(QPushButton)
+    )
 
 
 def test_clicking_pad_toggles_links_without_resetting_zoom(

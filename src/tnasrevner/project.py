@@ -10,11 +10,14 @@ from typing import Any
 from uuid import uuid4
 from zipfile import ZIP_DEFLATED, BadZipFile, ZipFile
 
+from .kicad import KiCadFormatError, parse_footprint
+
 CURRENT_FORMAT_VERSION = 1
 PROJECT_FILENAME = "project.json"
 PROJECT_ARCHIVE_SUFFIX = ".revp"
 _SIDES = frozenset({"top", "bottom"})
 _DISPLAY_MODES = frozenset({"top", "bottom", "side_by_side", "both", "nets"})
+_PAD_SHAPES = frozenset({"rect", "circle", "oval", "roundrect", "trapezoid"})
 
 
 class ProjectFormatError(ValueError):
@@ -33,10 +36,10 @@ def _required_string(value: Any, name: str) -> str:
 
 def _relative_asset_path(value: Any) -> str:
     if not isinstance(value, str) or not value:
-        raise ProjectFormatError("image asset path must be a non-empty string")
+        raise ProjectFormatError("asset path must be a non-empty string")
     path = PurePosixPath(value)
     if path.is_absolute() or ".." in path.parts or "\\" in value:
-        raise ProjectFormatError("image asset path must be relative to project root")
+        raise ProjectFormatError("asset path must be relative to project root")
     return value
 
 
@@ -112,6 +115,10 @@ class Pad:  # pylint: disable=too-many-instance-attributes
     width: float = 0.02
     height: float = 0.02
     net: str | None = None
+    device_id: str | None = None
+    number: str | None = None
+    shape: str = "rect"
+    rotation: float = 0.0
 
     def __post_init__(self) -> None:
         _required_string(self.name, "pad name")
@@ -120,11 +127,18 @@ class Pad:  # pylint: disable=too-many-instance-attributes
             raise ProjectFormatError("pad side must be 'top' or 'bottom'")
         if self.net is not None:
             _required_string(self.net, "pad net")
+        if (self.device_id is None) != (self.number is None):
+            raise ProjectFormatError("device pad requires device_id and number")
+        if self.device_id is not None:
+            _required_string(self.device_id, "pad device_id")
+            _required_string(self.number, "pad number")
+        if self.shape not in _PAD_SHAPES:
+            raise ProjectFormatError("pad shape is unsupported")
         if not all(
             isinstance(value, (int, float))
-            for value in (self.x, self.y, self.width, self.height)
+            for value in (self.x, self.y, self.width, self.height, self.rotation)
         ):
-            raise ProjectFormatError("pad coordinates must be numbers")
+            raise ProjectFormatError("pad coordinates and rotation must be numbers")
         if (  # pylint: disable=too-many-boolean-expressions
             not 0.0 <= self.x < 1.0
             or not 0.0 <= self.y < 1.0
@@ -146,6 +160,10 @@ class Pad:  # pylint: disable=too-many-instance-attributes
             "width": self.width,
             "height": self.height,
             "net": self.net,
+            "device_id": self.device_id,
+            "number": self.number,
+            "shape": self.shape,
+            "rotation": self.rotation,
         }
 
     @classmethod
@@ -162,6 +180,10 @@ class Pad:  # pylint: disable=too-many-instance-attributes
             width=data.get("width", 0.02),
             height=data.get("height", 0.02),
             net=data.get("net"),
+            device_id=data.get("device_id"),
+            number=data.get("number"),
+            shape=data.get("shape", "rect"),
+            rotation=data.get("rotation", 0.0),
         )
 
 
@@ -183,6 +205,79 @@ def _pads_from_dict(data: list[Any]) -> list[Pad]:
         used_names.add(name)
         migrated.append(replace(pad, name=name, net=pad.name))
     return migrated
+
+
+@dataclass(frozen=True)
+class Device:  # pylint: disable=too-many-instance-attributes
+    """A KiCad footprint instance placed on one board-side image."""
+
+    reference: str
+    side: str
+    x: float
+    y: float
+    footprint_library: str
+    footprint_name: str
+    footprint_path: str
+    source_revision: str
+    device_id: str = field(default_factory=lambda: str(uuid4()))
+    rotation: float = 0.0
+
+    def __post_init__(self) -> None:
+        _required_string(self.reference, "device reference")
+        if len(self.reference) > 64:
+            raise ProjectFormatError("device reference is too long")
+        _required_string(self.device_id, "device id")
+        _required_string(self.footprint_library, "device footprint_library")
+        _required_string(self.footprint_name, "device footprint_name")
+        _relative_asset_path(self.footprint_path)
+        _required_string(self.source_revision, "device source_revision")
+        if self.side not in _SIDES:
+            raise ProjectFormatError("device side must be 'top' or 'bottom'")
+        if not all(
+            isinstance(value, (int, float)) for value in (self.x, self.y, self.rotation)
+        ):
+            raise ProjectFormatError("device position and rotation must be numbers")
+        if not 0.0 <= self.x <= 1.0 or not 0.0 <= self.y <= 1.0:
+            raise ProjectFormatError("device position must fit between 0 and 1")
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return JSON-compatible device data."""
+        return {
+            "device_id": self.device_id,
+            "reference": self.reference,
+            "side": self.side,
+            "x": self.x,
+            "y": self.y,
+            "rotation": self.rotation,
+            "footprint_library": self.footprint_library,
+            "footprint_name": self.footprint_name,
+            "footprint_path": self.footprint_path,
+            "source_revision": self.source_revision,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Any) -> "Device":
+        """Build a device from validated JSON-like data."""
+        if not isinstance(data, dict):
+            raise ProjectFormatError("device must be an object")
+        return cls(
+            device_id=_required_string(data.get("device_id"), "device id"),
+            reference=_required_string(data.get("reference"), "device reference"),
+            side=_required_string(data.get("side"), "device side"),
+            x=data.get("x"),
+            y=data.get("y"),
+            rotation=data.get("rotation", 0.0),
+            footprint_library=_required_string(
+                data.get("footprint_library"), "device footprint_library"
+            ),
+            footprint_name=_required_string(
+                data.get("footprint_name"), "device footprint_name"
+            ),
+            footprint_path=_relative_asset_path(data.get("footprint_path")),
+            source_revision=_required_string(
+                data.get("source_revision"), "device source_revision"
+            ),
+        )
 
 
 @dataclass
@@ -243,6 +338,7 @@ class ProjectDocument:  # pylint: disable=too-many-instance-attributes
     project_id: str = field(default_factory=lambda: str(uuid4()))
     images: list[ImageAsset] = field(default_factory=list)
     pads: list[Pad] = field(default_factory=list)
+    devices: list[Device] = field(default_factory=list)
     display: DisplaySettings = field(default_factory=DisplaySettings)
     format_version: int = CURRENT_FORMAT_VERSION
 
@@ -266,6 +362,19 @@ class ProjectDocument:  # pylint: disable=too-many-instance-attributes
         pad_names = [pad.name for pad in self.pads]
         if len(set(pad_names)) != len(pad_names):
             raise ProjectFormatError("pad names must be unique")
+        device_ids = [device.device_id for device in self.devices]
+        if len(set(device_ids)) != len(device_ids):
+            raise ProjectFormatError("device ids must be unique")
+        references = [device.reference for device in self.devices]
+        if len(set(references)) != len(references):
+            raise ProjectFormatError("device references must be unique")
+        unknown_devices = {
+            pad.device_id
+            for pad in self.pads
+            if pad.device_id is not None and pad.device_id not in set(device_ids)
+        }
+        if unknown_devices:
+            raise ProjectFormatError("pad references an unknown device")
 
     def to_dict(self) -> dict[str, Any]:
         """Return complete JSON-compatible project data."""
@@ -278,6 +387,7 @@ class ProjectDocument:  # pylint: disable=too-many-instance-attributes
             "updated_at": self.updated_at,
             "images": [image.to_dict() for image in self.images],
             "pads": [pad.to_dict() for pad in self.pads],
+            "devices": [device.to_dict() for device in self.devices],
             "display": self.display.to_dict(),
         }
 
@@ -295,6 +405,9 @@ class ProjectDocument:  # pylint: disable=too-many-instance-attributes
         pads = data.get("pads", [])
         if not isinstance(pads, list):
             raise ProjectFormatError("pads must be an array")
+        devices = data.get("devices", [])
+        if not isinstance(devices, list):
+            raise ProjectFormatError("devices must be an array")
         return cls(
             format_version=version,
             project_id=_required_string(data.get("project_id"), "project_id"),
@@ -304,6 +417,7 @@ class ProjectDocument:  # pylint: disable=too-many-instance-attributes
             updated_at=_required_string(data.get("updated_at"), "updated_at"),
             images=[ImageAsset.from_dict(image) for image in images],
             pads=_pads_from_dict(pads),
+            devices=[Device.from_dict(device) for device in devices],
             display=DisplaySettings.from_dict(data.get("display", {})),
         )
 
@@ -398,7 +512,7 @@ class ProjectStore:
             pass
 
     def _validate_assets(self, project: ProjectDocument) -> None:
-        """Reject projects referencing missing or empty image assets."""
+        """Reject projects referencing missing, empty, or malformed assets."""
         for image in project.images:
             for path in filter(None, (image.path, image.original_path)):
                 try:
@@ -408,6 +522,18 @@ class ProjectStore:
                     raise ProjectFormatError(
                         f"missing or unreadable image asset: {path}"
                     ) from error
+        for device in project.devices:
+            try:
+                content = self.read_asset(device.footprint_path)
+                footprint = parse_footprint(content, device.footprint_library)
+                if footprint.name != device.footprint_name:
+                    raise ProjectFormatError(
+                        f"footprint name mismatch: {device.footprint_path}"
+                    )
+            except (ProjectFormatError, KiCadFormatError) as error:
+                raise ProjectFormatError(
+                    f"missing or invalid footprint asset: {device.footprint_path}"
+                ) from error
 
     def _load_archive(self) -> ProjectDocument:
         try:

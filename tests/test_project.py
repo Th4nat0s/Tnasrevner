@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from tnasrevner.project import (
+    Device,
     DisplaySettings,
     ImageAsset,
     Pad,
@@ -16,6 +17,11 @@ from tnasrevner.project import (
     ProjectFormatError,
     ProjectStore,
 )
+
+FOOTPRINT = b"""(footprint "R_0603"
+  (version 20240108) (generator test) (layer "F.Cu")
+  (pad "1" smd rect (at -0.8 0) (size 1 1) (layers "F.Cu"))
+  (pad "2" smd rect (at 0.8 0) (size 1 1) (layers "F.Cu")))"""
 
 
 def test_empty_project_round_trip(tmp_path: Path) -> None:
@@ -154,6 +160,71 @@ def test_pad_names_are_unique_but_nets_can_be_shared() -> None:
             "Board",
             pads=[Pad("P1", "top", 0.1, 0.1), Pad("P1", "bottom", 0.2, 0.2)],
         )
+
+
+def test_kicad_device_and_generated_pads_round_trip(tmp_path: Path) -> None:
+    """Placed devices retain footprint source, rotation, and named pads."""
+    device = Device(
+        "R1",
+        "top",
+        0.5,
+        0.5,
+        "Resistor_SMD",
+        "R_0603",
+        "assets/kicad/device.kicad_mod",
+        "a" * 40,
+        "device-id",
+        45,
+    )
+    project = ProjectDocument(
+        "Project",
+        "Board",
+        pads=[
+            Pad(
+                "R1.1",
+                "top",
+                0.4,
+                0.4,
+                "pad-id",
+                0.1,
+                0.1,
+                device_id="device-id",
+                number="1",
+                rotation=45,
+            )
+        ],
+        devices=[device],
+    )
+    store = ProjectStore(tmp_path / "board.revp")
+    store.write_asset(device.footprint_path, FOOTPRINT)
+
+    store.save(project)
+    loaded = ProjectStore(tmp_path / "board.revp").load()
+
+    assert loaded.devices == [device]
+    assert loaded.pads[0].name == "R1.1"
+    assert loaded.pads[0].device_id == "device-id"
+    assert loaded.pads[0].rotation == 45
+
+
+def test_missing_or_malformed_device_footprint_is_rejected(tmp_path: Path) -> None:
+    device = Device(
+        "U1",
+        "top",
+        0.5,
+        0.5,
+        "Package_QFP",
+        "QFP",
+        "assets/kicad/device.kicad_mod",
+        "a" * 40,
+    )
+    project = ProjectDocument("Project", "Board", devices=[device])
+    store = ProjectStore(tmp_path / "board.revp")
+    store.write_asset(device.footprint_path, b"broken")
+    store.save(project)
+
+    with pytest.raises(ProjectFormatError, match="invalid footprint asset"):
+        ProjectStore(tmp_path / "board.revp").load()
 
 
 def test_legacy_duplicate_pad_names_migrate_to_net() -> None:
