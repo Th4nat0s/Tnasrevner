@@ -72,6 +72,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QMenu,
     QScrollArea,
+    QSpinBox,
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -1166,6 +1167,15 @@ class FootprintPickerDialog(QDialog):  # pylint: disable=R0902,R0903
         self._recent_identifiers = recent_identifiers[:_MAX_RECENT_FOOTPRINTS]
         self._visible_references: list[FootprintReference] = []
         self._preview_cache: dict[str, Footprint] = {}
+        self._pad_count = QSpinBox(self)
+        self._pad_count.setRange(0, 9999)
+        self._pad_count.setValue(0)
+        self._pad_count.setPrefix("Pads: ")
+        self._pad_count.setToolTip("0 shows footprints with any number of pads")
+        minus_button = QPushButton("−", self)
+        minus_button.setToolTip("Show one fewer pad")
+        plus_button = QPushButton("+", self)
+        plus_button.setToolTip("Show one more pad")
         self._search = QLineEdit(self)
         self._search.setPlaceholderText("Search library or footprint name…")
         self._list = QListWidget(self)
@@ -1188,8 +1198,18 @@ class FootprintPickerDialog(QDialog):  # pylint: disable=R0902,R0903
         content.addLayout(picker, 3)
         content.addWidget(self._preview, 2)
         layout.addLayout(content)
+        pad_filter = QHBoxLayout()
+        pad_filter.addWidget(QLabel("Filter by pad count"))
+        pad_filter.addStretch()
+        pad_filter.addWidget(minus_button)
+        pad_filter.addWidget(self._pad_count)
+        pad_filter.addWidget(plus_button)
+        layout.addLayout(pad_filter)
         layout.addWidget(self._buttons)
         self._search.textChanged.connect(self._refresh_results)
+        self._pad_count.valueChanged.connect(lambda _value: self._refresh_results())
+        minus_button.clicked.connect(self._decrease_pad_filter)
+        plus_button.clicked.connect(self._increase_pad_filter)
         self._list.currentRowChanged.connect(self._selection_changed)
         self._list.itemDoubleClicked.connect(lambda _item: self.accept())
         self._buttons.accepted.connect(self.accept)
@@ -1235,13 +1255,38 @@ class FootprintPickerDialog(QDialog):  # pylint: disable=R0902,R0903
         painter.end()
         self._preview.setPixmap(canvas)
 
-    def _refresh_results(self, query: str) -> None:
+    def _decrease_pad_filter(self) -> None:
+        """Decrease the exact pad-count filter, stopping at zero."""
+        self._pad_count.setValue(max(0, self._pad_count.value() - 1))
+
+    def _increase_pad_filter(self) -> None:
+        """Increase the exact pad-count filter."""
+        self._pad_count.setValue(self._pad_count.value() + 1)
+
+    def _refresh_results(self, query: str = "") -> None:
+        """Refresh search results and apply the optional exact pad filter."""
         words = query.casefold().split()
         matches = [
             reference
             for reference in self._references
             if all(word in reference.identifier.casefold() for word in words)
         ]
+        pad_count = self._pad_count.value()
+        if pad_count:
+            filtered: list[FootprintReference] = []
+            for reference in matches:
+                try:
+                    footprint = self._preview_cache.get(reference.identifier)
+                    if footprint is None:
+                        footprint = parse_footprint(
+                            reference.path.read_bytes(), reference.library
+                        )
+                        self._preview_cache[reference.identifier] = footprint
+                except (OSError, KiCadFormatError):
+                    continue
+                if len(footprint.pads) == pad_count:
+                    filtered.append(reference)
+            matches = filtered
         matches_by_identifier = {
             reference.identifier: reference for reference in matches
         }
