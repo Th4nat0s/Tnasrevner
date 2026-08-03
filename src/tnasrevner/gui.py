@@ -1487,6 +1487,7 @@ class ImageView(
     pad_connection_requested = Signal(float, float)
     device_placed = Signal(float, float)
     device_rotated = Signal()
+    ruler_measured = Signal(float)
 
     def __init__(self, empty_text: str) -> None:
         super().__init__()
@@ -1500,6 +1501,10 @@ class ImageView(
         self._click_position: QPoint | None = None
         self._device_placement = False
         self._device_preview_point = (0.5, 0.5)
+        self._ruler_enabled = False
+        self._ruler_pixels_per_mm = 0.0
+        self._ruler_start: tuple[float, float] | None = None
+        self._ruler_end: tuple[float, float] | None = None
         self._pad_labels: tuple[Pad, ...] = ()
         self._mirror_pad_labels = False
         self._connection_net: str | None = None
@@ -1572,6 +1577,14 @@ class ImageView(
             self.unsetCursor()
             self._label.unsetCursor()
 
+    def set_ruler(self, enabled: bool, pixels_per_mm: float = 0.0) -> None:
+        """Enable the two-click ruler using the image calibration."""
+        self._ruler_enabled = enabled and pixels_per_mm > 0
+        self._ruler_pixels_per_mm = pixels_per_mm
+        self._ruler_start = None
+        self._ruler_end = None
+        self._render()
+
     def wheelEvent(self, event) -> None:  # noqa: N802  # pylint: disable=invalid-name
         """Zoom image with a mouse wheel or trackpad scroll gesture."""
         if event.angleDelta().y() and not self._pixmap.isNull():
@@ -1603,6 +1616,11 @@ class ImageView(
             return False
         if watched not in (label, self.viewport()):
             return super().eventFilter(watched, event)
+        if event.type() == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Escape:
+            if self._ruler_enabled:
+                self.set_ruler(False)
+                return True
+            return super().eventFilter(watched, event)
         if event.type() == QEvent.Type.MouseButtonDblClick:
             point = self._label_point(watched, event.position().toPoint())
             if (
@@ -1617,6 +1635,18 @@ class ImageView(
             return True
         if event.type() == QEvent.Type.MouseButtonPress:
             point = self._label_point(watched, event.position().toPoint())
+            if self._ruler_enabled and event.button() == Qt.MouseButton.LeftButton:
+                if not self._label.rect().contains(point):
+                    return True
+                normalized = self._normalized_point(point)
+                if self._ruler_start is None or self._ruler_end is not None:
+                    self._ruler_start = normalized
+                    self._ruler_end = None
+                else:
+                    self._ruler_end = normalized
+                    self.ruler_measured.emit(self._ruler_measurement_mm())
+                self._render()
+                return True
             if (
                 self._device_placement
                 and not self._pixmap.isNull()
@@ -1662,6 +1692,12 @@ class ImageView(
                 self._click_position = None
                 self._drag_position = event.globalPosition().toPoint()
                 self.setCursor(QCursor(Qt.CursorShape.ClosedHandCursor))
+            return True
+        if event.type() == QEvent.Type.MouseMove and self._ruler_enabled:
+            point = self._label_point(watched, event.position().toPoint())
+            if self._ruler_start is not None and self._label.rect().contains(point):
+                self._ruler_end = self._normalized_point(point)
+                self._render()
             return True
         if event.type() == QEvent.Type.MouseMove and self._device_placement:
             point = self._label_point(watched, event.position().toPoint())
@@ -1722,6 +1758,16 @@ class ImageView(
                 self.unsetCursor()
                 return True
         return super().eventFilter(watched, event)
+
+    def _ruler_measurement_mm(self) -> float:
+        """Return the current ruler distance in real millimeters."""
+        if self._ruler_start is None or self._ruler_end is None:
+            return 0.0
+        width = max(1, self._pixmap.width() - 1)
+        height = max(1, self._pixmap.height() - 1)
+        start = QPointF(self._ruler_start[0] * width, self._ruler_start[1] * height)
+        end = QPointF(self._ruler_end[0] * width, self._ruler_end[1] * height)
+        return QLineF(start, end).length() / self._ruler_pixels_per_mm
 
     def _pad_at_point(self, point: QPoint | QPointF) -> Pad | None:
         """Return the visible pad under a displayed-image coordinate."""
@@ -1955,11 +2001,35 @@ class ImageView(
             Qt.TransformationMode.SmoothTransformation,
         )
         self._draw_vector_pad_labels(displayed)
+        self._draw_ruler(displayed)
         self._label.setPixmap(displayed)
         self._label.resize(self._label.pixmap().size())
         if self._device_placement:
             self._device_preview.set_effective_scale(fit_scale * self._scale)
             self._position_device_preview()
+
+    def _draw_ruler(self, pixmap: QPixmap) -> None:
+        """Draw the ruler line and its real-world measurement."""
+        if not self._ruler_enabled or self._ruler_start is None:
+            return
+        width = max(1, pixmap.width() - 1)
+        height = max(1, pixmap.height() - 1)
+        start = QPointF(self._ruler_start[0] * width, self._ruler_start[1] * height)
+        end = self._ruler_end or self._ruler_start
+        end = QPointF(end[0] * width, end[1] * height)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(QPen(QColor(0, 255, 255), 3))
+        painter.drawLine(start, end)
+        if self._ruler_end is not None:
+            label = f"{self._ruler_measurement_mm():.2f} mm"
+            painter.setPen(Qt.GlobalColor.white)
+            painter.drawText(
+                QRectF(end.x() + 8, end.y() - 24, 150, 24),
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                label,
+            )
+        painter.end()
 
     def _draw_vector_pad_labels(self, pixmap: QPixmap) -> None:
         """Draw labels after zoom scaling so their text stays sharp."""
@@ -3021,6 +3091,12 @@ class MainWindow(
                 lambda x, y, side=side: self._place_device(side, x, y)
             )
             view.device_rotated.connect(self._rotate_pending_device)
+        for view in (
+            *self._views.values(),
+            *self._side_views.values(),
+            self._overlay_view,
+        ):
+            view.ruler_measured.connect(self._show_ruler_measurement)
         self.setCentralWidget(self._tabs)
         self._create_actions()
         self._create_tool_palette()
@@ -3082,6 +3158,14 @@ class MainWindow(
             self._center_images,
         )
         center_button.setIcon(_center_tool_icon())
+        ruler_button = add_button(
+            "Ruler",
+            QStyle.StandardPixmap.SP_FileDialogContentsView,
+            "Measure a distance in millimeters using the image scale",
+            self._toggle_ruler,
+        )
+        ruler_button.setCheckable(True)
+        self._ruler_button = ruler_button
         show_pads_button = QPushButton(panel)
         show_pads_button.setCheckable(True)
         show_pads_button.setChecked(True)
@@ -3164,6 +3248,58 @@ class MainWindow(
             view.set_connection_mode(enabled)
         self._schematic_view.set_connection_mode(enabled)
         self._net_mode_label.setVisible(enabled)
+
+    def _ruler_scale_for_view(self, view: ImageView) -> float:
+        """Return calibrated pixels per millimeter for one board view."""
+        if view is self._views["bottom"] or view is self._side_views["bottom"]:
+            side = "bottom"
+        else:
+            side = "top"
+        if not self.project:
+            return 0.0
+        image = next(
+            (asset for asset in self.project.images if asset.side == side), None
+        )
+        pixmap = self._base_pixmap_for_asset(side)
+        if image is None or pixmap.isNull():
+            return 0.0
+        return image.measured_pixels_per_mm(pixmap.width(), pixmap.height()) or 0.0
+
+    def _toggle_ruler(self) -> None:
+        """Arm or disarm the two-click measurement tool."""
+        enabled = self._ruler_button.isChecked()
+        if not enabled:
+            self._disable_ruler()
+            return
+        views = self._active_views()
+        scales = [self._ruler_scale_for_view(view) for view in views]
+        if not any(scales):
+            self._ruler_button.setChecked(False)
+            QMessageBox.information(
+                self,
+                "Ruler unavailable",
+                "Import and calibrate an image before using the ruler.",
+            )
+            return
+        for view, scale in zip(views, scales):
+            view.set_ruler(True, scale)
+        self.statusBar().showMessage("Ruler: click two points — Esc to stop.")
+
+    def _disable_ruler(self) -> None:
+        """Stop ruler mode and remove its temporary measurement lines."""
+        if hasattr(self, "_ruler_button"):
+            self._ruler_button.setChecked(False)
+        for view in (
+            *self._views.values(),
+            *self._side_views.values(),
+            self._overlay_view,
+        ):
+            view.set_ruler(False)
+        self.statusBar().clearMessage()
+
+    def _show_ruler_measurement(self, millimeters: float) -> None:
+        """Display the latest ruler result in the application status bar."""
+        self.statusBar().showMessage(f"Distance: {millimeters:.2f} mm")
 
     def _create_view_menu(self) -> None:
         """Create menu actions for restoring optional panels."""
@@ -4427,6 +4563,13 @@ class MainWindow(
         """Switch board view with `T`, `B`, or a double press."""
         key = event.key()
         if key == Qt.Key.Key_Escape:
+            if (
+                getattr(self, "_ruler_button", None) is not None
+                and self._ruler_button.isChecked()
+            ):
+                self._disable_ruler()
+                event.accept()
+                return
             connected = self._finish_board_connection()
             connected = self._schematic_view.finish_connection() or connected
             if connected:
