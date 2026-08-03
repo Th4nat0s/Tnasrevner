@@ -3167,8 +3167,10 @@ class MainWindow(
         )
         self._net_table.cellChanged.connect(self._net_table_cell_changed)
         self._tabs.addTab(self._net_table, "Nets")
-        self._bom_table = QTableWidget(0, 3)
-        self._bom_table.setHorizontalHeaderLabels(["Reference", "Object", "Value"])
+        self._bom_table = QTableWidget(0, 4)
+        self._bom_table.setHorizontalHeaderLabels(
+            ["Reference", "Object", "Footprint", "Value"]
+        )
         self._bom_table.cellChanged.connect(self._bom_table_cell_changed)
         self._tabs.addTab(self._bom_table, "BOM")
         self._schematic_view = SchematicView()
@@ -5464,16 +5466,21 @@ class MainWindow(
                     )
                 )
                 self._bom_table.setCellWidget(row, 1, combo)
-                self._bom_table.setItem(row, 2, QTableWidgetItem(device.value))
+                footprint_item = QTableWidgetItem(device.footprint_name)
+                footprint_item.setFlags(
+                    footprint_item.flags() & ~Qt.ItemFlag.ItemIsEditable
+                )
+                self._bom_table.setItem(row, 2, footprint_item)
+                self._bom_table.setItem(row, 3, QTableWidgetItem(device.value))
         finally:
             self._bom_table.blockSignals(False)
 
     def _bom_table_cell_changed(self, row: int, column: int) -> None:
         """Persist edits from the BOM Value column only."""
-        if not self.project or column != 2:
+        if not self.project or column != 3:
             return
         reference_item = self._bom_table.item(row, 0)
-        value_item = self._bom_table.item(row, 2)
+        value_item = self._bom_table.item(row, 3)
         if reference_item is None or value_item is None:
             return
         device_id = reference_item.data(Qt.ItemDataRole.UserRole)
