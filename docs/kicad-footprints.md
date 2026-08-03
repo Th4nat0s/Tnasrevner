@@ -31,8 +31,9 @@ require network access.
 ## Add device workflow
 
 1. Import and calibrate at least one board image.
-2. Select **Add device** in Tools and enter a unique reference such as `U1`.
-3. Search for and select a cached KiCad footprint.
+2. Select **Add device** in Tools.
+3. Search for and select a cached KiCad footprint, then enter a unique reference
+   such as `U1`.
 4. Move the physically scaled preview over the Top or Bottom image.
 5. Right-click to rotate clockwise by 45 degrees; left-click to place; press Escape
    to cancel.
@@ -40,7 +41,9 @@ require network access.
 Placement creates every named footprint pad automatically. Pad identities combine
 the reference and KiCad pad number (`U1.1`, `U1.2`, and so on). Repeated physical
 shapes carrying the same KiCad number are grouped into one logical pad. Bottom-side
-geometry is mirrored automatically.
+geometry is mirrored automatically. Footprint millimeter dimensions are converted
+with the selected image's calibration, so preview, outline, and pads remain at 1:1
+physical scale through FIT and zoom changes.
 
 The first implementation accepts standard rectangular, circular, oval, rounded
 rectangle, and trapezoid pads. Unsupported custom pad shapes and malformed files are

@@ -326,7 +326,10 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
                 ),
             )
         self._set_calibration_line(start, end)
-        self._millimeters.setValue(QLineF(start, end).length() / pixels_per_mm)
+        if self._calibration_line is not None:
+            self._millimeters.setValue(
+                QLineF(*self._calibration_line).length() / pixels_per_mm
+            )
         self._update_confirm_state()
 
     def eventFilter(
@@ -1310,7 +1313,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         self._syncing_views = False
         self._pending_pad: Pad | None = None
         self._pending_device: PendingDevice | None = None
-        self._pending_device_reference: str | None = None
+        self._add_device_pending = False
         self._selected_net: str | None = None
         self._selected_pad_id: str | None = None
         self._pads_visible = True
@@ -1526,7 +1529,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
             self._start_kicad_cache_update(interactive=False)
 
     def add_device(self) -> None:
-        """Collect a reference, select a footprint, and arm image placement."""
+        """Select a footprint, collect its reference, and arm placement."""
         if not self.project or not self.store:
             QMessageBox.information(
                 self, "No project", "Create or open a project first."
@@ -1539,28 +1542,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
                 "Import and calibrate a board image before adding a device.",
             )
             return
-        reference, accepted = QInputDialog.getText(
-            self, "Add device", "Reference (for example U1):"
-        )
-        reference = reference.strip()
-        if not accepted:
-            return
-        if not _DEVICE_REFERENCE.fullmatch(reference):
-            QMessageBox.warning(
-                self,
-                "Invalid reference",
-                "Use 1–64 letters, digits, '.', '_', '+', or '-', starting with a letter.",
-            )
-            return
-        if any(
-            device.reference.casefold() == reference.casefold()
-            for device in self.project.devices
-        ):
-            QMessageBox.warning(
-                self, "Duplicate reference", f"Device {reference} already exists."
-            )
-            return
-        self._pending_device_reference = reference
+        self._add_device_pending = True
         if self._footprint_cache.is_ready_and_fresh():
             self._kicad_revision = self._footprint_cache.current_revision()
             self._open_footprint_picker()
@@ -1621,11 +1603,11 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
             result.warning,
         )
         if result.warning:
-            if self._pending_device_reference:
+            if self._add_device_pending:
                 QMessageBox.warning(self, "KiCad cache", result.warning)
             else:
                 LOGGER.warning("%s", result.warning)
-        if self._pending_device_reference:
+        if self._add_device_pending:
             QTimer.singleShot(0, self._open_footprint_picker)
 
     @Slot(str)
@@ -1633,9 +1615,9 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         """Report failure when no valid footprint cache is available."""
         self._close_kicad_progress()
         LOGGER.warning("KiCad footprint cache unavailable: %s", message)
-        if self._pending_device_reference:
+        if self._add_device_pending:
             QMessageBox.warning(self, "KiCad footprints unavailable", message)
-            self._pending_device_reference = None
+            self._add_device_pending = False
 
     @Slot()
     def _kicad_cache_thread_finished(self) -> None:
@@ -1649,39 +1631,72 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         if self._close_when_cache_finishes:
             QTimer.singleShot(0, self.close)
 
-    def _open_footprint_picker(self) -> None:
-        reference = self._pending_device_reference
-        if reference is None:
+    def _open_footprint_picker(  # pylint: disable=too-many-return-statements
+        self,
+    ) -> None:
+        if not self._add_device_pending:
             return
         try:
             catalog = self._footprint_cache.catalog()
         except KiCadCacheError as error:
             QMessageBox.warning(self, "KiCad footprints unavailable", str(error))
-            self._pending_device_reference = None
+            self._add_device_pending = False
             return
         dialog = FootprintPickerDialog(catalog, self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
-            self._pending_device_reference = None
+            self._add_device_pending = False
             return
         source = dialog.selected_reference()
         if source is None:
-            self._pending_device_reference = None
+            self._add_device_pending = False
             return
         try:
             footprint, content = self._footprint_cache.load(source)
         except (KiCadCacheError, KiCadFormatError) as error:
             QMessageBox.warning(self, "Invalid footprint", str(error))
-            self._pending_device_reference = None
+            self._add_device_pending = False
             return
         revision = self._kicad_revision or self._footprint_cache.current_revision()
         if revision is None:
             QMessageBox.warning(
                 self, "KiCad cache", "The footprint source revision is missing."
             )
-            self._pending_device_reference = None
+            self._add_device_pending = False
             return
-        self._pending_device_reference = None
+        reference = self._ask_device_reference()
+        self._add_device_pending = False
+        if reference is None:
+            return
         self._begin_device_placement(reference, source, footprint, content, revision)
+
+    def _ask_device_reference(self) -> str | None:
+        """Ask for a unique device reference after footprint selection."""
+        while self.project is not None:
+            reference, accepted = QInputDialog.getText(
+                self, "Add device", "Reference (for example U1):"
+            )
+            if not accepted:
+                return None
+            reference = reference.strip()
+            if not _DEVICE_REFERENCE.fullmatch(reference):
+                QMessageBox.warning(
+                    self,
+                    "Invalid reference",
+                    "Use 1–64 letters, digits, '.', '_', '+', or '-', starting with a letter.",
+                )
+                continue
+            if any(
+                device.reference.casefold() == reference.casefold()
+                for device in self.project.devices
+            ):
+                QMessageBox.warning(
+                    self,
+                    "Duplicate reference",
+                    f"Device {reference} already exists.",
+                )
+                continue
+            return reference
+        return None
 
     def _begin_device_placement(
         self,
@@ -2276,7 +2291,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
             self._kicad_cache_thread is not None
             and self._kicad_cache_thread.isRunning()
         ):
-            self._pending_device_reference = None
+            self._add_device_pending = False
             self._close_kicad_progress()
             self._close_when_cache_finishes = True
             self.hide()

@@ -247,6 +247,8 @@ def test_add_device_rotates_and_creates_named_footprint_pads(
     assert window.project.devices[0].reference == "R1"
     assert window.project.devices[0].rotation == 45
     assert [pad.name for pad in window.project.pads] == ["R1.1", "R1.2"]
+    assert window.project.pads[0].width * image.width() == pytest.approx(10)
+    assert window.project.pads[0].height * image.height() == pytest.approx(10)
     assert all(
         pad.device_id == window.project.devices[0].device_id
         for pad in window.project.pads
@@ -259,6 +261,74 @@ def test_add_device_rotates_and_creates_named_footprint_pads(
         button.text() == "Add device"
         for button in window._tools_dock.widget().findChildren(QPushButton)
     )
+
+
+def test_add_device_selects_footprint_before_asking_reference(
+    window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Tools workflow opens KiCad selection before the reference popup."""
+    window.store = ProjectStore(tmp_path / "board.revp")
+    window.project = ProjectDocument("Project", "Board")
+    image = QImage(100, 100, QImage.Format.Format_RGB32)
+    image.fill(0xFFFFFF)
+    window.store.write_asset(
+        "assets/top.png", window._pixmap_bytes(QPixmap.fromImage(image))
+    )
+    window.project.images.append(
+        ImageAsset("top", "assets/top.png", "top.png", pixels_per_mm=10)
+    )
+    window._refresh_views()
+    source = FootprintReference("Resistor_SMD", "R_0603", tmp_path / "R_0603.kicad_mod")
+    footprint = parse_footprint(FOOTPRINT, source.library)
+    order: list[str] = []
+
+    class FakeCache:  # pylint: disable=too-few-public-methods,missing-function-docstring
+        """Provide one ready footprint without network access."""
+
+        @staticmethod
+        def is_ready_and_fresh() -> bool:
+            return True
+
+        @staticmethod
+        def current_revision() -> str:
+            return "a" * 40
+
+        @staticmethod
+        def catalog() -> tuple[FootprintReference, ...]:
+            return (source,)
+
+        @staticmethod
+        def load(_source: FootprintReference) -> tuple[object, bytes]:
+            return footprint, FOOTPRINT
+
+    class FakePicker:  # pylint: disable=too-few-public-methods,missing-function-docstring
+        """Record that footprint selection happened first."""
+
+        def __init__(self, _catalog, _parent) -> None:
+            order.append("footprint")
+
+        @staticmethod
+        def exec() -> QDialog.DialogCode:
+            return QDialog.DialogCode.Accepted
+
+        @staticmethod
+        def selected_reference() -> FootprintReference:
+            return source
+
+    window._footprint_cache = FakeCache()
+    monkeypatch.setattr("tnasrevner.gui.FootprintPickerDialog", FakePicker)
+
+    def reference_popup(*_args) -> tuple[str, bool]:
+        order.append("reference")
+        return "R1", True
+
+    monkeypatch.setattr("tnasrevner.gui.QInputDialog.getText", reference_popup)
+
+    window.add_device()
+
+    assert order == ["footprint", "reference"]
+    assert window._pending_device is not None
+    assert window._pending_device.reference == "R1"
 
 
 def test_clicking_pad_toggles_links_without_resetting_zoom(
@@ -503,6 +573,21 @@ def test_import_editor_requires_scale_and_calculates_pixels_per_mm(
 
     assert dialog.pixels_per_mm() == 5
     assert not dialog._buttons.button(QDialogButtonBox.StandardButton.Ok).isEnabled()
+    dialog.close()
+
+
+def test_editing_existing_image_preserves_physical_scale(app: QApplication) -> None:
+    """FIT display scaling must not alter persisted source pixels per mm."""
+    image = QImage(2000, 1000, QImage.Format.Format_RGB32)
+    image.fill(0xFFFFFF)
+    dialog = ImageEditDialog(QPixmap.fromImage(image))
+    dialog.resize(800, 600)
+    dialog._render()
+    assert dialog._display_scale < 1
+
+    dialog.prepare_existing_image(25.0, (0.1, 0.5, 0.6, 0.5))
+
+    assert dialog.pixels_per_mm() == pytest.approx(25.0, rel=0.01)
     dialog.close()
 
 
