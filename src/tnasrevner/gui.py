@@ -1413,7 +1413,7 @@ class FootprintPreview(QWidget):  # pylint: disable=too-few-public-methods
         self.move(center.x() - diameter // 2, center.y() - diameter // 2)
 
 
-def _paint_footprint(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+def _paint_footprint(  # pylint: disable=too-many-arguments,too-many-positional-arguments,unused-argument
     painter: QPainter,
     footprint: Footprint,
     pixels_per_mm: float,
@@ -3471,10 +3471,13 @@ class MainWindow(
                 x=rotate_point(device.x, device.y)[0],
                 y=rotate_point(device.x, device.y)[1],
                 rotation=(device.rotation + 90.0) % 360.0,
+                schematic_rotation=(device.schematic_rotation + 90.0) % 360.0,
             )
             for device in self.project.devices
         ]
         self._image_cache.clear()
+        for side in ("top", "bottom"):
+            self._rebuild_device_pads(side, self._base_pixmap_for_asset(side))
         self._dirty = True
         current_tab = self._tabs.currentIndex()
         self._refresh_views()
