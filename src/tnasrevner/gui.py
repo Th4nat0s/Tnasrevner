@@ -2926,9 +2926,9 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
         del event
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.fillRect(self.rect(), QColor("#20242b"))
         painter.scale(self._zoom, self._zoom)
         painter.setClipRect(QRectF(0, 0, self._logical_width, self._logical_height))
-        painter.fillRect(self.rect(), QColor("#20242b"))
         if self._project is None:
             painter.setPen(QColor("#aeb7c4"))
             painter.drawText(
