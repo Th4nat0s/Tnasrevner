@@ -3063,6 +3063,8 @@ class SchematicView(QScrollArea):
         self.setWidget(self._canvas)
         self.setWidgetResizable(False)
         self.setMinimumSize(520, 320)
+        self.setStyleSheet("QScrollArea { background: #20242b; }")
+        self.viewport().setStyleSheet("background: #20242b;")
         self.setToolTip(
             "Wheel/pinch: zoom; Shift+click: connector mode; Esc: finish; "
             "Shift+right-click: edit net"
