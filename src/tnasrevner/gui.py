@@ -1488,6 +1488,7 @@ class ImageView(
     device_placed = Signal(float, float)
     device_rotated = Signal()
     ruler_measured = Signal(float)
+    pad_hovered = Signal(object)
 
     def __init__(self, empty_text: str) -> None:
         super().__init__()
@@ -1507,6 +1508,7 @@ class ImageView(
         self._ruler_pixels_per_mm = 0.0
         self._ruler_start: tuple[float, float] | None = None
         self._ruler_end: tuple[float, float] | None = None
+        self._hover_pad_id: str | None = None
         self._pad_labels: tuple[Pad, ...] = ()
         self._mirror_pad_labels = False
         self._footprint_overlays: tuple[tuple, ...] = ()
@@ -1632,6 +1634,11 @@ class ImageView(
                 self.set_ruler(False)
                 return True
             return super().eventFilter(watched, event)
+        if event.type() == QEvent.Type.Leave:
+            if self._hover_pad_id is not None:
+                self._hover_pad_id = None
+                self.pad_hovered.emit(None)
+            return super().eventFilter(watched, event)
         if event.type() == QEvent.Type.MouseButtonDblClick:
             point = self._label_point(watched, event.position().toPoint())
             if (
@@ -1725,6 +1732,18 @@ class ImageView(
                 )
                 self._drag_position = current
             return True
+        if event.type() == QEvent.Type.MouseMove and not (
+            self._temporary_pan
+            or self._ruler_enabled
+            or self._pad_placement
+            or self._device_placement
+        ):
+            point = self._label_point(watched, event.position().toPoint())
+            hovered = self._pad_at_point(point)
+            hovered_id = hovered.pad_id if hovered is not None else None
+            if hovered_id != self._hover_pad_id:
+                self._hover_pad_id = hovered_id
+                self.pad_hovered.emit(hovered)
         if event.type() == QEvent.Type.MouseMove and self._ruler_enabled:
             point = self._label_point(watched, event.position().toPoint())
             if self._ruler_start is not None and self._label.rect().contains(point):
@@ -3246,6 +3265,7 @@ class MainWindow(
             self._overlay_view,
         ):
             view.ruler_measured.connect(self._show_ruler_measurement)
+            view.pad_hovered.connect(self._show_pad_hover)
         self.setCentralWidget(self._tabs)
         self._create_actions()
         self._create_tool_palette()
@@ -3448,6 +3468,32 @@ class MainWindow(
     def _show_ruler_measurement(self, millimeters: float) -> None:
         """Display the latest ruler result in the application status bar."""
         self.statusBar().showMessage(f"Distance: {millimeters:.2f} mm")
+
+    def _show_pad_hover(self, pad: object) -> None:
+        """Display pad, device, footprint, and net information on hover."""
+        if pad is None or not isinstance(pad, Pad):
+            if self._pending_pad is None and self._pending_device is None:
+                self.statusBar().clearMessage()
+            return
+        device = (
+            next(
+                (
+                    item
+                    for item in self.project.devices
+                    if item.device_id == pad.device_id
+                ),
+                None,
+            )
+            if self.project and pad.device_id
+            else None
+        )
+        device_name = device.reference if device is not None else "—"
+        footprint_name = device.footprint_name if device is not None else "—"
+        net_name = pad.net or "—"
+        self.statusBar().showMessage(
+            f"Pad: {pad.name} | Device: {device_name} | "
+            f"Footprint: {footprint_name} | Net: {net_name}"
+        )
 
     def _create_view_menu(self) -> None:
         """Create menu actions for restoring optional panels."""
