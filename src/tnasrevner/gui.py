@@ -1289,6 +1289,8 @@ class ImageView(QScrollArea):  # pylint: disable=too-many-instance-attributes
         self._click_position: QPoint | None = None
         self._device_placement = False
         self._device_preview_point = (0.5, 0.5)
+        self._pad_labels: tuple[Pad, ...] = ()
+        self._mirror_pad_labels = False
         self._label = QLabel(empty_text)
         self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._label.setMinimumSize(240, 180)
@@ -1327,6 +1329,12 @@ class ImageView(QScrollArea):  # pylint: disable=too-many-instance-attributes
         self._zoom_revision += 1
         self._pixmap = pixmap
         self._scale = 1.0
+        self._render()
+
+    def set_pad_labels(self, pads: tuple[Pad, ...], mirror_x: bool = False) -> None:
+        """Render pad labels at the current zoom instead of baking them in."""
+        self._pad_labels = pads
+        self._mirror_pad_labels = mirror_x
         self._render()
 
     def wheelEvent(self, event) -> None:  # noqa: N802  # pylint: disable=invalid-name
@@ -1604,17 +1612,66 @@ class ImageView(QScrollArea):  # pylint: disable=too-many-instance-attributes
         self._label.setText("")
         self._label.setMinimumSize(0, 0)
         fit_scale = self._fit_scale()
-        self._label.setPixmap(
-            self._pixmap.scaled(
-                self._pixmap.size() * (fit_scale * self._scale),
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
+        displayed = self._pixmap.scaled(
+            self._pixmap.size() * (fit_scale * self._scale),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
         )
+        self._draw_vector_pad_labels(displayed)
+        self._label.setPixmap(displayed)
         self._label.resize(self._label.pixmap().size())
         if self._device_placement:
             self._device_preview.set_effective_scale(fit_scale * self._scale)
             self._position_device_preview()
+
+    def _draw_vector_pad_labels(self, pixmap: QPixmap) -> None:
+        """Draw labels after zoom scaling so their text stays sharp."""
+        if not self._pad_labels:
+            return
+        painter = QPainter(pixmap)
+        painter.setOpacity(1.0)
+        for pad in self._pad_labels:
+            width = max(2.0, pad.width * (pixmap.width() - 1))
+            height = max(2.0, pad.height * (pixmap.height() - 1))
+            x = pad.x * (pixmap.width() - 1)
+            if self._mirror_pad_labels:
+                x = (1.0 - pad.x - pad.width) * (pixmap.width() - 1)
+            center = QPointF(x, pad.y * (pixmap.height() - 1))
+            label_angle = pad.rotation + (90.0 if width < height else 0.0)
+            label_angle %= 360.0
+            if 90.0 < label_angle < 270.0:
+                label_angle -= 180.0
+            painter.save()
+            painter.translate(center)
+            painter.rotate(-label_angle if self._mirror_pad_labels else label_angle)
+            label_width = max(width, height)
+            label_height = min(width, height)
+            font = painter.font()
+            font.setPixelSize(max(7, min(14, round(label_height * 0.65))))
+            painter.setFont(font)
+            while (
+                painter.fontMetrics().horizontalAdvance(pad.name) > label_width - 4
+                and font.pixelSize() > 1
+            ):
+                font.setPixelSize(font.pixelSize() - 1)
+                painter.setFont(font)
+            painter.setPen(
+                QColor(20, 20, 20)
+                if pad.device_id is not None and pad.number == "1"
+                else Qt.GlobalColor.yellow
+            )
+            painter.drawText(
+                QRectF(
+                    -label_width / 2,
+                    -label_height / 2,
+                    label_width,
+                    label_height,
+                ),
+                Qt.AlignmentFlag.AlignCenter,
+                pad.name,
+            )
+            painter.restore()
+        painter.end()
 
     def resizeEvent(self, event) -> None:  # noqa: N802  # pylint: disable=invalid-name
         """Keep the image fitted after resizing its view."""
@@ -3217,10 +3274,21 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         """Refresh all views from one composed pixmap per board side."""
         images = {side: self._pixmap_for_asset(side) for side in ("top", "bottom")}
         for side, view in self._views.items():
+            view.set_pad_labels(self._vector_labels_for_side(side))
             view.set_pixmap(images[side])
         self._refresh_overlay(images)
         for side, view in self._side_views.items():
+            view.set_pad_labels(self._vector_labels_for_side(side))
             view.set_pixmap(images[side])
+        overlay_labels = self._vector_labels_for_side("top") + tuple(
+            replace(
+                pad,
+                x=1.0 - pad.x - pad.width,
+                rotation=-pad.rotation,
+            )
+            for pad in self._vector_labels_for_side("bottom")
+        )
+        self._overlay_view.set_pad_labels(overlay_labels)
         self._refresh_net_table()
         self._refresh_bom_table()
         if self.project:
@@ -3250,6 +3318,12 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         else:
             self._sync_board_views(self._views["top"])
         LOGGER.debug("View refresh completed")
+
+    def _vector_labels_for_side(self, side: str) -> tuple[Pad, ...]:
+        """Return visible pad labels for vector rendering in one view."""
+        if not self._pads_visible or not self.project:
+            return ()
+        return tuple(pad for pad in self.project.pads if pad.side == side)
 
     def _refresh_net_table(self) -> None:
         """Show each stable pad name and its assigned electrical net."""
@@ -3555,37 +3629,6 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
                 painter.drawRoundedRect(rectangle, 20, 20, Qt.SizeMode.RelativeSize)
             else:
                 painter.drawRect(rectangle)
-            painter.restore()
-            painter.setOpacity(1.0)
-            label_angle = pad.rotation + (90.0 if width < height else 0.0)
-            label_angle %= 360.0
-            if 90.0 < label_angle < 270.0:
-                label_angle -= 180.0
-            painter.save()
-            painter.translate(center)
-            painter.rotate(label_angle)
-            label_width = max(width, height)
-            label_height = min(width, height)
-            font = painter.font()
-            font.setPixelSize(max(7, min(14, round(label_height * 0.65))))
-            painter.setFont(font)
-            while (
-                painter.fontMetrics().horizontalAdvance(pad.name) > label_width - 4
-                and font.pixelSize() > 1
-            ):
-                font.setPixelSize(font.pixelSize() - 1)
-                painter.setFont(font)
-            painter.setPen(QColor(20, 20, 20) if pin_one else Qt.GlobalColor.yellow)
-            painter.drawText(
-                QRect(
-                    round(-label_width / 2),
-                    round(-label_height / 2),
-                    round(label_width),
-                    round(label_height),
-                ),
-                Qt.AlignmentFlag.AlignCenter,
-                pad.name,
-            )
             painter.restore()
             painter.setOpacity(0.45)
         painter.end()
