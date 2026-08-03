@@ -1957,15 +1957,12 @@ class ImageView(
         return not self._pixmap.isNull()
 
     def _zoom_by(self, factor: float, anchor: QPoint | None = None) -> None:
-        """Zoom around anchor point, preserving content under cursor."""
+        """Zoom around the viewport center without shifting the image."""
         if self._pixmap.isNull():
             return
-        centered = anchor is None
         self._zoom_revision += 1
         revision = self._zoom_revision
-        anchor = anchor or QPoint(
-            self.viewport().width() // 2, self.viewport().height() // 2
-        )
+        anchor = QPoint(self.viewport().width() // 2, self.viewport().height() // 2)
         old_effective = self._fit_scale() * self._scale
         old_label_point = self._label.mapFrom(self.viewport(), anchor)
         source_point = QPointF(
@@ -1973,10 +1970,8 @@ class ImageView(
             old_label_point.y() / old_effective,
         )
         self._scale = max(0.1, min(self._scale * factor, 20.0))
-        if not self._zoom_render_pending:
-            self._render(smooth=False)
-            self._zoom_render_pending = True
-        zoom_anchor = None if centered else anchor
+        self._render(smooth=False)
+        zoom_anchor = None
         self._restore_zoom_anchor(source_point, zoom_anchor)
         QTimer.singleShot(
             0,
