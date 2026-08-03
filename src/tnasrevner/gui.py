@@ -28,6 +28,7 @@ from PySide6.QtCore import (
     QPointF,
     QRect,
     QRectF,
+    QSettings,
     QStandardPaths,
     QThread,
     QTimer,
@@ -96,6 +97,51 @@ from .project import (
 LOGGER = logging.getLogger("tnasrevner")
 _LOG_PATH: Path | None = None
 _DEVICE_REFERENCE = re.compile(r"[A-Za-z][A-Za-z0-9_.+\-]{0,63}\Z")
+_NUMBERED_DEVICE_REFERENCE = re.compile(r"([A-Za-z]+)([0-9]+)\Z")
+_RECENT_FOOTPRINTS_KEY = "kicad/recent-footprints"
+_REFERENCE_PREFIX_KEY = "kicad/reference-prefix"
+_MAX_RECENT_FOOTPRINTS = 5
+_DEFAULT_REFERENCE_PREFIXES = {
+    "antenna": "AE",
+    "battery": "BT",
+    "capacitor": "C",
+    "connector": "J",
+    "crystal": "Y",
+    "diode": "D",
+    "fuse": "F",
+    "inductor": "L",
+    "jumper": "JP",
+    "led": "D",
+    "mountinghole": "H",
+    "oscillator": "Y",
+    "potentiometer": "RV",
+    "relay": "K",
+    "resistor": "R",
+    "switch": "SW",
+    "testpoint": "TP",
+    "thermistor": "RT",
+    "transformer": "T",
+    "transistor": "Q",
+    "varistor": "RV",
+}
+
+
+def _footprint_family(library: str) -> str:
+    """Return a readable component family from a KiCad library name."""
+    return library.split("_", maxsplit=1)[0].replace("-", " ")
+
+
+def _footprint_family_key(library: str) -> str:
+    """Return the stable settings key used for one component family."""
+    return _footprint_family(library).casefold().replace(" ", "-")
+
+
+def _reference_sort_key(reference: str) -> tuple[str, int, str]:
+    """Sort common references naturally, so C2 appears before C10."""
+    match = _NUMBERED_DEVICE_REFERENCE.fullmatch(reference)
+    if match:
+        return match.group(1).casefold(), int(match.group(2)), ""
+    return reference.casefold(), -1, reference.casefold()
 
 
 def _application_data_directory(create: bool = True) -> Path:
@@ -775,7 +821,7 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         )
 
 
-class FootprintPickerDialog(QDialog):  # pylint: disable=too-few-public-methods
+class FootprintPickerDialog(QDialog):  # pylint: disable=R0902,R0903
     """Search and select one cached KiCad footprint."""
 
     _MAX_RESULTS = 750
@@ -784,32 +830,40 @@ class FootprintPickerDialog(QDialog):  # pylint: disable=too-few-public-methods
         self,
         references: tuple[FootprintReference, ...],
         parent: QWidget | None = None,
+        recent_identifiers: tuple[str, ...] = (),
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Select KiCad footprint")
-        self.resize(680, 520)
+        self.resize(980, 560)
         self._references = references
+        self._recent_identifiers = recent_identifiers[:_MAX_RECENT_FOOTPRINTS]
         self._visible_references: list[FootprintReference] = []
+        self._preview_cache: dict[str, Footprint] = {}
         self._search = QLineEdit(self)
         self._search.setPlaceholderText("Search library or footprint name…")
         self._list = QListWidget(self)
         self._status = QLabel(self)
+        self._preview = QLabel("Select a footprint", self)
+        self._preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._preview.setMinimumSize(360, 360)
+        self._preview.setStyleSheet("background: #202124; color: #d0d0d0;")
         self._buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
             parent=self,
         )
         self._buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(False)
         layout = QVBoxLayout(self)
-        layout.addWidget(self._search)
-        layout.addWidget(self._list)
-        layout.addWidget(self._status)
+        content = QHBoxLayout()
+        picker = QVBoxLayout()
+        picker.addWidget(self._search)
+        picker.addWidget(self._list)
+        picker.addWidget(self._status)
+        content.addLayout(picker, 3)
+        content.addWidget(self._preview, 2)
+        layout.addLayout(content)
         layout.addWidget(self._buttons)
         self._search.textChanged.connect(self._refresh_results)
-        self._list.currentRowChanged.connect(
-            lambda row: self._buttons.button(
-                QDialogButtonBox.StandardButton.Ok
-            ).setEnabled(row >= 0)
-        )
+        self._list.currentRowChanged.connect(self._selection_changed)
         self._list.itemDoubleClicked.connect(lambda _item: self.accept())
         self._buttons.accepted.connect(self.accept)
         self._buttons.rejected.connect(self.reject)
@@ -821,6 +875,39 @@ class FootprintPickerDialog(QDialog):  # pylint: disable=too-few-public-methods
         row = self._list.currentRow()
         return self._visible_references[row] if row >= 0 else None
 
+    def _selection_changed(self, row: int) -> None:
+        """Enable acceptance and draw the currently highlighted footprint."""
+        self._buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(row >= 0)
+        if row < 0 or row >= len(self._visible_references):
+            self._preview.setPixmap(QPixmap())
+            self._preview.setText("Select a footprint")
+            return
+        reference = self._visible_references[row]
+        try:
+            footprint = self._preview_cache.get(reference.identifier)
+            if footprint is None:
+                footprint = parse_footprint(
+                    reference.path.read_bytes(), reference.library
+                )
+                self._preview_cache[reference.identifier] = footprint
+        except (OSError, KiCadFormatError) as error:
+            LOGGER.warning(
+                "Cannot preview footprint=%s error=%s", reference.identifier, error
+            )
+            self._preview.setPixmap(QPixmap())
+            self._preview.setText("Preview unavailable")
+            return
+        size = 340
+        canvas = QPixmap(size, size)
+        canvas.fill(QColor(32, 33, 36))
+        painter = QPainter(canvas)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.translate(size / 2, size / 2)
+        pixels_per_mm = (size - 40) / (2 * max(footprint.radius(), 0.1))
+        _paint_footprint(painter, footprint, pixels_per_mm, "top", 0.0, preview=True)
+        painter.end()
+        self._preview.setPixmap(canvas)
+
     def _refresh_results(self, query: str) -> None:
         words = query.casefold().split()
         matches = [
@@ -828,10 +915,27 @@ class FootprintPickerDialog(QDialog):  # pylint: disable=too-few-public-methods
             for reference in self._references
             if all(word in reference.identifier.casefold() for word in words)
         ]
-        self._visible_references = matches[: self._MAX_RESULTS]
+        matches_by_identifier = {
+            reference.identifier: reference for reference in matches
+        }
+        recent = [
+            matches_by_identifier[identifier]
+            for identifier in self._recent_identifiers
+            if identifier in matches_by_identifier
+        ]
+        recent_set = {reference.identifier for reference in recent}
+        ordered = recent + [
+            reference for reference in matches if reference.identifier not in recent_set
+        ]
+        self._visible_references = ordered[: self._MAX_RESULTS]
         self._list.clear()
         for reference in self._visible_references:
-            self._list.addItem(QListWidgetItem(reference.identifier))
+            label = (
+                f"★ {reference.identifier}"
+                if reference.identifier in recent_set
+                else reference.identifier
+            )
+            self._list.addItem(QListWidgetItem(label))
         shown = len(self._visible_references)
         self._status.setText(f"{shown} shown / {len(matches)} matches")
         if shown:
@@ -1407,6 +1511,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         self,
         show_startup: bool = True,
         footprint_cache: KiCadFootprintCache | None = None,
+        settings: QSettings | None = None,
     ) -> None:
         super().__init__()
         self.project: ProjectDocument | None = None
@@ -1423,6 +1528,9 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         self._pending_pad_view_state: tuple[float, float, float] | None = None
         self._image_cache: dict[str, QPixmap] = {}
         self._device_footprint_cache: dict[str, Footprint] = {}
+        self._settings = (
+            settings if settings is not None else QSettings("Tnasrevner", "Tnasrevner")
+        )
         self._footprint_cache = footprint_cache or KiCadFootprintCache(
             _application_data_directory(create=False) / "kicad-footprints"
         )
@@ -1432,6 +1540,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         self._kicad_revision: str | None = None
         self._close_when_cache_finishes = False
         self._net_dialog: QInputDialog | None = None
+        self._device_value_dialog: QInputDialog | None = None
         self._pad_menu: QMenu | None = None
         self._last_view_key: int | None = None
         self._last_view_time = 0.0
@@ -1459,6 +1568,10 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         self._net_table.setHorizontalHeaderLabels(["Pad", "Net"])
         self._net_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._tabs.addTab(self._net_table, "Nets")
+        self._bom_table = QTableWidget(0, 3)
+        self._bom_table.setHorizontalHeaderLabels(["Reference", "Object", "Value"])
+        self._bom_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._tabs.addTab(self._bom_table, "BOM")
         for view in (*self._views.values(), *self._side_views.values()):
             view.view_changed.connect(lambda view=view: self._sync_board_views(view))
         for side, view in self._views.items():
@@ -1749,6 +1862,71 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         if self._close_when_cache_finishes:
             QTimer.singleShot(0, self.close)
 
+    def _recent_footprint_identifiers(self) -> tuple[str, ...]:
+        """Return up to five persisted footprint identifiers, newest first."""
+        raw = self._settings.value(_RECENT_FOOTPRINTS_KEY, [])
+        if isinstance(raw, str):
+            values = [raw]
+        elif isinstance(raw, (list, tuple)):
+            values = raw
+        else:
+            return ()
+        identifiers: list[str] = []
+        for value in values:
+            if isinstance(value, str) and value and value not in identifiers:
+                identifiers.append(value)
+        return tuple(identifiers[:_MAX_RECENT_FOOTPRINTS])
+
+    def _remember_recent_footprint(self, source: FootprintReference) -> None:
+        """Move one selected footprint to the front of the persistent MRU list."""
+        identifiers = [
+            source.identifier,
+            *(
+                identifier
+                for identifier in self._recent_footprint_identifiers()
+                if identifier != source.identifier
+            ),
+        ][:_MAX_RECENT_FOOTPRINTS]
+        self._settings.setValue(_RECENT_FOOTPRINTS_KEY, identifiers)
+        self._settings.sync()
+
+    def _reference_prefix(self, source: FootprintReference) -> str:
+        """Choose a remembered or conventional reference prefix."""
+        family = _footprint_family_key(source.library)
+        if self.project:
+            for device in reversed(self.project.devices):
+                if _footprint_family_key(device.footprint_library) != family:
+                    continue
+                match = _NUMBERED_DEVICE_REFERENCE.fullmatch(device.reference)
+                if match:
+                    return match.group(1)
+        remembered = self._settings.value(f"{_REFERENCE_PREFIX_KEY}/{family}")
+        if isinstance(remembered, str) and re.fullmatch(r"[A-Za-z]+", remembered):
+            return remembered
+        return _DEFAULT_REFERENCE_PREFIXES.get(family, "U")
+
+    def _next_device_reference(self, source: FootprintReference) -> str:
+        """Return the next unused numeric reference for a footprint family."""
+        prefix = self._reference_prefix(source)
+        highest = 0
+        if self.project:
+            for device in self.project.devices:
+                match = _NUMBERED_DEVICE_REFERENCE.fullmatch(device.reference)
+                if match and match.group(1).casefold() == prefix.casefold():
+                    highest = max(highest, int(match.group(2)))
+        return f"{prefix}{highest + 1}"
+
+    def _remember_reference_prefix(
+        self, source: FootprintReference, reference: str
+    ) -> None:
+        """Persist the alphabetic prefix accepted for a footprint family."""
+        match = _NUMBERED_DEVICE_REFERENCE.fullmatch(reference)
+        if not match:
+            return
+        family = _footprint_family_key(source.library)
+        self._settings.setValue(f"{_REFERENCE_PREFIX_KEY}/{family}", match.group(1))
+        self._settings.sync()
+
     def _open_footprint_picker(  # pylint: disable=too-many-return-statements
         self,
     ) -> None:
@@ -1760,7 +1938,11 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
             QMessageBox.warning(self, "KiCad footprints unavailable", str(error))
             self._add_device_pending = False
             return
-        dialog = FootprintPickerDialog(catalog, self)
+        dialog = FootprintPickerDialog(
+            catalog,
+            self,
+            recent_identifiers=self._recent_footprint_identifiers(),
+        )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             self._add_device_pending = False
             return
@@ -1781,17 +1963,22 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
             )
             self._add_device_pending = False
             return
-        reference = self._ask_device_reference()
+        self._remember_recent_footprint(source)
+        reference = self._ask_device_reference(source)
         self._add_device_pending = False
         if reference is None:
             return
         self._begin_device_placement(reference, source, footprint, content, revision)
 
-    def _ask_device_reference(self) -> str | None:
+    def _ask_device_reference(self, source: FootprintReference) -> str | None:
         """Ask for a unique device reference after footprint selection."""
+        suggestion = self._next_device_reference(source)
         while self.project is not None:
             reference, accepted = QInputDialog.getText(
-                self, "Add device", "Reference (for example U1):"
+                self,
+                "Add device",
+                "Reference:",
+                text=suggestion,
             )
             if not accepted:
                 return None
@@ -1813,6 +2000,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
                     f"Device {reference} already exists.",
                 )
                 continue
+            self._remember_reference_prefix(source, reference)
             return reference
         return None
 
@@ -2067,6 +2255,40 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
                 return pad
         return None
 
+    def _device_at(  # pylint: disable=too-many-locals
+        self, side: str, x: float, y: float
+    ) -> Device | None:
+        """Return a footprint whose physical drawing contains the point."""
+        if not self.project:
+            return None
+        pixmap = self._base_pixmap_for_asset(side)
+        if pixmap.isNull():
+            return None
+        image = next(
+            (asset for asset in self.project.images if asset.side == side), None
+        )
+        if image is None:
+            return None
+        pixels_per_mm = image.measured_pixels_per_mm(pixmap.width(), pixmap.height())
+        if pixels_per_mm is None:
+            pixels_per_mm = image.pixels_per_mm
+        if pixels_per_mm is None:
+            return None
+        image_width = max(1, pixmap.width() - 1)
+        image_height = max(1, pixmap.height() - 1)
+        for device in reversed(self.project.devices):
+            if device.side != side:
+                continue
+            footprint = self._footprint_for_device(device)
+            if footprint is None:
+                continue
+            radius = max(6.0, footprint.radius() * pixels_per_mm)
+            delta_x = (x - device.x) * image_width
+            delta_y = (y - device.y) * image_height
+            if math.hypot(delta_x, delta_y) <= radius:
+                return device
+        return None
+
     @staticmethod
     def _pad_contains(
         pad: Pad, x: float, y: float, image_width: int, image_height: int
@@ -2140,7 +2362,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
                 view.apply_view_state(state)
         finally:
             self._syncing_views = False
-        if self._tabs.currentIndex() not in (3, 4):
+        if self._tabs.currentIndex() not in (3, 4, 5):
             self._sync_board_views(self._active_views()[0])
 
     def _connect_pad_to_net(self, side: str, x: float, y: float) -> None:
@@ -2201,29 +2423,58 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         QTimer.singleShot(0, lambda: self._connect_pad_to_net(side, x, y))
 
     def _defer_pad_menu(self, side: str, x: float, y: float) -> None:
-        """Open the pad action menu after returning from the mouse event."""
+        """Open the pad/device action menu after returning from the mouse event."""
         QTimer.singleShot(0, lambda: self._show_pad_menu(side, x, y))
 
     def _show_pad_menu(self, side: str, x: float, y: float) -> None:
-        """Show non-blocking actions for the pad under Shift+click."""
+        """Show non-blocking actions for the pad or device under Shift+click."""
         pad = self._pad_at(side, x, y)
-        if pad is None:
+        device = (
+            next(
+                (
+                    item
+                    for item in self.project.devices
+                    if item.device_id == pad.device_id
+                ),
+                None,
+            )
+            if self.project and pad is not None and pad.device_id
+            else self._device_at(side, x, y)
+        )
+        if pad is None and device is None:
             return
         if self._pad_menu is not None:
             self._pad_menu.close()
         menu = QMenu(self)
-        delete_action = menu.addAction("Delete pad")
-        connect_action = menu.addAction("Connect to net")
-        disconnect_action = menu.addAction("Disconnect")
-        disconnect_action.setEnabled(pad.net is not None)
-        delete_action.triggered.connect(lambda: self._delete_pad(pad.pad_id))
-        connect_action.triggered.connect(lambda: self._connect_pad_to_net(side, x, y))
-        disconnect_action.triggered.connect(
-            lambda: self._assign_pad_net(pad.pad_id, "")
-        )
+        if device is None:
+            delete_action = menu.addAction("Delete pad")
+            delete_action.triggered.connect(lambda: self._delete_pad(pad.pad_id))
+        else:
+            delete_action = menu.addAction("Delete device")
+            value_action = menu.addAction("Set value…")
+            delete_action.triggered.connect(
+                lambda: self._delete_device(device.device_id)
+            )
+            value_action.triggered.connect(
+                lambda: self._edit_device_value(device.device_id)
+            )
+        if pad is not None:
+            connect_action = menu.addAction("Connect to net")
+            disconnect_action = menu.addAction("Disconnect")
+            disconnect_action.setEnabled(pad.net is not None)
+            connect_action.triggered.connect(
+                lambda: self._connect_pad_to_net(side, x, y)
+            )
+            disconnect_action.triggered.connect(
+                lambda: self._assign_pad_net(pad.pad_id, "")
+            )
         menu.aboutToHide.connect(lambda menu=menu: self._pad_menu_closed(menu))
         self._pad_menu = menu
-        LOGGER.info("Pad menu opened id=%s pad=%s", pad.pad_id, pad.name)
+        LOGGER.info(
+            "Selection menu opened pad=%s device=%s",
+            pad.pad_id if pad else None,
+            device.device_id if device else None,
+        )
         menu.popup(QCursor.pos())
 
     def _pad_menu_closed(self, menu: QMenu) -> None:
@@ -2247,6 +2498,105 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         self._dirty = True
         LOGGER.info("Pad deleted id=%s pad=%s", pad.pad_id, pad.name)
         self._schedule_pad_refresh(self._active_views()[0].view_state())
+        self._update_title()
+
+    def _edit_device_value(self, device_id: str) -> None:
+        """Open a non-modal value editor for one placed KiCad device."""
+        if not self.project:
+            return
+        device = next(
+            (item for item in self.project.devices if item.device_id == device_id),
+            None,
+        )
+        if device is None:
+            return
+        if self._device_value_dialog is not None:
+            self._device_value_dialog.close()
+        dialog = QInputDialog(self)
+        dialog.setWindowTitle("Device value")
+        dialog.setLabelText(f"Value for {device.reference}:")
+        dialog.setTextValue(device.value)
+        dialog.setWindowModality(Qt.WindowModality.NonModal)
+        dialog.accepted.connect(
+            lambda device_id=device_id, dialog=dialog: self._assign_device_value(
+                device_id, dialog.textValue()
+            )
+        )
+        dialog.finished.connect(
+            lambda result, dialog=dialog: self._device_value_dialog_finished(
+                dialog, result
+            )
+        )
+        self._device_value_dialog = dialog
+        LOGGER.info("Device value dialog opened id=%s", device_id)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _assign_device_value(self, device_id: str, value: str) -> None:
+        """Persist a BOM value entered for one device."""
+        if not self.project:
+            return
+        device = next(
+            (item for item in self.project.devices if item.device_id == device_id),
+            None,
+        )
+        if device is None:
+            return
+        value = value.strip()
+        self.project.devices = [
+            replace(item, value=value) if item.device_id == device_id else item
+            for item in self.project.devices
+        ]
+        self._dirty = True
+        self._refresh_bom_table()
+        self._update_title()
+        LOGGER.info(
+            "Device value assigned id=%s reference=%s value=%s",
+            device_id,
+            device.reference,
+            value,
+        )
+
+    def _device_value_dialog_finished(self, dialog: QInputDialog, _result: int) -> None:
+        """Release the asynchronous device-value dialog reference."""
+        if self._device_value_dialog is dialog:
+            self._device_value_dialog = None
+
+    def _delete_device(self, device_id: str) -> None:
+        """Delete one footprint instance, all generated pads, and its asset."""
+        if not self.project:
+            return
+        device = next(
+            (item for item in self.project.devices if item.device_id == device_id),
+            None,
+        )
+        if device is None:
+            return
+        view_state = self._active_views()[0].view_state()
+        removed_pad_ids = {
+            pad.pad_id for pad in self.project.pads if pad.device_id == device_id
+        }
+        self.project.devices = [
+            item for item in self.project.devices if item.device_id != device_id
+        ]
+        self.project.pads = [
+            pad for pad in self.project.pads if pad.device_id != device_id
+        ]
+        if self.store is not None:
+            self.store.remove_asset(device.footprint_path)
+        self._device_footprint_cache.pop(device.footprint_path, None)
+        if self._selected_pad_id in removed_pad_ids:
+            self._selected_pad_id = None
+            self._selected_net = None
+        self._dirty = True
+        LOGGER.info(
+            "Device deleted id=%s reference=%s pads=%s",
+            device.device_id,
+            device.reference,
+            len(removed_pad_ids),
+        )
+        self._schedule_pad_refresh(view_state)
         self._update_title()
 
     def _log_ui_heartbeat(self) -> None:
@@ -2360,6 +2710,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
             "side_by_side",
             "both",
             "nets",
+            "bom",
         )[self._tabs.currentIndex()]
         display_view = self._active_views()[0]
         (
@@ -2631,6 +2982,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         for side, view in self._side_views.items():
             view.set_pixmap(images[side])
         self._refresh_net_table()
+        self._refresh_bom_table()
         if self.project:
             self._tabs.setCurrentIndex(
                 {
@@ -2639,6 +2991,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
                     "side_by_side": 2,
                     "both": 3,
                     "nets": 4,
+                    "bom": 5,
                 }[self.project.display.mode]
             )
             state = (
@@ -2652,7 +3005,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
                     view.apply_view_state(state)
             finally:
                 self._syncing_views = False
-            if self._tabs.currentIndex() not in (3, 4):
+            if self._tabs.currentIndex() not in (3, 4, 5):
                 self._sync_board_views(self._active_views()[0])
         else:
             self._sync_board_views(self._views["top"])
@@ -2667,6 +3020,24 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         for row, pad in enumerate(pads):
             self._net_table.setItem(row, 0, QTableWidgetItem(pad.name))
             self._net_table.setItem(row, 1, QTableWidgetItem(pad.net or ""))
+
+    def _refresh_bom_table(self) -> None:
+        """Show every placed KiCad device and its editable value."""
+        devices = (
+            sorted(
+                self.project.devices,
+                key=lambda device: _reference_sort_key(device.reference),
+            )
+            if self.project
+            else []
+        )
+        self._bom_table.setRowCount(len(devices))
+        for row, device in enumerate(devices):
+            self._bom_table.setItem(row, 0, QTableWidgetItem(device.reference))
+            self._bom_table.setItem(
+                row, 1, QTableWidgetItem(_footprint_family(device.footprint_library))
+            )
+            self._bom_table.setItem(row, 2, QTableWidgetItem(device.value))
 
     def _refresh_overlay(self, images: dict[str, QPixmap]) -> None:
         """Compose top and mirrored bottom images into the Both view."""

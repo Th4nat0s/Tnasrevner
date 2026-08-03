@@ -15,3 +15,7 @@
   rotation, calibrated physical sizing, and automatically named footprint pads.
 - Fixed physical footprint sizing by retaining the exact calibration line and
   millimeter length; decimal input now accepts both dot and comma separators.
+- Added persistent five-item recent-footprint shortcuts, picker previews, and
+  automatic per-family references such as `C1`, `C2`, and `R1`.
+- Added a BOM view with editable device values and Shift-click actions to delete a
+  complete KiCad device together with all generated pads.

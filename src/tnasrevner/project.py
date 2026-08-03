@@ -17,7 +17,7 @@ CURRENT_FORMAT_VERSION = 1
 PROJECT_FILENAME = "project.json"
 PROJECT_ARCHIVE_SUFFIX = ".revp"
 _SIDES = frozenset({"top", "bottom"})
-_DISPLAY_MODES = frozenset({"top", "bottom", "side_by_side", "both", "nets"})
+_DISPLAY_MODES = frozenset({"top", "bottom", "side_by_side", "both", "nets", "bom"})
 _PAD_SHAPES = frozenset({"rect", "circle", "oval", "roundrect", "trapezoid"})
 
 
@@ -253,6 +253,7 @@ class Device:  # pylint: disable=too-many-instance-attributes
     source_revision: str
     device_id: str = field(default_factory=lambda: str(uuid4()))
     rotation: float = 0.0
+    value: str = ""
 
     def __post_init__(self) -> None:
         _required_string(self.reference, "device reference")
@@ -263,6 +264,8 @@ class Device:  # pylint: disable=too-many-instance-attributes
         _required_string(self.footprint_name, "device footprint_name")
         _relative_asset_path(self.footprint_path)
         _required_string(self.source_revision, "device source_revision")
+        if not isinstance(self.value, str):
+            raise ProjectFormatError("device value must be a string")
         if self.side not in _SIDES:
             raise ProjectFormatError("device side must be 'top' or 'bottom'")
         if not all(
@@ -285,6 +288,7 @@ class Device:  # pylint: disable=too-many-instance-attributes
             "footprint_name": self.footprint_name,
             "footprint_path": self.footprint_path,
             "source_revision": self.source_revision,
+            "value": self.value,
         }
 
     @classmethod
@@ -309,6 +313,7 @@ class Device:  # pylint: disable=too-many-instance-attributes
             source_revision=_required_string(
                 data.get("source_revision"), "device source_revision"
             ),
+            value=data.get("value", ""),
         )
 
 

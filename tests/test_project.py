@@ -1,7 +1,7 @@
 """Tests for minimal project persistence."""
 
 # Tests use descriptive names; function docstrings add no test value here.
-# pylint: disable=missing-function-docstring
+# pylint: disable=missing-function-docstring,duplicate-code
 
 import json
 from pathlib import Path
@@ -190,6 +190,7 @@ def test_kicad_device_and_generated_pads_round_trip(tmp_path: Path) -> None:
         "a" * 40,
         "device-id",
         45,
+        "10 kΩ",
     )
     project = ProjectDocument(
         "Project",
@@ -220,6 +221,28 @@ def test_kicad_device_and_generated_pads_round_trip(tmp_path: Path) -> None:
     assert loaded.pads[0].name == "R1.1"
     assert loaded.pads[0].device_id == "device-id"
     assert loaded.pads[0].rotation == 45
+    assert loaded.devices[0].value == "10 kΩ"
+
+
+def test_legacy_device_without_value_defaults_to_empty() -> None:
+    device = Device(
+        "C1",
+        "top",
+        0.5,
+        0.5,
+        "Capacitor_SMD",
+        "C_0603",
+        "assets/kicad/device.kicad_mod",
+        "a" * 40,
+    )
+    data = device.to_dict()
+    data.pop("value")
+
+    assert Device.from_dict(data).value == ""
+
+
+def test_bom_display_mode_is_valid() -> None:
+    assert DisplaySettings(mode="bom").mode == "bom"
 
 
 def test_missing_or_malformed_device_footprint_is_rejected(tmp_path: Path) -> None:

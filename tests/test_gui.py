@@ -12,7 +12,7 @@ from types import SimpleNamespace
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtCore import QPoint, Qt
+from PySide6.QtCore import QPoint, QSettings, Qt
 from PySide6.QtGui import QImage, QPixmap, QValidator
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
@@ -23,9 +23,15 @@ from PySide6.QtWidgets import (
     QPushButton,
 )
 
-from tnasrevner.gui import ImageEditDialog, ImageView, MainWindow
+from tnasrevner.gui import (
+    FootprintPickerDialog,
+    ImageEditDialog,
+    ImageView,
+    MainWindow,
+)
 from tnasrevner.kicad import FootprintReference, parse_footprint
 from tnasrevner.project import (
+    Device,
     ImageAsset,
     Pad,
     ProjectDocument,
@@ -48,9 +54,10 @@ def app() -> QApplication:
 
 
 @pytest.fixture
-def window(app: QApplication) -> MainWindow:
+def window(app: QApplication, tmp_path: Path) -> MainWindow:
     """Create isolated main window."""
-    result = MainWindow(show_startup=False)
+    settings = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
+    result = MainWindow(show_startup=False, settings=settings)
     yield result
     result._dirty = False
     result.close()
@@ -215,6 +222,20 @@ def test_save_persists_display_mode_zoom_and_pan(
     assert window.project.display.zoom == 2.5
 
 
+def test_save_and_restore_bom_view(window: MainWindow, tmp_path: Path) -> None:
+    """The BOM tab is a persisted project display mode."""
+    window.store = ProjectStore(tmp_path / "board.revp")
+    window.project = ProjectDocument("Project", "Board")
+    window._tabs.setCurrentIndex(5)
+
+    assert window.save_project()
+    assert window.project.display.mode == "bom"
+
+    window._tabs.setCurrentIndex(0)
+    window._refresh_views()
+    assert window._tabs.currentIndex() == 5
+
+
 def test_create_pad_from_tools_places_and_persists_marker(
     window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -357,7 +378,7 @@ def test_add_device_selects_footprint_before_asking_reference(
     class FakePicker:  # pylint: disable=too-few-public-methods,missing-function-docstring
         """Record that footprint selection happened first."""
 
-        def __init__(self, _catalog, _parent) -> None:
+        def __init__(self, _catalog, _parent, **_kwargs) -> None:
             order.append("footprint")
 
         @staticmethod
@@ -371,7 +392,7 @@ def test_add_device_selects_footprint_before_asking_reference(
     window._footprint_cache = FakeCache()
     monkeypatch.setattr("tnasrevner.gui.FootprintPickerDialog", FakePicker)
 
-    def reference_popup(*_args) -> tuple[str, bool]:
+    def reference_popup(*_args, **_kwargs) -> tuple[str, bool]:
         order.append("reference")
         return "R1", True
 
@@ -382,6 +403,81 @@ def test_add_device_selects_footprint_before_asking_reference(
     assert order == ["footprint", "reference"]
     assert window._pending_device is not None
     assert window._pending_device.reference == "R1"
+
+
+def test_footprint_picker_pins_recent_choices_and_shows_preview(
+    app: QApplication, tmp_path: Path
+) -> None:
+    """Recent footprints lead the picker and selecting one renders its geometry."""
+    first_path = tmp_path / "R_0402.kicad_mod"
+    recent_path = tmp_path / "R_0603.kicad_mod"
+    first_path.write_bytes(FOOTPRINT)
+    recent_path.write_bytes(FOOTPRINT)
+    first = FootprintReference("Resistor_SMD", "R_0402", first_path)
+    recent = FootprintReference("Resistor_SMD", "R_0603", recent_path)
+
+    dialog = FootprintPickerDialog(
+        (first, recent), recent_identifiers=(recent.identifier,)
+    )
+    app.processEvents()
+
+    assert dialog.selected_reference() == recent
+    assert dialog._list.item(0).text().startswith("★ ")
+    preview = dialog._preview.pixmap()
+    assert preview is not None and not preview.isNull()
+    dialog.close()
+
+
+def test_recent_footprints_persist_newest_five(
+    window: MainWindow, tmp_path: Path
+) -> None:
+    """The footprint MRU list remains unique and is capped at five entries."""
+    sources = [
+        FootprintReference("Library", f"Part_{index}", tmp_path / f"{index}.kicad_mod")
+        for index in range(7)
+    ]
+
+    for source in sources:
+        window._remember_recent_footprint(source)
+    window._remember_recent_footprint(sources[4])
+
+    assert window._recent_footprint_identifiers() == tuple(
+        source.identifier
+        for source in (sources[4], sources[6], sources[5], sources[3], sources[2])
+    )
+
+
+def test_device_reference_is_suggested_and_incremented_by_family(
+    window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Capacitor choices propose C1, then the next unused sequential reference."""
+    window.project = ProjectDocument("Project", "Board")
+    source = FootprintReference(
+        "Capacitor_SMD", "C_0603", tmp_path / "C_0603.kicad_mod"
+    )
+    suggestions: list[str] = []
+
+    def reference_popup(*_args, **kwargs) -> tuple[str, bool]:
+        suggestions.append(kwargs["text"])
+        return kwargs["text"], True
+
+    monkeypatch.setattr("tnasrevner.gui.QInputDialog.getText", reference_popup)
+
+    assert window._ask_device_reference(source) == "C1"
+    window.project.devices.append(
+        Device(
+            "C1",
+            "top",
+            0.5,
+            0.5,
+            source.library,
+            source.name,
+            "assets/kicad/c1.kicad_mod",
+            "a" * 40,
+        )
+    )
+    assert window._ask_device_reference(source) == "C2"
+    assert suggestions == ["C1", "C2"]
 
 
 def test_add_device_requires_saved_measurement_for_legacy_image(
@@ -566,6 +662,86 @@ def test_shift_click_pad_menu_disconnects_and_deletes(window: MainWindow) -> Non
     actions = {action.text(): action for action in window._pad_menu.actions()}
     actions["Delete pad"].trigger()
     assert not window.project.pads
+    if window._pad_menu is not None:
+        window._pad_menu.close()
+
+
+def test_shift_click_device_edits_bom_value_and_deletes_whole_footprint(
+    window: MainWindow, tmp_path: Path
+) -> None:
+    """Generated pads expose device actions that update BOM or remove everything."""
+    window.store = ProjectStore(tmp_path / "board.revp")
+    device = Device(
+        "C1",
+        "top",
+        0.5,
+        0.5,
+        "Capacitor_SMD",
+        "C_0603",
+        "assets/kicad/device.kicad_mod",
+        "a" * 40,
+        device_id="device-id",
+    )
+    pad = Pad(
+        "C1.1",
+        "top",
+        0.1,
+        0.1,
+        "pad-id",
+        0.1,
+        0.1,
+        device_id=device.device_id,
+        number="1",
+    )
+    image = QImage(100, 100, QImage.Format.Format_RGB32)
+    image.fill(0xFFFFFF)
+    window.store.write_asset(
+        "assets/top.png", window._pixmap_bytes(QPixmap.fromImage(image))
+    )
+    window.project = ProjectDocument(
+        "Project",
+        "Board",
+        images=[
+            ImageAsset(
+                "top",
+                "assets/top.png",
+                "top.png",
+                pixels_per_mm=10,
+                calibration_line=(0.0, 0.5, 1.0, 0.5),
+                calibration_length_mm=10,
+            )
+        ],
+        pads=[pad],
+        devices=[device],
+    )
+    window.store.write_asset(device.footprint_path, FOOTPRINT)
+
+    window._show_pad_menu("top", 0.5, 0.5)
+    assert window._pad_menu is not None
+    actions = {action.text(): action for action in window._pad_menu.actions()}
+    assert set(actions) == {"Delete device", "Set value…"}
+    actions["Set value…"].trigger()
+    assert window._device_value_dialog is not None
+    window._device_value_dialog.setTextValue("100 nF")
+    window._device_value_dialog.accept()
+    QApplication.processEvents()
+
+    assert window.project.devices[0].value == "100 nF"
+    assert window._bom_table.item(0, 0).text() == "C1"
+    assert window._bom_table.item(0, 1).text() == "Capacitor"
+    assert window._bom_table.item(0, 2).text() == "100 nF"
+    if window._pad_menu is not None:
+        window._pad_menu.close()
+
+    window._show_pad_menu("top", 0.5, 0.5)
+    assert window._pad_menu is not None
+    actions = {action.text(): action for action in window._pad_menu.actions()}
+    actions["Delete device"].trigger()
+
+    assert not window.project.devices
+    assert not window.project.pads
+    with pytest.raises(ProjectFormatError):
+        window.store.read_asset(device.footprint_path)
     if window._pad_menu is not None:
         window._pad_menu.close()
 

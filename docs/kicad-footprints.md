@@ -32,10 +32,12 @@ require network access.
 
 1. Import and calibrate at least one board image.
 2. Select **Add device** in Tools.
-3. Search for and select a cached KiCad footprint, then enter a unique reference
-   such as `U1`.
-4. Move the physically scaled preview over the Top or Bottom image.
-5. Right-click to rotate clockwise by 45 degrees; left-click to place; press Escape
+3. Search for and select a cached KiCad footprint. The picker keeps the five most
+   recently selected footprints at the top and previews the highlighted geometry.
+4. Accept or edit the suggested unique reference. References follow the selected
+   family and increment automatically, for example `C1`, then `C2`.
+5. Move the physically scaled preview over the Top or Bottom image.
+6. Right-click to rotate clockwise by 45 degrees; left-click to place; press Escape
    to cancel.
 
 Placement creates every named footprint pad automatically. Pad identities combine
@@ -54,6 +56,11 @@ rejected without modifying the project.
 The selected `.kicad_mod` source is embedded in the `.revp` archive together with
 the source revision. The global cache is therefore not required to reopen, display,
 or save an existing project.
+
+Shift-click a footprint (including one of its generated pads) to set the device
+value or delete the complete device. Deleting a device removes its footprint
+instance, all generated pads, and its embedded `.kicad_mod` asset. The BOM view
+lists reference, component family, and value for every placed device.
 
 KiCad library licensing information is retained in the downloaded cache. Consult
 the repository's `LICENSE.md` before redistributing a library collection.
