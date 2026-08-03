@@ -712,19 +712,19 @@ def test_device_reference_is_suggested_and_incremented_by_family(
     assert window._next_device_reference(source) == "C2"
 
 
-def test_unknown_device_reference_uses_u_prefix(
+def test_unknown_device_reference_uses_ic_prefix(
     window: MainWindow, tmp_path: Path
 ) -> None:
-    """Unknown KiCad footprints use the standard U1, U2 references."""
+    """Non-resistor/capacitor footprints use IC1, IC2 references."""
     window.project = ProjectDocument("Project", "Board")
     source = FootprintReference(
         "Custom_Logic", "Mystery", tmp_path / "mystery.kicad_mod"
     )
 
-    assert window._next_device_reference(source) == "U1"
+    assert window._next_device_reference(source) == "IC1"
     window.project.devices.append(
         Device(
-            "U1",
+            "IC1",
             "top",
             0.5,
             0.5,
@@ -734,7 +734,7 @@ def test_unknown_device_reference_uses_u_prefix(
             "a" * 40,
         )
     )
-    assert window._next_device_reference(source) == "U2"
+    assert window._next_device_reference(source) == "IC2"
 
 
 def test_add_device_requires_saved_measurement_for_legacy_image(
@@ -1217,7 +1217,7 @@ def test_bom_value_and_object_dropdown_are_editable(
     )
     window._refresh_bom_table()
 
-    assert not window._bom_table.item(0, 0).flags() & Qt.ItemFlag.ItemIsEditable
+    assert window._bom_table.item(0, 0).flags() & Qt.ItemFlag.ItemIsEditable
     assert not window._bom_table.item(0, 1).flags() & Qt.ItemFlag.ItemIsEditable
     assert window._bom_table.item(0, 3).flags() & Qt.ItemFlag.ItemIsEditable
     assert not window._bom_table.item(0, 4).flags() & Qt.ItemFlag.ItemIsEditable
@@ -1226,6 +1226,11 @@ def test_bom_value_and_object_dropdown_are_editable(
     assert window.project.devices[0].value == "100 nF"
     window._bom_table.item(0, 5).setText("https://example.test/datasheet")
     assert window.project.devices[0].datasheet == "https://example.test/datasheet"
+    device_id = window.project.devices[0].device_id
+    window._bom_table.item(0, 0).setText("C7")
+    assert window.project.devices[0].reference == "C7"
+    assert window.project.devices[0].device_id == device_id
+    assert window.project.pads == []
 
     monkeypatch.setattr(
         "tnasrevner.gui.QInputDialog.getText",

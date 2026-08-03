@@ -62,6 +62,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
     QFormLayout,
+    QHeaderView,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -3830,9 +3831,9 @@ class MainWindow(
     def _reference_prefix(self, source: FootprintReference) -> str:
         """Choose a remembered or conventional reference prefix."""
         family = _footprint_family_key(source.library)
+        if family not in {"resistor", "capacitor"}:
+            return "IC"
         default_prefix = _DEFAULT_REFERENCE_PREFIXES.get(family)
-        if default_prefix is None:
-            return "U"
         if self.project:
             for device in reversed(self.project.devices):
                 if _footprint_family_key(device.footprint_library) != family:
@@ -5574,14 +5575,17 @@ class MainWindow(
             self._bom_table.setRowCount(len(devices))
             for row, device in enumerate(devices):
                 reference_item = QTableWidgetItem(device.reference)
-                reference_item.setFlags(
-                    reference_item.flags() & ~Qt.ItemFlag.ItemIsEditable
-                )
                 reference_item.setData(Qt.ItemDataRole.UserRole, device.device_id)
                 self._bom_table.setItem(row, 0, reference_item)
                 combo = QComboBox()
                 combo.addItems(object_types)
                 combo.addItem("NEW")
+                combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+                combo.setMinimumContentsLength(
+                    max((len(item) for item in (*object_types, "NEW")), default=8)
+                )
+                combo.setMinimumWidth(180)
+                combo.view().setMinimumWidth(max(220, combo.sizeHint().width()))
                 current_type = device.object_type or _footprint_family(
                     device.footprint_library
                 )
@@ -5611,10 +5615,15 @@ class MainWindow(
                 self._bom_table.setItem(row, 5, datasheet_item)
         finally:
             self._bom_table.blockSignals(False)
+        self._bom_table.resizeColumnsToContents()
+        header = self._bom_table.horizontalHeader()
+        self._bom_table.setColumnWidth(1, max(180, self._bom_table.columnWidth(1)))
+        for column in range(self._bom_table.columnCount()):
+            header.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
 
     def _bom_table_cell_changed(self, row: int, column: int) -> None:
         """Persist edits from the BOM Value or Datasheet columns."""
-        if not self.project or column not in (3, 5):
+        if not self.project or column not in (0, 3, 5):
             return
         reference_item = self._bom_table.item(row, 0)
         value_item = self._bom_table.item(row, column)
@@ -5622,6 +5631,9 @@ class MainWindow(
             return
         device_id = reference_item.data(Qt.ItemDataRole.UserRole)
         if not isinstance(device_id, str):
+            return
+        if column == 0:
+            self._rename_device(device_id, value_item.text())
             return
         field = "value" if column == 3 else "datasheet"
         self.project.devices = [
@@ -5634,6 +5646,52 @@ class MainWindow(
         ]
         self._dirty = True
         self._schematic_view.set_project(self.project)
+        self._update_title()
+
+    def _rename_device(self, device_id: str, reference: str) -> None:
+        """Rename a device while preserving its identity and connections."""
+        if not self.project:
+            return
+        device = next(
+            (item for item in self.project.devices if item.device_id == device_id),
+            None,
+        )
+        if device is None:
+            return
+        reference = reference.strip()
+        duplicate = any(
+            item.device_id != device_id
+            and item.reference.casefold() == reference.casefold()
+            for item in self.project.devices
+        )
+        if not _DEVICE_REFERENCE.fullmatch(reference) or duplicate:
+            QMessageBox.warning(
+                self,
+                "Invalid reference",
+                "The reference must be unique and contain only letters, numbers, "
+                "or _ + - . characters.",
+            )
+            self._refresh_bom_table()
+            return
+        self.project.devices = [
+            replace(item, reference=reference) if item.device_id == device_id else item
+            for item in self.project.devices
+        ]
+        old_prefix = f"{device.reference}."
+        new_prefix = f"{reference}."
+        self.project.pads = [
+            replace(
+                pad,
+                name=(
+                    new_prefix + pad.name[len(old_prefix) :]
+                    if pad.device_id == device_id and pad.name.startswith(old_prefix)
+                    else pad.name
+                ),
+            )
+            for pad in self.project.pads
+        ]
+        self._dirty = True
+        self._refresh_views_preserving_state()
         self._update_title()
 
     def _show_bom_menu(self, position: QPoint) -> None:
