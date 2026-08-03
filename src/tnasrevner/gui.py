@@ -1496,6 +1496,7 @@ class ImageView(
         self._scale = 1.0
         self._zoom_revision = 0
         self._drag_position: QPoint | None = None
+        self._temporary_pan = False
         self._pad_placement = False
         self._pad_start: QPoint | None = None
         self._click_position: QPoint | None = None
@@ -1635,6 +1636,15 @@ class ImageView(
             return True
         if event.type() == QEvent.Type.MouseButtonPress:
             point = self._label_point(watched, event.position().toPoint())
+            if (
+                event.button() == Qt.MouseButton.LeftButton
+                and event.modifiers() & Qt.KeyboardModifier.MetaModifier
+                and (self._pad_placement or self._device_placement)
+            ):
+                self._temporary_pan = True
+                self._drag_position = event.globalPosition().toPoint()
+                self.setCursor(QCursor(Qt.CursorShape.ClosedHandCursor))
+                return True
             if self._ruler_enabled and event.button() == Qt.MouseButton.LeftButton:
                 if not self._label.rect().contains(point):
                     return True
@@ -1693,6 +1703,18 @@ class ImageView(
                 self._drag_position = event.globalPosition().toPoint()
                 self.setCursor(QCursor(Qt.CursorShape.ClosedHandCursor))
             return True
+        if event.type() == QEvent.Type.MouseMove and self._temporary_pan:
+            current = event.globalPosition().toPoint()
+            if self._drag_position is not None:
+                delta = current - self._drag_position
+                self.horizontalScrollBar().setValue(
+                    self.horizontalScrollBar().value() - delta.x()
+                )
+                self.verticalScrollBar().setValue(
+                    self.verticalScrollBar().value() - delta.y()
+                )
+                self._drag_position = current
+            return True
         if event.type() == QEvent.Type.MouseMove and self._ruler_enabled:
             point = self._label_point(watched, event.position().toPoint())
             if self._ruler_start is not None and self._label.rect().contains(point):
@@ -1727,6 +1749,11 @@ class ImageView(
             self._drag_position = current
             return True
         if event.type() == QEvent.Type.MouseButtonRelease:
+            if self._temporary_pan:
+                self._temporary_pan = False
+                self._drag_position = None
+                self.unsetCursor()
+                return True
             point = self._clamp_point(
                 self._label_point(watched, event.position().toPoint()),
                 self._label.rect(),
