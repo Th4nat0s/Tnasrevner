@@ -27,6 +27,7 @@ KICAD_ARCHIVE_URL = (
 )
 CACHE_MAX_AGE = timedelta(days=30)
 METADATA_FILENAME = "metadata.json"
+PAD_INDEX_FILENAME = "pad-count-index.json"
 LIBRARIES_DIRECTORY = "libraries"
 _MAX_FOOTPRINT_BYTES = 5_000_000
 _MAX_ARCHIVE_BYTES = 250_000_000
@@ -203,6 +204,56 @@ class KiCadFootprintCache:
         for path in (self.root / LIBRARIES_DIRECTORY).glob("*.pretty/*.kicad_mod"):
             references.append(FootprintReference(path.parent.stem, path.stem, path))
         return tuple(sorted(references, key=lambda item: item.identifier.lower()))
+
+    def pad_count_index(self) -> dict[str, int] | None:
+        """Return the cached pad-count index when it matches the cache revision."""
+        metadata = self._valid_metadata()
+        if metadata is None:
+            return None
+        try:
+            data = json.loads(
+                (self.root / PAD_INDEX_FILENAME).read_text(encoding="utf-8")
+            )
+            counts = data.get("counts")
+            if data.get("revision") != metadata["revision"] or not isinstance(
+                counts, dict
+            ):
+                return None
+            return {
+                identifier: count
+                for identifier, count in counts.items()
+                if isinstance(identifier, str) and isinstance(count, int)
+            }
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return None
+
+    def ensure_pad_count_index(
+        self, progress: Callable[[int, int], None] | None = None
+    ) -> dict[str, int]:
+        """Index pad counts once per downloaded footprint-library revision."""
+        cached = self.pad_count_index()
+        if cached is not None:
+            return cached
+        references = self.catalog()
+        counts: dict[str, int] = {}
+        total = len(references)
+        for index, reference in enumerate(references, start=1):
+            try:
+                counts[reference.identifier] = len(
+                    parse_footprint(reference.path.read_bytes(), reference.library).pads
+                )
+            except (OSError, KiCadFormatError):
+                counts[reference.identifier] = -1
+            if progress is not None:
+                progress(index, total)
+        revision = self.current_revision()
+        if revision is None:
+            raise KiCadCacheError("Cannot index footprints without a cache revision.")
+        self.root.joinpath(PAD_INDEX_FILENAME).write_text(
+            json.dumps({"revision": revision, "counts": counts}, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        return counts
 
     def load(self, reference: FootprintReference) -> tuple[Footprint, bytes]:
         """Load and validate one selected cached footprint."""

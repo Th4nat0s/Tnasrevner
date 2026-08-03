@@ -1159,12 +1159,14 @@ class FootprintPickerDialog(QDialog):  # pylint: disable=R0902,R0903
         references: tuple[FootprintReference, ...],
         parent: QWidget | None = None,
         recent_identifiers: tuple[str, ...] = (),
+        pad_counts: dict[str, int] | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Select KiCad footprint")
         self.resize(980, 560)
         self._references = references
         self._recent_identifiers = recent_identifiers[:_MAX_RECENT_FOOTPRINTS]
+        self._pad_counts = pad_counts or {}
         self._visible_references: list[FootprintReference] = []
         self._preview_cache: dict[str, Footprint] = {}
         self._pad_count = QSpinBox(self)
@@ -1275,16 +1277,7 @@ class FootprintPickerDialog(QDialog):  # pylint: disable=R0902,R0903
         if pad_count:
             filtered: list[FootprintReference] = []
             for reference in matches:
-                try:
-                    footprint = self._preview_cache.get(reference.identifier)
-                    if footprint is None:
-                        footprint = parse_footprint(
-                            reference.path.read_bytes(), reference.library
-                        )
-                        self._preview_cache[reference.identifier] = footprint
-                except (OSError, KiCadFormatError):
-                    continue
-                if len(footprint.pads) == pad_count:
+                if self._pad_counts.get(reference.identifier) == pad_count:
                     filtered.append(reference)
             matches = filtered
         matches_by_identifier = {
@@ -1319,6 +1312,7 @@ class KiCadCacheWorker(QObject):  # pylint: disable=too-few-public-methods
 
     completed = Signal(object)
     failed = Signal(str)
+    progress = Signal(int, int)
 
     def __init__(self, cache: KiCadFootprintCache) -> None:
         super().__init__()
@@ -1328,7 +1322,9 @@ class KiCadCacheWorker(QObject):  # pylint: disable=too-few-public-methods
     def run(self) -> None:
         """Run one cache update and report its result."""
         try:
-            self.completed.emit(self._cache.ensure_ready())
+            result = self._cache.ensure_ready()
+            self._cache.ensure_pad_count_index(self.progress.emit)
+            self.completed.emit(result)
         except KiCadCacheError as error:
             self.failed.emit(str(error))
 
@@ -3258,7 +3254,9 @@ class MainWindow(
             )
             return
         self._add_device_pending = True
-        if self._footprint_cache.is_ready_and_fresh():
+        index_reader = getattr(self._footprint_cache, "pad_count_index", None)
+        index_ready = index_reader is None or index_reader() is not None
+        if self._footprint_cache.is_ready_and_fresh() and index_ready:
             self._kicad_revision = self._footprint_cache.current_revision()
             self._open_footprint_picker()
         else:
@@ -3266,7 +3264,7 @@ class MainWindow(
 
     def _start_kicad_cache_update(self, interactive: bool) -> None:
         """Start one asynchronous first-run/monthly cache operation."""
-        if interactive:
+        if interactive or self._pad_count_index() is None:
             self._show_kicad_progress()
         if self._kicad_cache_thread is not None:
             return
@@ -3274,6 +3272,7 @@ class MainWindow(
         worker = KiCadCacheWorker(self._footprint_cache)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
+        worker.progress.connect(self._kicad_index_progress)
         worker.completed.connect(self._kicad_cache_ready)
         worker.failed.connect(self._kicad_cache_failed)
         worker.completed.connect(thread.quit)
@@ -3296,6 +3295,16 @@ class MainWindow(
         progress.setMinimumDuration(0)
         progress.show()
         self._kicad_progress = progress
+
+    @Slot(int, int)
+    def _kicad_index_progress(self, current: int, total: int) -> None:
+        """Show progress while indexing footprint pad counts."""
+        if self._kicad_progress is None:
+            return
+        if total > 0 and self._kicad_progress.maximum() != total:
+            self._kicad_progress.setRange(0, total)
+            self._kicad_progress.setLabelText("Indexing footprint pad counts…")
+        self._kicad_progress.setValue(current)
 
     def _close_kicad_progress(self) -> None:
         if self._kicad_progress is not None:
@@ -3361,6 +3370,11 @@ class MainWindow(
                 identifiers.append(value)
         return tuple(identifiers[:_MAX_RECENT_FOOTPRINTS])
 
+    def _pad_count_index(self) -> dict[str, int] | None:
+        """Read the cached pad-count index when supported by the cache."""
+        reader = getattr(self._footprint_cache, "pad_count_index", None)
+        return reader() if callable(reader) else None
+
     def _remember_recent_footprint(self, source: FootprintReference) -> None:
         """Move one selected footprint to the front of the persistent MRU list."""
         identifiers = [
@@ -3390,6 +3404,7 @@ class MainWindow(
             catalog,
             parent,
             recent_identifiers=self._recent_footprint_identifiers(),
+            pad_counts=self._pad_count_index(),
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return None
@@ -3466,6 +3481,7 @@ class MainWindow(
             catalog,
             self,
             recent_identifiers=self._recent_footprint_identifiers(),
+            pad_counts=self._pad_count_index(),
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             self._add_device_pending = False
