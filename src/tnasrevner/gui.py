@@ -3192,8 +3192,8 @@ class MainWindow(
         self._bom_table = QTableWidget(0, 6)
         self._bom_table.setHorizontalHeaderLabels(
             [
-                "Reference",
-                "Object",
+                "Component",
+                "Type",
                 "Footprint",
                 "Value",
                 "Description",
@@ -3925,7 +3925,7 @@ class MainWindow(
             reference, accepted = QInputDialog.getText(
                 self,
                 "Add Footprint",
-                "Reference:",
+                "Component:",
                 text=suggestion,
             )
             if not accepted:
@@ -4753,8 +4753,8 @@ class MainWindow(
         if self._device_value_dialog is not None:
             self._device_value_dialog.close()
         dialog = QInputDialog(self)
-        dialog.setWindowTitle("Device value")
-        dialog.setLabelText(f"Value for {device.reference}:")
+        dialog.setWindowTitle("Component value")
+        dialog.setLabelText(f"Value for Component {device.reference}:")
         dialog.setTextValue(device.value)
         dialog.setWindowModality(Qt.WindowModality.NonModal)
         dialog.accepted.connect(
@@ -5801,7 +5801,7 @@ class MainWindow(
             object_type, accepted = QInputDialog.getText(
                 self,
                 "New object type",
-                "Object name:",
+                "Type name:",
             )
             object_type = object_type.strip()
             if not accepted or not object_type:
@@ -5833,14 +5833,14 @@ class MainWindow(
         if device is None:
             return
         menu = QMenu(self)
-        set_id_action = menu.addAction("Set ID…")
+        set_id_action = menu.addAction("Set Component…")
         rotate_action = menu.addAction("Rotate 90°")
         action = menu.exec(QCursor.pos())
         if action == set_id_action:
             reference, accepted = QInputDialog.getText(
                 self,
-                "Set component ID",
-                f"ID for {device.reference}:",
+                "Set component",
+                f"Component ID for {device.reference}:",
                 text=device.reference,
             )
             if accepted:
