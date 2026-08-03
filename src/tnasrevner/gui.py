@@ -2323,6 +2323,7 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
     terminal_selected = Signal(object)
     terminal_net_edit_requested = Signal(object)
     terminal_menu_requested = Signal(object)
+    device_context_requested = Signal(str)
     pan_requested = Signal(int, int)
     connection_mode_changed = Signal(bool)
 
@@ -2620,21 +2621,7 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
                 return
         device_id = self._device_at(point)
         if event.button() == Qt.MouseButton.RightButton and device_id is not None:
-            if self._project is not None:
-                self._project.devices = [
-                    (
-                        replace(
-                            device,
-                            schematic_rotation=(device.schematic_rotation + 90.0)
-                            % 360.0,
-                        )
-                        if device.device_id == device_id
-                        else device
-                    )
-                    for device in self._project.devices
-                ]
-                self.update()
-                self.layout_changed.emit(device_id, 0.0, 0.0)
+            self.device_context_requested.emit(device_id)
             event.accept()
             return
         if event.button() != Qt.MouseButton.LeftButton:
@@ -3045,6 +3032,7 @@ class SchematicView(QScrollArea):
     terminal_selected = Signal(object)
     terminal_net_edit_requested = Signal(object)
     terminal_menu_requested = Signal(object)
+    device_context_requested = Signal(str)
     connection_mode_changed = Signal(bool)
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -3058,6 +3046,7 @@ class SchematicView(QScrollArea):
             self.terminal_net_edit_requested
         )
         self._canvas.terminal_menu_requested.connect(self.terminal_menu_requested)
+        self._canvas.device_context_requested.connect(self.device_context_requested)
         self._canvas.connection_mode_changed.connect(self.connection_mode_changed)
         self._canvas.pan_requested.connect(self._pan_by)
         self.setWidget(self._canvas)
@@ -3226,6 +3215,9 @@ class MainWindow(
         )
         self._schematic_view.terminal_menu_requested.connect(
             self._show_schematic_terminal_menu
+        )
+        self._schematic_view.device_context_requested.connect(
+            self._show_schematic_device_menu
         )
         self._schematic_view.connection_mode_changed.connect(self._set_connection_mode)
         self._tabs.addTab(self._schematic_view, "Schematic")
@@ -5829,6 +5821,45 @@ class MainWindow(
         self._schematic_view.set_project(self.project)
         self._update_title()
         QTimer.singleShot(0, self._refresh_bom_table)
+
+    def _show_schematic_device_menu(self, device_id: str) -> None:
+        """Show actions for a component selected in the schematic."""
+        if not self.project:
+            return
+        device = next(
+            (item for item in self.project.devices if item.device_id == device_id),
+            None,
+        )
+        if device is None:
+            return
+        menu = QMenu(self)
+        set_id_action = menu.addAction("Set ID…")
+        rotate_action = menu.addAction("Rotate 90°")
+        action = menu.exec(QCursor.pos())
+        if action == set_id_action:
+            reference, accepted = QInputDialog.getText(
+                self,
+                "Set component ID",
+                f"ID for {device.reference}:",
+                text=device.reference,
+            )
+            if accepted:
+                self._rename_device(device_id, reference)
+        elif action == rotate_action:
+            self.project.devices = [
+                (
+                    replace(
+                        item,
+                        schematic_rotation=(item.schematic_rotation + 90.0) % 360.0,
+                    )
+                    if item.device_id == device_id
+                    else item
+                )
+                for item in self.project.devices
+            ]
+            self._dirty = True
+            self._schematic_view.set_project(self.project)
+            self._update_title()
 
     @Slot(str, float, float)
     def _schematic_layout_changed(self, _device_id: str, _x: float, _y: float) -> None:
