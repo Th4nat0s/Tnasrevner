@@ -3486,7 +3486,7 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         )
         return pixmap
 
-    def _draw_pads(  # pylint: disable=too-many-locals
+    def _draw_pads(  # pylint: disable=too-many-locals,too-many-statements
         self, pixmap: QPixmap, side: str
     ) -> None:
         """Draw persisted pad markers over one board-side image."""
@@ -3551,11 +3551,35 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
                 painter.drawRect(rectangle)
             painter.restore()
             painter.setOpacity(1.0)
+            label_angle = pad.rotation + (90.0 if width < height else 0.0)
+            label_angle %= 360.0
+            if 90.0 < label_angle < 270.0:
+                label_angle -= 180.0
+            painter.save()
+            painter.translate(center)
+            painter.rotate(label_angle)
+            label_width = max(width, height)
+            label_height = min(width, height)
+            font = painter.font()
+            font.setPixelSize(max(7, min(14, round(label_height * 0.65))))
+            painter.setFont(font)
+            while (
+                painter.fontMetrics().horizontalAdvance(pad.name) > label_width - 4
+                and font.pixelSize() > 1
+            ):
+                font.setPixelSize(font.pixelSize() - 1)
+                painter.setFont(font)
             painter.drawText(
-                QRect(left, top, width, height),
+                QRect(
+                    round(-label_width / 2),
+                    round(-label_height / 2),
+                    round(label_width),
+                    round(label_height),
+                ),
                 Qt.AlignmentFlag.AlignCenter,
                 pad.name,
             )
+            painter.restore()
             painter.setOpacity(0.45)
         painter.end()
 
