@@ -3481,8 +3481,10 @@ class MainWindow(
             self._rebuild_device_pads(side, self._base_pixmap_for_asset(side))
         self._dirty = True
         current_tab = self._tabs.currentIndex()
+        view_state = self._active_views()[0].view_state()
         self._refresh_views()
         self._tabs.setCurrentIndex(current_tab)
+        self._apply_active_view_state(view_state)
         self._update_title()
         self.statusBar().showMessage("Board rotated 90 degrees.", 3000)
 
