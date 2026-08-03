@@ -4566,7 +4566,8 @@ class MainWindow(
             delete_action.triggered.connect(lambda: self._delete_pad(pad.pad_id))
         else:
             delete_action = menu.addAction("Delete device")
-            value_action = menu.addAction("Set value…")
+            component_action = menu.addAction("Set Component…")
+            value_action = menu.addAction("Set Value…")
             description_action = menu.addAction("Edit description…")
             datasheet_action = menu.addAction("Edit datasheet…")
             delete_action.triggered.connect(
@@ -4574,6 +4575,9 @@ class MainWindow(
             )
             value_action.triggered.connect(
                 lambda: self._edit_device_value(device.device_id)
+            )
+            component_action.triggered.connect(
+                lambda: self._edit_device_component(device.device_id)
             )
             description_action.triggered.connect(
                 lambda: self._edit_device_metadata(
@@ -4772,6 +4776,25 @@ class MainWindow(
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
+
+    def _edit_device_component(self, device_id: str) -> None:
+        """Open the component ID editor from the footprint context menu."""
+        if not self.project:
+            return
+        device = next(
+            (item for item in self.project.devices if item.device_id == device_id),
+            None,
+        )
+        if device is None:
+            return
+        reference, accepted = QInputDialog.getText(
+            self,
+            "Set component",
+            f"Component ID for {device.reference}:",
+            text=device.reference,
+        )
+        if accepted:
+            self._rename_device(device_id, reference)
 
     def _assign_device_value(self, device_id: str, value: str) -> None:
         """Persist a BOM value entered for one device."""
@@ -5399,7 +5422,7 @@ class MainWindow(
                 pad_item.setData(Qt.ItemDataRole.UserRole, pad.pad_id)
                 self._net_table.setItem(row, 0, pad_item)
                 pin, device = self._component_pin_for_pad(pad)
-                pin_text = pin.pin_id if pin is not None else ""
+                pin_text = pin.number if pin is not None else ""
                 function_text = (
                     pin.function
                     if pin is not None and pin.function
