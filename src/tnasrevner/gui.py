@@ -4296,6 +4296,14 @@ class MainWindow(
         if state is not None:
             self._apply_active_view_state(state)
 
+    def _refresh_views_preserving_state(self) -> None:
+        """Refresh overlays without changing the current tab, zoom, or pan."""
+        current_tab = self._tabs.currentIndex()
+        state = self._active_views()[0].view_state()
+        self._refresh_views()
+        self._tabs.setCurrentIndex(current_tab)
+        self._apply_active_view_state(state)
+
     def _apply_active_view_state(self, state: tuple[float, float, float]) -> None:
         """Restore zoom and pan after refreshing visible pad markers."""
         self._syncing_views = True
@@ -4578,6 +4586,8 @@ class MainWindow(
         pad = next((item for item in self.project.pads if item.pad_id == pad_id), None)
         if pad is None:
             return
+        view_state = self._active_views()[0].view_state()
+        current_tab = self._tabs.currentIndex()
         self.project.pads = [
             item for item in self.project.pads if item.pad_id != pad_id
         ]
@@ -4586,7 +4596,9 @@ class MainWindow(
             self._selected_net = None
         self._dirty = True
         LOGGER.info("Pad deleted id=%s pad=%s", pad.pad_id, pad.name)
-        self._schedule_pad_refresh(self._active_views()[0].view_state())
+        self._refresh_views()
+        self._tabs.setCurrentIndex(current_tab)
+        self._apply_active_view_state(view_state)
         self._update_title()
 
     def _edit_device_value(self, device_id: str) -> None:
@@ -4662,6 +4674,7 @@ class MainWindow(
         )
         if device is None:
             return
+        current_tab = self._tabs.currentIndex()
         view_state = self._active_views()[0].view_state()
         removed_pad_ids = {
             pad.pad_id for pad in self.project.pads if pad.device_id == device_id
@@ -4685,7 +4698,9 @@ class MainWindow(
             device.reference,
             len(removed_pad_ids),
         )
-        self._schedule_pad_refresh(view_state)
+        self._refresh_views()
+        self._tabs.setCurrentIndex(current_tab)
+        self._apply_active_view_state(view_state)
         self._update_title()
 
     def _log_ui_heartbeat(self) -> None:
