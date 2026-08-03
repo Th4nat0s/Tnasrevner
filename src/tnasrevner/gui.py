@@ -213,6 +213,7 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         self._source = image
         self._angle = 0.0
         self._zoom = 1.0
+        self._zoom_revision = 0
         self._display_scale = 1.0
         self._selection_start: QPoint | None = None
         self._selection = None
@@ -493,6 +494,7 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
 
     def _set_angle(self, angle: float) -> None:
         """Apply free rotation relative to original imported image."""
+        self._zoom_revision += 1
         old_size = self._source.size()
         selection_ratio = None
         if self._selection is not None:
@@ -536,6 +538,9 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
 
     def _zoom_by(self, factor: float, anchor: QPoint | None = None) -> None:
         """Zoom around anchor point, preserving content under cursor."""
+        centered = anchor is None
+        self._zoom_revision += 1
+        revision = self._zoom_revision
         selection_ratio = self._selection_ratio()
         anchor = anchor or QPoint(
             self._scroll.viewport().width() // 2,
@@ -547,24 +552,51 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
             old_canvas_point.x() / old_effective,
             old_canvas_point.y() / old_effective,
         )
-        old_horizontal = self._scroll.horizontalScrollBar().value()
-        old_vertical = self._scroll.verticalScrollBar().value()
         self._zoom = max(0.1, min(self._zoom * factor, 20.0))
         self._render()
         self._restore_selection(selection_ratio)
+        zoom_anchor = None if centered else anchor
+        self._restore_zoom_anchor(source_point, zoom_anchor)
+        QTimer.singleShot(
+            0,
+            lambda: self._finish_zoom_anchor(revision, source_point, zoom_anchor),
+        )
+
+    def _finish_zoom_anchor(
+        self, revision: int, source_point: QPointF, anchor: QPoint | None
+    ) -> None:
+        """Correct zoom anchoring after Qt has laid out new scrollbars."""
+        if revision == self._zoom_revision:
+            self._restore_zoom_anchor(source_point, anchor)
+
+    def _restore_zoom_anchor(
+        self, source_point: QPointF, anchor: QPoint | None
+    ) -> None:
+        """Keep one source-image point fixed in the editor viewport."""
+        if anchor is None:
+            anchor = QPoint(
+                self._scroll.viewport().width() // 2,
+                self._scroll.viewport().height() // 2,
+            )
+        else:
+            anchor = self._clamp_point(anchor, self._scroll.viewport().rect())
         new_canvas_point = QPoint(
             round(source_point.x() * self._display_scale),
             round(source_point.y() * self._display_scale),
         )
-        self._scroll.horizontalScrollBar().setValue(
-            old_horizontal + new_canvas_point.x() - old_canvas_point.x()
+        current_canvas_point = self._canvas.mapFrom(self._scroll.viewport(), anchor)
+        horizontal = self._scroll.horizontalScrollBar()
+        vertical = self._scroll.verticalScrollBar()
+        horizontal.setValue(
+            horizontal.value() + new_canvas_point.x() - current_canvas_point.x()
         )
-        self._scroll.verticalScrollBar().setValue(
-            old_vertical + new_canvas_point.y() - old_canvas_point.y()
+        vertical.setValue(
+            vertical.value() + new_canvas_point.y() - current_canvas_point.y()
         )
 
     def _fit_view(self) -> None:
         """Reset editor preview zoom to fit."""
+        self._zoom_revision += 1
         selection_ratio = self._selection_ratio()
         self._zoom = 1.0
         self._render()
@@ -572,7 +604,9 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
 
     def _render(self) -> None:
         """Fit source image to editor viewport."""
-        viewport = self._scroll.viewport().size()
+        # maximumViewportSize() excludes the feedback caused by scrollbars
+        # appearing during a zoom operation, so FIT remains a stable baseline.
+        viewport = self._scroll.maximumViewportSize()
         width_ratio = viewport.width() / self._source.width()
         height_ratio = viewport.height() / self._source.height()
         self._display_scale = min(1.0, width_ratio, height_ratio) * self._zoom
@@ -944,6 +978,7 @@ class ImageView(QScrollArea):  # pylint: disable=too-many-instance-attributes
         self._empty_text = empty_text
         self._pixmap = QPixmap()
         self._scale = 1.0
+        self._zoom_revision = 0
         self._drag_position: QPoint | None = None
         self._pad_placement = False
         self._pad_start: QPoint | None = None
@@ -970,12 +1005,14 @@ class ImageView(QScrollArea):  # pylint: disable=too-many-instance-attributes
 
     def set_image(self, path: Path | None) -> None:
         """Display image at its native scale, or show an empty state."""
+        self._zoom_revision += 1
         self._pixmap = QPixmap(str(path)) if path else QPixmap()
         self._scale = 1.0
         self._render()
 
     def set_image_data(self, content: bytes) -> None:
         """Display image bytes loaded from a `.revp` archive."""
+        self._zoom_revision += 1
         self._pixmap = QPixmap()
         self._pixmap.loadFromData(content)
         self._scale = 1.0
@@ -983,6 +1020,7 @@ class ImageView(QScrollArea):  # pylint: disable=too-many-instance-attributes
 
     def set_pixmap(self, pixmap: QPixmap) -> None:
         """Display an already composed pixmap."""
+        self._zoom_revision += 1
         self._pixmap = pixmap
         self._scale = 1.0
         self._render()
@@ -993,10 +1031,9 @@ class ImageView(QScrollArea):  # pylint: disable=too-many-instance-attributes
             event.modifiers() & Qt.KeyboardModifier.ControlModifier
             and not self._pixmap.isNull()
         ):
-            anchor = self.viewport().mapFrom(self, event.position().toPoint())
             self._zoom_by(
                 1.2 if event.angleDelta().y() > 0 else 1 / 1.2,
-                anchor,
+                event.position().toPoint(),
             )
             event.accept()
             return
@@ -1198,6 +1235,9 @@ class ImageView(QScrollArea):  # pylint: disable=too-many-instance-attributes
         """Zoom around anchor point, preserving content under cursor."""
         if self._pixmap.isNull():
             return
+        centered = anchor is None
+        self._zoom_revision += 1
+        revision = self._zoom_revision
         anchor = anchor or QPoint(
             self.viewport().width() // 2, self.viewport().height() // 2
         )
@@ -1207,30 +1247,58 @@ class ImageView(QScrollArea):  # pylint: disable=too-many-instance-attributes
             old_label_point.x() / old_effective,
             old_label_point.y() / old_effective,
         )
-        old_horizontal = self.horizontalScrollBar().value()
-        old_vertical = self.verticalScrollBar().value()
         self._scale = max(0.1, min(self._scale * factor, 20.0))
         self._render()
+        zoom_anchor = None if centered else anchor
+        self._restore_zoom_anchor(source_point, zoom_anchor)
+        QTimer.singleShot(
+            0,
+            lambda: self._finish_zoom_anchor(revision, source_point, zoom_anchor),
+        )
+        self.view_changed.emit()
+
+    def _finish_zoom_anchor(
+        self, revision: int, source_point: QPointF, anchor: QPoint | None
+    ) -> None:
+        """Correct zoom anchoring after Qt has laid out new scrollbars."""
+        if revision == self._zoom_revision:
+            self._restore_zoom_anchor(source_point, anchor)
+
+    def _restore_zoom_anchor(
+        self, source_point: QPointF, anchor: QPoint | None
+    ) -> None:
+        """Keep one source-image point fixed in the board viewport."""
+        if anchor is None:
+            anchor = QPoint(
+                self.viewport().width() // 2,
+                self.viewport().height() // 2,
+            )
+        else:
+            anchor = self._clamp_point(anchor, self.viewport().rect())
         new_effective = self._fit_scale() * self._scale
         new_label_point = QPoint(
             round(source_point.x() * new_effective),
             round(source_point.y() * new_effective),
         )
-        self.horizontalScrollBar().setValue(
-            old_horizontal + new_label_point.x() - old_label_point.x()
+        current_label_point = self._label.mapFrom(self.viewport(), anchor)
+        horizontal = self.horizontalScrollBar()
+        vertical = self.verticalScrollBar()
+        horizontal.setValue(
+            horizontal.value() + new_label_point.x() - current_label_point.x()
         )
-        self.verticalScrollBar().setValue(
-            old_vertical + new_label_point.y() - old_label_point.y()
+        vertical.setValue(
+            vertical.value() + new_label_point.y() - current_label_point.y()
         )
-        self.view_changed.emit()
 
     def _render(self) -> None:
         if self._pixmap.isNull():
+            self._label.setMinimumSize(240, 180)
             self._label.setPixmap(QPixmap())
             self._label.setText(self._empty_text)
             self._device_preview.hide()
             return
         self._label.setText("")
+        self._label.setMinimumSize(0, 0)
         fit_scale = self._fit_scale()
         self._label.setPixmap(
             self._pixmap.scaled(
@@ -1251,12 +1319,14 @@ class ImageView(QScrollArea):  # pylint: disable=too-many-instance-attributes
 
     def fit_image(self) -> None:
         """Fit image inside current view."""
+        self._zoom_revision += 1
         self._scale = 1.0
         self._render()
         self.view_changed.emit()
 
     def actual_size(self) -> None:
         """Show image at 1:1 source-pixel scale."""
+        self._zoom_revision += 1
         fit_scale = self._fit_scale()
         self._scale = 1.0 / fit_scale if fit_scale else 1.0
         self._render()
@@ -1281,6 +1351,7 @@ class ImageView(QScrollArea):  # pylint: disable=too-many-instance-attributes
 
     def apply_view_state(self, state: tuple[float, float, float]) -> None:
         """Apply zoom and normalized pan from another board-side view."""
+        self._zoom_revision += 1
         self._scale = max(0.1, min(state[0], 20.0))
         self._render()
         horizontal = self.horizontalScrollBar()
@@ -1292,7 +1363,9 @@ class ImageView(QScrollArea):  # pylint: disable=too-many-instance-attributes
         """Calculate scale needed to fit image in viewport."""
         if self._pixmap.isNull():
             return 1.0
-        viewport = self.viewport().size()
+        # Keep FIT independent from scrollbar visibility. Otherwise the first
+        # zoom step changes its own baseline and makes image/footprint zoom drift.
+        viewport = self.maximumViewportSize()
         width_ratio = viewport.width() / self._pixmap.width()
         height_ratio = viewport.height() / self._pixmap.height()
         return min(1.0, width_ratio, height_ratio)

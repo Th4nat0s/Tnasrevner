@@ -160,6 +160,45 @@ def test_image_view_displays_and_supports_zoom_pan(app: QApplication) -> None:
     view.close()
 
 
+def test_image_view_zoom_keeps_center_and_footprint_scale(
+    app: QApplication,
+) -> None:
+    """Scrollbar changes must not alter zoom ratio or footprint scale."""
+    view = ImageView("No image")
+    image = QImage(4000, 3000, QImage.Format.Format_RGB32)
+    image.fill(0xFFFFFF)
+    view.resize(800, 600)
+    view.show()
+    view.set_pixmap(QPixmap.fromImage(image))
+    footprint = parse_footprint(FOOTPRINT, "Resistor_SMD")
+    view.set_device_placement(footprint, 20.0, "top", 0.0)
+    app.processEvents()
+
+    center = QPoint(view.viewport().width() // 2, view.viewport().height() // 2)
+    old_effective = view._fit_scale() * view._scale
+    old_label_point = view._label.mapFrom(view.viewport(), center)
+    old_source = (
+        old_label_point.x() / old_effective,
+        old_label_point.y() / old_effective,
+    )
+
+    view._zoom_by(1.2)
+    app.processEvents()
+
+    center = QPoint(view.viewport().width() // 2, view.viewport().height() // 2)
+    new_effective = view._fit_scale() * view._scale
+    new_label_point = view._label.mapFrom(view.viewport(), center)
+    new_source = (
+        new_label_point.x() / new_effective,
+        new_label_point.y() / new_effective,
+    )
+    assert new_effective / old_effective == pytest.approx(1.2)
+    assert view._device_preview._effective_scale == pytest.approx(new_effective)
+    assert new_source[0] == pytest.approx(old_source[0], abs=2)
+    assert new_source[1] == pytest.approx(old_source[1], abs=2)
+    view.close()
+
+
 def test_save_persists_display_mode_zoom_and_pan(
     window: MainWindow, tmp_path: Path
 ) -> None:
