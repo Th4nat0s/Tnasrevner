@@ -7,6 +7,7 @@ from __future__ import annotations
 # pylint: disable=no-name-in-module,invalid-name
 # pylint: disable=too-many-lines
 
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 import logging
 from logging.handlers import RotatingFileHandler
@@ -264,14 +265,17 @@ class MeasurementSpinBox(QDoubleSpinBox):
         return super().valueFromText(text.replace(",", "."))
 
 
-class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-statements,too-many-return-statements,too-many-branches
+class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-statements,too-many-return-statements,too-many-branches,too-many-locals
     QDialog
 ):
     """Rotate and crop an image before it enters a project archive."""
 
     def __init__(
-        self, image: QPixmap, parent: QWidget | None = None
-    ) -> None:  # pylint: disable=too-many-statements
+        self,
+        image: QPixmap,
+        parent: QWidget | None = None,
+        footprint_selector: Callable[[QWidget], Footprint | None] | None = None,
+    ) -> None:  # pylint: disable=too-many-locals,too-many-statements
         super().__init__(parent)
         self.setWindowTitle("Edit imported image")
         self.resize(1000, 700)
@@ -288,6 +292,14 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         self._calibration_end: QPoint | None = None
         self._calibration_line: tuple[QPointF, QPointF] | None = None
         self._result_calibration_line: tuple[float, float, float, float] | None = None
+        self._calibration_method = "line"
+        self._footprint_selector = footprint_selector
+        self._calibration_footprint: Footprint | None = None
+        self._footprint_center: QPointF | None = None
+        self._footprint_pixels_per_mm = 0.0
+        self._footprint_rotation = 0.0
+        self._footprint_drag_mode: str | None = None
+        self._footprint_drag_offset = QPointF()
         self._edit_mode = "calibration"
         self._canvas = QLabel()
         self._canvas.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -301,10 +313,15 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         calibration_button.setCheckable(True)
         calibration_button.setChecked(True)
         calibration_button.clicked.connect(lambda: self._set_edit_mode("calibration"))
+        footprint_button = QPushButton("Scale footprint")
+        footprint_button.setToolTip("Choose a KiCad footprint as a physical reference")
+        footprint_button.setEnabled(footprint_selector is not None)
+        footprint_button.clicked.connect(self._choose_footprint_calibration)
         crop_button = QPushButton("Crop rectangle")
         crop_button.setCheckable(True)
         crop_button.clicked.connect(lambda: self._set_edit_mode("crop"))
         self._calibration_button = calibration_button
+        self._footprint_button = footprint_button
         self._crop_button = crop_button
         millimeters = MeasurementSpinBox()
         millimeters.setRange(0.0, 1_000_000.0)
@@ -341,6 +358,7 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         self._buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(False)
         controls = QHBoxLayout()
         controls.addWidget(calibration_button)
+        controls.addWidget(footprint_button)
         controls.addWidget(crop_button)
         controls.addWidget(QLabel("Real length"))
         controls.addWidget(millimeters)
@@ -356,8 +374,8 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         layout = QVBoxLayout(self)
         layout.addWidget(
             QLabel(
-                "Draw scale line, enter real length in mm (30.5 or 30,5), "
-                "then select crop rectangle."
+                "Draw a scale line, or choose a KiCad footprint and resize it "
+                "over the photo, then select the crop rectangle."
             )
         )
         layout.addWidget(self._scroll)
@@ -425,6 +443,51 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         ):
             self._zoom_by(max(0.01, 1.0 + event.value()))
             return True
+        if self._edit_mode == "footprint":
+            if event.type() == QEvent.Type.MouseButtonPress:
+                if event.button() == Qt.MouseButton.RightButton:
+                    self._footprint_rotation = (self._footprint_rotation + 45.0) % 360.0
+                    self._render()
+                    return True
+                if event.button() == Qt.MouseButton.LeftButton:
+                    point = QPointF(
+                        event.position().x() / self._display_scale,
+                        event.position().y() / self._display_scale,
+                    )
+                    center = self._footprint_center
+                    footprint = self._calibration_footprint
+                    if center is None or footprint is None:
+                        return True
+                    radius = footprint.radius() * self._footprint_pixels_per_mm
+                    handle = center + QPointF(radius, radius)
+                    if QLineF(point, handle).length() <= max(
+                        12.0 / self._display_scale, 4.0
+                    ):
+                        self._footprint_drag_mode = "scale"
+                    elif QLineF(point, center).length() <= radius:
+                        self._footprint_drag_mode = "move"
+                        self._footprint_drag_offset = point - center
+                    else:
+                        self._footprint_drag_mode = None
+                    return True
+            if event.type() == QEvent.Type.MouseMove and self._footprint_drag_mode:
+                point = QPointF(
+                    event.position().x() / self._display_scale,
+                    event.position().y() / self._display_scale,
+                )
+                if self._footprint_drag_mode == "scale":
+                    radius = max(self._calibration_footprint.radius(), 0.1)
+                    distance = QLineF(self._footprint_center, point).length()
+                    self._footprint_pixels_per_mm = max(0.01, distance / radius)
+                else:
+                    self._footprint_center = point - self._footprint_drag_offset
+                self._render()
+                self._update_confirm_state()
+                return True
+            if event.type() == QEvent.Type.MouseButtonRelease:
+                self._footprint_drag_mode = None
+                return True
+            return super().eventFilter(watched, event)
         if self._edit_mode == "calibration":
             if (
                 event.type() == QEvent.Type.MouseButtonPress
@@ -494,8 +557,7 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
             self._selection is None
             or self._selection.width() < 2
             or self._selection.height() < 2
-            or self._calibration_line is None
-            or self._millimeters.value() <= 0
+            or not self._has_calibration()
         ):
             QMessageBox.warning(
                 self,
@@ -505,8 +567,9 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
             return
         selection = self._selection
         source_rect = self._source_rect(selection)
-        if self._calibration_line is not None:
-            start, end = self._calibration_line
+        calibration_line = self._active_calibration_line()
+        if calibration_line is not None:
+            start, end = calibration_line
             self._result_calibration_line = (
                 (start.x() - source_rect.x()) / source_rect.width(),
                 (start.y() - source_rect.y()) / source_rect.height(),
@@ -522,6 +585,8 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
 
     def pixels_per_mm(self) -> float:
         """Return source pixels per real millimeter from calibration line."""
+        if self._calibration_method == "footprint":
+            return self._footprint_pixels_per_mm
         if self._calibration_line is None or self._millimeters.value() <= 0:
             return 0.0
         return QLineF(*self._calibration_line).length() / self._millimeters.value()
@@ -532,13 +597,75 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
 
     def calibration_length_mm(self) -> float:
         """Return the exact real-world length entered for the scale line."""
+        if self._calibration_method == "footprint":
+            return self._footprint_reference_length_mm()
         return self._millimeters.value()
 
     def _set_edit_mode(self, mode: str) -> None:
         """Switch between scale-line and crop-rectangle drawing."""
         self._edit_mode = mode
+        if mode == "calibration":
+            self._calibration_method = "line"
+            self._millimeters.setEnabled(True)
+        elif mode == "footprint":
+            self._calibration_method = "footprint"
+            self._millimeters.setEnabled(False)
         self._calibration_button.setChecked(mode == "calibration")
+        self._footprint_button.setChecked(mode == "footprint")
         self._crop_button.setChecked(mode == "crop")
+
+    def _choose_footprint_calibration(self) -> None:
+        """Select and place a KiCad footprint for physical calibration."""
+        if self._footprint_selector is None:
+            return
+        footprint = self._footprint_selector(self)
+        if footprint is None:
+            return
+        self._calibration_footprint = footprint
+        self._footprint_center = QPointF(
+            self._source.width() / 2, self._source.height() / 2
+        )
+        self._footprint_pixels_per_mm = max(
+            0.01,
+            self._source.width() / (4.0 * max(footprint.radius(), 0.1)),
+        )
+        self._footprint_rotation = 0.0
+        self._set_edit_mode("footprint")
+        self._update_confirm_state()
+        self._render()
+
+    def _footprint_reference_length_mm(self) -> float:
+        """Return the known reference diameter used by footprint calibration."""
+        if self._calibration_footprint is None:
+            return 0.0
+        return max(0.1, self._calibration_footprint.radius() * 2.0)
+
+    def _active_calibration_line(self) -> tuple[QPointF, QPointF] | None:
+        """Return the selected calibration line or a synthetic footprint line."""
+        if self._calibration_method == "line":
+            return self._calibration_line
+        if self._footprint_center is None or self._calibration_footprint is None:
+            return None
+        half_length = self._footprint_reference_length_mm() / 2
+        half_pixels = half_length * self._footprint_pixels_per_mm
+        return (
+            QPointF(
+                self._footprint_center.x() - half_pixels, self._footprint_center.y()
+            ),
+            QPointF(
+                self._footprint_center.x() + half_pixels, self._footprint_center.y()
+            ),
+        )
+
+    def _has_calibration(self) -> bool:
+        """Return whether the active calibration method has valid dimensions."""
+        if self._calibration_method == "footprint":
+            return (
+                self._calibration_footprint is not None
+                and self._footprint_center is not None
+                and self._footprint_pixels_per_mm > 0
+            )
+        return self._calibration_line is not None and self._millimeters.value() > 0
 
     def _set_calibration_line(self, start: QPoint, end: QPoint) -> None:
         """Store calibration endpoints in source-image coordinates."""
@@ -558,8 +685,7 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
             self._selection is not None
             and self._selection.width() >= 2
             and self._selection.height() >= 2
-            and self._calibration_line is not None
-            and self._millimeters.value() > 0
+            and self._has_calibration()
         )
         self._buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(enabled)
 
@@ -586,6 +712,12 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
                 QPointF(point.x() / old_size.width(), point.y() / old_size.height())
                 for point in self._calibration_line
             )
+        footprint_ratio = None
+        if self._footprint_center is not None:
+            footprint_ratio = (
+                self._footprint_center.x() / old_size.width(),
+                self._footprint_center.y() / old_size.height(),
+            )
         self._angle = angle
         self._angle_spin.blockSignals(True)
         self._angle_spin.setValue(angle)
@@ -598,6 +730,11 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
             self._calibration_line = tuple(
                 QPointF(point.x() * new_size.width(), point.y() * new_size.height())
                 for point in line_ratio
+            )
+        if footprint_ratio is not None:
+            self._footprint_center = QPointF(
+                footprint_ratio[0] * new_size.width(),
+                footprint_ratio[1] * new_size.height(),
             )
         self._update_confirm_state()
         self._render()
@@ -707,6 +844,30 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         if self._calibration_start is not None and self._calibration_end is not None:
             painter.setPen(QPen(Qt.GlobalColor.yellow, 3))
             painter.drawLine(self._calibration_start, self._calibration_end)
+        if self._calibration_method == "footprint":
+            center = self._footprint_center
+            footprint = self._calibration_footprint
+            if center is not None and footprint is not None:
+                painter.save()
+                painter.translate(
+                    center.x() * self._display_scale,
+                    center.y() * self._display_scale,
+                )
+                _paint_footprint(
+                    painter,
+                    footprint,
+                    self._footprint_pixels_per_mm * self._display_scale,
+                    "top",
+                    self._footprint_rotation,
+                    preview=True,
+                )
+                radius = footprint.radius() * self._footprint_pixels_per_mm
+                painter.setPen(QPen(QColor(255, 255, 0), 2, Qt.PenStyle.DashLine))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawRect(QRectF(-radius, -radius, radius * 2, radius * 2))
+                painter.setBrush(QColor(255, 255, 0))
+                painter.drawEllipse(QPointF(radius, radius), 6, 6)
+                painter.restore()
         painter.end()
         self._canvas.setPixmap(displayed)
         self._canvas.resize(displayed.size())
@@ -1059,9 +1220,19 @@ def _paint_footprint(  # pylint: disable=too-many-arguments,too-many-positional-
     pad_pen = QPen(QColor(255, 225, 0, 230 if preview else 180), 1.5)
     pad_pen.setCosmetic(True)
     painter.setPen(pad_pen)
-    painter.setBrush(QColor(255, 80, 40, 120 if preview else 70))
     for pad in footprint.pads:
         painter.save()
+        pin_one = pad.number == "1"
+        painter.setBrush(
+            QColor(
+                255,
+                235,
+                0,
+                220 if preview else 150,
+            )
+            if pin_one
+            else QColor(255, 80, 40, 120 if preview else 70)
+        )
         painter.translate(pad.x, pad.y)
         painter.rotate(pad.rotation)
         rectangle = QRectF(-pad.width / 2, -pad.height / 2, pad.width, pad.height)
@@ -1889,6 +2060,36 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         ][:_MAX_RECENT_FOOTPRINTS]
         self._settings.setValue(_RECENT_FOOTPRINTS_KEY, identifiers)
         self._settings.sync()
+
+    def _select_calibration_footprint(self, parent: QWidget) -> Footprint | None:
+        """Pick and load one KiCad footprint for image calibration."""
+        try:
+            catalog = self._footprint_cache.catalog()
+        except KiCadCacheError:
+            QMessageBox.information(
+                parent,
+                "KiCad footprints",
+                "The KiCad footprint library is still being prepared. "
+                "Try again in a moment.",
+            )
+            return None
+        dialog = FootprintPickerDialog(
+            catalog,
+            parent,
+            recent_identifiers=self._recent_footprint_identifiers(),
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        source = dialog.selected_reference()
+        if source is None:
+            return None
+        try:
+            footprint, _content = self._footprint_cache.load(source)
+        except (KiCadCacheError, KiCadFormatError) as error:
+            QMessageBox.warning(parent, "Invalid footprint", str(error))
+            return None
+        self._remember_recent_footprint(source)
+        return footprint
 
     def _reference_prefix(self, source: FootprintReference) -> str:
         """Choose a remembered or conventional reference prefix."""
@@ -2966,7 +3167,9 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         | None
     ):
         """Open editor and return image plus scale, or `None` on cancel."""
-        dialog = ImageEditDialog(image, self)
+        dialog = ImageEditDialog(
+            image, self, footprint_selector=self._select_calibration_footprint
+        )
         if pixels_per_mm is not None:
             dialog.prepare_existing_image(
                 pixels_per_mm, calibration_line, calibration_length_mm
@@ -3313,8 +3516,9 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
                     if pad_id != origin_id:
                         painter.drawLine(origin, target)
         painter.setOpacity(0.45)
-        painter.setBrush(Qt.GlobalColor.red)
         for pad in pads:
+            pin_one = pad.device_id is not None and pad.number == "1"
+            painter.setBrush(Qt.GlobalColor.yellow if pin_one else Qt.GlobalColor.red)
             painter.setPen(
                 QPen(
                     (
