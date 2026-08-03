@@ -66,6 +66,7 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QLabel,
     QLineEdit,
+    QPlainTextEdit,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
@@ -1423,7 +1424,7 @@ def _paint_footprint(  # pylint: disable=too-many-arguments,too-many-positional-
     """Draw parsed footprint geometry around the painter's current origin."""
     painter.save()
     painter.rotate(rotation)
-    painter.scale(-pixels_per_mm if side == "bottom" else pixels_per_mm, pixels_per_mm)
+    painter.scale(pixels_per_mm, pixels_per_mm)
     pad_pen = QPen(QColor(255, 225, 0, 230 if preview else 180), 1.5)
     pad_pen.setCosmetic(True)
     painter.setPen(pad_pen)
@@ -3181,17 +3182,26 @@ class MainWindow(
         self._tabs.addTab(side_by_side, "Top + bottom")
         self._overlay_view = ImageView("No top/bottom images")
         self._tabs.addTab(self._overlay_view, "Both")
-        self._net_table = QTableWidget(0, 5)
+        self._net_table = QTableWidget(0, 6)
         self._net_table.setHorizontalHeaderLabels(
-            ["Pad", "Net", "Pin", "Function", "Component"]
+            ["Pad", "Net", "Pin", "Function", "Component", "Value"]
         )
         self._net_table.cellChanged.connect(self._net_table_cell_changed)
         self._tabs.addTab(self._net_table, "Nets")
-        self._bom_table = QTableWidget(0, 4)
+        self._bom_table = QTableWidget(0, 6)
         self._bom_table.setHorizontalHeaderLabels(
-            ["Reference", "Object", "Footprint", "Value"]
+            [
+                "Reference",
+                "Object",
+                "Footprint",
+                "Value",
+                "Description",
+                "Datasheet",
+            ]
         )
         self._bom_table.cellChanged.connect(self._bom_table_cell_changed)
+        self._bom_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._bom_table.customContextMenuRequested.connect(self._show_bom_menu)
         self._tabs.addTab(self._bom_table, "BOM")
         self._schematic_view = SchematicView()
         self._schematic_view.layout_changed.connect(self._schematic_layout_changed)
@@ -3320,6 +3330,12 @@ class MainWindow(
             "Fit image in view",
             self._fit_images,
         )
+        add_button(
+            "Rotate 90°",
+            QStyle.StandardPixmap.SP_BrowserReload,
+            "Rotate the complete board 90 degrees",
+            self._rotate_board_90,
+        )
         center_button = add_button(
             "Center",
             QStyle.StandardPixmap.SP_DialogResetButton,
@@ -3409,6 +3425,62 @@ class MainWindow(
         dock.setWidget(panel)
         self._tools_dock = dock
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
+
+    def _rotate_board_90(self) -> None:
+        """Rotate both board images and all placed geometry by 90 degrees."""
+        if not self.project or not self.store or not self.project.images:
+            return
+        for asset in self.project.images:
+            pixmap = self._base_pixmap_for_asset(asset.side)
+            if pixmap.isNull():
+                continue
+            rotated = pixmap.transformed(QTransform().rotate(90))
+            self.store.write_asset(asset.path, self._pixmap_bytes(rotated))
+
+        def rotate_point(x: float, y: float) -> tuple[float, float]:
+            return y, 1.0 - x
+
+        def rotate_rectangle(
+            x: float, y: float, width: float, height: float
+        ) -> tuple[float, float, float, float]:
+            return y, 1.0 - x - width, height, width
+
+        rotated_images = []
+        for asset in self.project.images:
+            line = asset.calibration_line
+            if line is not None:
+                start = rotate_point(line[0], line[1])
+                end = rotate_point(line[2], line[3])
+                line = (*start, *end)
+            rotated_images.append(replace(asset, calibration_line=line))
+        self.project.images = rotated_images
+        self.project.pads = [
+            replace(
+                pad,
+                x=rotate_rectangle(pad.x, pad.y, pad.width, pad.height)[0],
+                y=rotate_rectangle(pad.x, pad.y, pad.width, pad.height)[1],
+                width=rotate_rectangle(pad.x, pad.y, pad.width, pad.height)[2],
+                height=rotate_rectangle(pad.x, pad.y, pad.width, pad.height)[3],
+                rotation=(pad.rotation + 90.0) % 360.0,
+            )
+            for pad in self.project.pads
+        ]
+        self.project.devices = [
+            replace(
+                device,
+                x=rotate_point(device.x, device.y)[0],
+                y=rotate_point(device.x, device.y)[1],
+                rotation=(device.rotation + 90.0) % 360.0,
+            )
+            for device in self.project.devices
+        ]
+        self._image_cache.clear()
+        self._dirty = True
+        current_tab = self._tabs.currentIndex()
+        self._refresh_views()
+        self._tabs.setCurrentIndex(current_tab)
+        self._update_title()
+        self.statusBar().showMessage("Board rotated 90 degrees.", 3000)
 
     def _set_connection_mode(self, enabled: bool) -> None:
         """Update cursor and palette status for connection editing."""
@@ -3754,7 +3826,7 @@ class MainWindow(
         family = _footprint_family_key(source.library)
         default_prefix = _DEFAULT_REFERENCE_PREFIXES.get(family)
         if default_prefix is None:
-            return "U?"
+            return "U"
         if self.project:
             for device in reversed(self.project.devices):
                 if _footprint_family_key(device.footprint_library) != family:
@@ -3770,15 +3842,11 @@ class MainWindow(
     def _next_device_reference(self, source: FootprintReference) -> str:
         """Return the next unused numeric reference for a footprint family."""
         prefix = self._reference_prefix(source)
-        highest = 0
         used_references: set[str] = set()
         if self.project:
             for device in self.project.devices:
                 used_references.add(device.reference.casefold())
-                match = _NUMBERED_DEVICE_REFERENCE.fullmatch(device.reference)
-                if match and match.group(1).casefold() == prefix.casefold():
-                    highest = max(highest, int(match.group(2)))
-        index = highest + 1
+        index = 1
         reference = f"{prefix}{index}"
         while reference.casefold() in used_references:
             index += 1
@@ -5215,12 +5283,7 @@ class MainWindow(
             view.set_pad_labels(self._vector_labels_for_side(side))
             view.set_pixmap(images[side])
         overlay_labels = self._vector_labels_for_side("top") + tuple(
-            replace(
-                pad,
-                x=1.0 - pad.x - pad.width,
-                rotation=-pad.rotation,
-            )
-            for pad in self._vector_labels_for_side("bottom")
+            self._vector_labels_for_side("bottom")
         )
         self._overlay_view.set_trace_selection(
             self._selected_net, self._selected_pad_id
@@ -5329,9 +5392,10 @@ class MainWindow(
                     (2, pin_text),
                     (3, function_text),
                     (4, device.reference if device is not None else ""),
+                    (5, device.value if device is not None else ""),
                 ):
                     item = QTableWidgetItem(value)
-                    if column in (2, 4):
+                    if column in (2, 4, 5):
                         item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                     item.setData(
                         Qt.ItemDataRole.UserRole,
@@ -5471,7 +5535,7 @@ class MainWindow(
         self._update_title()
 
     def _refresh_bom_table(self) -> None:
-        """Show every placed KiCad device and its editable value."""
+        """Show every placed KiCad device and its BOM metadata."""
         devices = (
             sorted(
                 self.project.devices,
@@ -5518,30 +5582,107 @@ class MainWindow(
                     footprint_item.flags() & ~Qt.ItemFlag.ItemIsEditable
                 )
                 self._bom_table.setItem(row, 2, footprint_item)
-                self._bom_table.setItem(row, 3, QTableWidgetItem(device.value))
+                value_item = QTableWidgetItem(device.value)
+                self._bom_table.setItem(row, 3, value_item)
+                description_item = QTableWidgetItem(device.description)
+                description_item.setFlags(
+                    description_item.flags() & ~Qt.ItemFlag.ItemIsEditable
+                )
+                self._bom_table.setItem(row, 4, description_item)
+                datasheet_item = QTableWidgetItem(device.datasheet)
+                self._bom_table.setItem(row, 5, datasheet_item)
         finally:
             self._bom_table.blockSignals(False)
 
     def _bom_table_cell_changed(self, row: int, column: int) -> None:
-        """Persist edits from the BOM Value column only."""
-        if not self.project or column != 3:
+        """Persist edits from the BOM Value or Datasheet columns."""
+        if not self.project or column not in (3, 5):
             return
         reference_item = self._bom_table.item(row, 0)
-        value_item = self._bom_table.item(row, 3)
+        value_item = self._bom_table.item(row, column)
         if reference_item is None or value_item is None:
             return
         device_id = reference_item.data(Qt.ItemDataRole.UserRole)
         if not isinstance(device_id, str):
             return
+        field = "value" if column == 3 else "datasheet"
         self.project.devices = [
             (
-                replace(device, value=value_item.text())
+                replace(device, **{field: value_item.text()})
                 if device.device_id == device_id
                 else device
             )
             for device in self.project.devices
         ]
         self._dirty = True
+        self._schematic_view.set_project(self.project)
+        self._update_title()
+
+    def _show_bom_menu(self, position: QPoint) -> None:
+        """Offer multiline note and description editing for a BOM device."""
+        index = self._bom_table.indexAt(position)
+        if not index.isValid():
+            return
+        reference_item = self._bom_table.item(index.row(), 0)
+        if reference_item is None:
+            return
+        device_id = reference_item.data(Qt.ItemDataRole.UserRole)
+        if not isinstance(device_id, str) or not self.project:
+            return
+        device = next(
+            (item for item in self.project.devices if item.device_id == device_id),
+            None,
+        )
+        if device is None:
+            return
+        menu = QMenu(self)
+        description_action = menu.addAction("Edit description…")
+        note_action = menu.addAction("Edit note…")
+        action = menu.exec(self._bom_table.viewport().mapToGlobal(position))
+        if action == description_action:
+            description, accepted = QInputDialog.getText(
+                self,
+                "Device description",
+                f"Description for {device.reference}:",
+                text=device.description,
+            )
+            if accepted:
+                self._set_device_text(device_id, "description", description)
+        elif action == note_action:
+            self._edit_device_note(device)
+
+    def _edit_device_note(self, device: Device) -> None:
+        """Edit a device note in a larger multiline dialog."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Note for {device.reference}")
+        layout = QVBoxLayout(dialog)
+        editor = QPlainTextEdit()
+        editor.setPlainText(device.note)
+        editor.setMinimumSize(520, 260)
+        layout.addWidget(editor)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._set_device_text(device.device_id, "note", editor.toPlainText())
+
+    def _set_device_text(self, device_id: str, field: str, value: str) -> None:
+        """Persist a text metadata field and refresh the BOM."""
+        if not self.project or field not in {"description", "note"}:
+            return
+        self.project.devices = [
+            (
+                replace(device, **{field: value})
+                if device.device_id == device_id
+                else device
+            )
+            for device in self.project.devices
+        ]
+        self._dirty = True
+        self._refresh_bom_table()
         self._schematic_view.set_project(self.project)
         self._update_title()
 
@@ -5818,7 +5959,7 @@ class MainWindow(
         self.statusBar().showMessage(f"Connected terminals to net {target_net}.", 3000)
 
     def _refresh_overlay(self, images: dict[str, QPixmap]) -> None:
-        """Compose top and mirrored bottom images into the Both view."""
+        """Compose top and bottom images in the same CMS top-view orientation."""
         top = images["top"]
         bottom = images["bottom"]
         base = top if not top.isNull() else bottom
@@ -5829,13 +5970,13 @@ class MainWindow(
         canvas.fill(Qt.GlobalColor.transparent)
         painter = QPainter(canvas)
         if not bottom.isNull():
-            mirrored = bottom.scaled(
+            bottom = bottom.scaled(
                 base.size(),
                 Qt.AspectRatioMode.IgnoreAspectRatio,
                 Qt.TransformationMode.SmoothTransformation,
-            ).transformed(QTransform().scale(-1, 1))
+            )
             painter.setOpacity(0.5)
-            painter.drawPixmap(0, 0, mirrored)
+            painter.drawPixmap(0, 0, bottom)
         if not top.isNull():
             top = top.scaled(
                 base.size(),

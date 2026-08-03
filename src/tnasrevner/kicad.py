@@ -439,7 +439,9 @@ def place_footprint_pads(  # pylint: disable=too-many-locals,too-many-arguments,
     cosine, sine = math.cos(angle), math.sin(angle)
     grouped: dict[str, list[PlacedFootprintPad]] = {}
     for pad in footprint.pads:
-        local_x = -pad.x if side == "bottom" else pad.x
+        # CMS board images are supplied looking from the component side for
+        # both faces, so Bottom uses the same top-view footprint coordinates.
+        local_x = pad.x
         local_y = pad.y
         rotated_x = local_x * cosine - local_y * sine
         rotated_y = local_x * sine + local_y * cosine
@@ -447,9 +449,7 @@ def place_footprint_pads(  # pylint: disable=too-many-locals,too-many-arguments,
         center_y = anchor_y + rotated_y * pixels_per_mm / image_height
         width = pad.width * pixels_per_mm / image_width
         height = pad.height * pixels_per_mm / image_height
-        pad_rotation = (
-            rotation - pad.rotation if side == "bottom" else rotation + pad.rotation
-        ) % 360.0
+        pad_rotation = (rotation + pad.rotation) % 360.0
         placed = PlacedFootprintPad(
             pad.number,
             center_x - width / 2,

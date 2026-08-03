@@ -328,8 +328,11 @@ class Device:  # pylint: disable=too-many-instance-attributes
     schematic_y: float | None = None
     schematic_rotation: float = 0.0
     object_type: str = ""
+    description: str = ""
+    note: str = ""
+    datasheet: str = ""
 
-    def __post_init__(self) -> None:
+    def __post_init__(self) -> None:  # pylint: disable=too-many-branches
         _required_string(self.reference, "device reference")
         if len(self.reference) > 64:
             raise ProjectFormatError("device reference is too long")
@@ -351,6 +354,12 @@ class Device:  # pylint: disable=too-many-instance-attributes
             raise ProjectFormatError("schematic rotation must be numeric")
         if not isinstance(self.object_type, str):
             raise ProjectFormatError("device object type must be a string")
+        if not isinstance(self.description, str):
+            raise ProjectFormatError("device description must be a string")
+        if not isinstance(self.note, str):
+            raise ProjectFormatError("device note must be a string")
+        if not isinstance(self.datasheet, str):
+            raise ProjectFormatError("device datasheet must be a string")
         if not all(isinstance(pin, ComponentPin) for pin in self.pins):
             raise ProjectFormatError("device pins must be component pin objects")
         pin_numbers = [pin.number for pin in self.pins]
@@ -384,6 +393,9 @@ class Device:  # pylint: disable=too-many-instance-attributes
             "schematic_y": self.schematic_y,
             "schematic_rotation": self.schematic_rotation,
             "object_type": self.object_type,
+            "description": self.description,
+            "note": self.note,
+            "datasheet": self.datasheet,
         }
 
     @classmethod
@@ -428,6 +440,9 @@ class Device:  # pylint: disable=too-many-instance-attributes
             schematic_y=data.get("schematic_y"),
             schematic_rotation=data.get("schematic_rotation", 0.0),
             object_type=data.get("object_type", ""),
+            description=data.get("description", ""),
+            note=data.get("note", ""),
+            datasheet=data.get("datasheet", ""),
         )
 
 

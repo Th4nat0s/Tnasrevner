@@ -709,22 +709,22 @@ def test_device_reference_is_suggested_and_incremented_by_family(
             "a" * 40,
         )
     )
-    assert window._next_device_reference(source) == "C4"
+    assert window._next_device_reference(source) == "C2"
 
 
-def test_unknown_device_reference_uses_unassigned_ic_prefix(
+def test_unknown_device_reference_uses_u_prefix(
     window: MainWindow, tmp_path: Path
 ) -> None:
-    """Unknown KiCad footprints use U?1, U?2 instead of pretending U1 is known."""
+    """Unknown KiCad footprints use the standard U1, U2 references."""
     window.project = ProjectDocument("Project", "Board")
     source = FootprintReference(
         "Custom_Logic", "Mystery", tmp_path / "mystery.kicad_mod"
     )
 
-    assert window._next_device_reference(source) == "U?1"
+    assert window._next_device_reference(source) == "U1"
     window.project.devices.append(
         Device(
-            "U?1",
+            "U1",
             "top",
             0.5,
             0.5,
@@ -734,7 +734,7 @@ def test_unknown_device_reference_uses_unassigned_ic_prefix(
             "a" * 40,
         )
     )
-    assert window._next_device_reference(source) == "U?2"
+    assert window._next_device_reference(source) == "U2"
 
 
 def test_add_device_requires_saved_measurement_for_legacy_image(
@@ -915,7 +915,7 @@ def test_disconnect_other_pad_keeps_active_link_selection(window: MainWindow) ->
 def test_shift_selected_terminals_create_generic_net(window: MainWindow) -> None:
     """Two schematic terminals without nets receive the next automatic net."""
     device = Device(
-        "U?1",
+        "U1",
         "top",
         0.5,
         0.5,
@@ -930,7 +930,7 @@ def test_shift_selected_terminals_create_generic_net(window: MainWindow) -> None
         "Project",
         "Board",
         pads=[
-            Pad("U?1.1", "top", 0.1, 0.1, "generated", device_id="device", number="1"),
+            Pad("U1.1", "top", 0.1, 0.1, "generated", device_id="device", number="1"),
             Pad("P1", "top", 0.3, 0.3, "standalone"),
         ],
         devices=[device],
@@ -1215,8 +1215,12 @@ def test_bom_value_and_object_dropdown_are_editable(
     assert not window._bom_table.item(0, 0).flags() & Qt.ItemFlag.ItemIsEditable
     assert not window._bom_table.item(0, 1).flags() & Qt.ItemFlag.ItemIsEditable
     assert window._bom_table.item(0, 3).flags() & Qt.ItemFlag.ItemIsEditable
+    assert not window._bom_table.item(0, 4).flags() & Qt.ItemFlag.ItemIsEditable
+    assert window._bom_table.item(0, 5).flags() & Qt.ItemFlag.ItemIsEditable
     window._bom_table.item(0, 3).setText("100 nF")
     assert window.project.devices[0].value == "100 nF"
+    window._bom_table.item(0, 5).setText("https://example.test/datasheet")
+    assert window.project.devices[0].datasheet == "https://example.test/datasheet"
 
     monkeypatch.setattr(
         "tnasrevner.gui.QInputDialog.getText",

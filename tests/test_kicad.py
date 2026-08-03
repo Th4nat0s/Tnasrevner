@@ -88,14 +88,14 @@ def test_reject_malformed_or_unsupported_footprints(
         parse_footprint(content, "Test")
 
 
-def test_place_footprint_rotates_and_mirrors_pad_positions() -> None:
+def test_place_footprint_rotates_without_bottom_mirroring() -> None:
     footprint = parse_footprint(FOOTPRINT, "Resistor_SMD")
 
     rotated = place_footprint_pads(footprint, "top", 0.5, 0.5, 90, 100, 100, 10)
-    mirrored = place_footprint_pads(footprint, "bottom", 0.5, 0.5, 0, 100, 100, 10)
+    bottom = place_footprint_pads(footprint, "bottom", 0.5, 0.5, 0, 100, 100, 10)
 
     assert rotated[0].y < 0.5 < rotated[1].y
-    assert mirrored[0].x > 0.5 > mirrored[1].x
+    assert bottom[0].x < 0.5 < bottom[1].x
     assert [pad.number for pad in rotated] == ["1", "2"]
 
 
