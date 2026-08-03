@@ -1735,7 +1735,6 @@ class ImageView(
                 selection = QRect(self._pad_start, point).normalized()
                 self._pad_start = None
                 self._pad_band.hide()
-                self._pad_placement = False
                 if selection.width() >= 2 and selection.height() >= 2:
                     x, y = self._normalized_point(selection.topLeft())
                     right, bottom = self._normalized_point(selection.bottomRight())
@@ -3906,7 +3905,7 @@ class MainWindow(
             if view.has_image():
                 view.set_pad_placement(True)
         LOGGER.debug("Pad placement armed name=%s views=%s", name, tuple(views))
-        self.statusBar().showMessage(f"Draw a rectangle for pad {name}.")
+        self.statusBar().showMessage("Adding Pad - Esc to stop")
 
     def _show_log_path(self) -> None:
         """Display the diagnostic log path for bug reports."""
@@ -3929,8 +3928,6 @@ class MainWindow(
         if not self.project or pending is None:
             LOGGER.warning("Ignored pad placement side=%s without pending pad", side)
             return
-        for view in (*self._views.values(), *self._side_views.values()):
-            view.set_pad_placement(False)
         self.project.pads.append(
             Pad(pending.name, side, x, y, pending.pad_id, width, height)
         )
@@ -3944,9 +3941,9 @@ class MainWindow(
             width,
             height,
         )
-        self._pending_pad = None
+        self._pending_pad = Pad(self._next_pad_name(), "top", 0.0, 0.0)
         self._dirty = True
-        self.statusBar().clearMessage()
+        self.statusBar().showMessage("Adding Pad - Esc to stop")
         self._schedule_pad_refresh(self._active_views()[0].view_state())
         self._update_title()
 
@@ -4570,6 +4567,10 @@ class MainWindow(
                 self._disable_ruler()
                 event.accept()
                 return
+            if self._pending_pad is not None:
+                self._cancel_pad_placement()
+                event.accept()
+                return
             connected = self._finish_board_connection()
             connected = self._schematic_view.finish_connection() or connected
             if connected:
@@ -4590,6 +4591,13 @@ class MainWindow(
         self._last_view_key = None if is_double else key
         self._last_view_time = now
         event.accept()
+
+    def _cancel_pad_placement(self) -> None:
+        """Stop continuous pad placement without changing saved pads."""
+        self._pending_pad = None
+        for view in (*self._views.values(), *self._side_views.values()):
+            view.set_pad_placement(False)
+        self.statusBar().clearMessage()
 
     def new_project(self) -> None:
         """Create an empty `.revp` project file."""

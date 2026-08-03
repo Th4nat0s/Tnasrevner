@@ -1227,10 +1227,10 @@ def test_bom_value_and_object_dropdown_are_editable(
     assert window.project.devices[0].object_type == "Sensor"
 
 
-def test_pad_mouse_rectangle_releases_placement_mode(
+def test_pad_mouse_rectangle_keeps_continuous_placement_mode(
     window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A real drag releases placement so the next pad can be started."""
+    """A real drag keeps placement armed for the next pad."""
     window.store = ProjectStore(tmp_path / "board.revp")
     window.project = ProjectDocument("Project", "Board")
     image = QImage(100, 100, QImage.Format.Format_RGB32)
@@ -1253,7 +1253,9 @@ def test_pad_mouse_rectangle_releases_placement_mode(
     )
 
     assert len(window.project.pads) == 1
-    assert not window._views["top"]._pad_placement
+    assert window._views["top"]._pad_placement
+    assert window._pending_pad is not None
+    assert window._pending_pad.name == "P2"
 
     window.create_pad()
     QTest.mousePress(
