@@ -4590,7 +4590,7 @@ class MainWindow(
                 )
             )
             if pad is not None and pad.number is not None:
-                pin_action = menu.addAction("Edit pin ID/function…")
+                pin_action = menu.addAction("Edit function…")
                 pin_action.triggered.connect(
                     lambda: self._edit_component_pin(device.device_id, pad.number)
                 )
@@ -4672,7 +4672,7 @@ class MainWindow(
         self.statusBar().showMessage("Trace disconnected.", 3000)
 
     def _edit_component_pin(self, device_id: str, number: str) -> None:
-        """Edit logical ID and function for one KiCad component pin."""
+        """Edit the function for one KiCad component pin."""
         if not self.project:
             return
         device = next(
@@ -4689,17 +4689,9 @@ class MainWindow(
             pins.append(ComponentPin(number, number, footprint_pad=number))
             pin_index = len(pins) - 1
         pin = pins[pin_index]
-        pin_id, accepted = QInputDialog.getText(
-            self,
-            "Component pin",
-            f"Pin ID for {device.reference}.{number}:",
-            text=pin.pin_id,
-        )
-        if not accepted:
-            return
         function, accepted = QInputDialog.getText(
             self,
-            "Component pin",
+            "Pin function",
             f"Function for {device.reference}.{number}:",
             text=pin.function,
         )
@@ -4707,7 +4699,6 @@ class MainWindow(
             return
         pins[pin_index] = replace(
             pin,
-            pin_id=pin_id.strip() or number,
             function=function.strip(),
         )
         self.project.devices = [
@@ -6026,7 +6017,7 @@ class MainWindow(
         )
         kind, object_id, number = terminal
         if kind == "pin" and number is not None:
-            edit_action = menu.addAction("Edit pin ID/function…")
+            edit_action = menu.addAction("Edit function…")
             edit_action.triggered.connect(
                 lambda: self._edit_component_pin(object_id, number)
             )
