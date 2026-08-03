@@ -1969,13 +1969,14 @@ class ImageView(
             old_label_point.y() / old_effective,
         )
         self._scale = max(0.1, min(self._scale * factor, 20.0))
-        self._render()
+        self._render(smooth=False)
         zoom_anchor = None if centered else anchor
         self._restore_zoom_anchor(source_point, zoom_anchor)
         QTimer.singleShot(
             0,
             lambda: self._finish_zoom_anchor(revision, source_point, zoom_anchor),
         )
+        QTimer.singleShot(100, lambda: self._finish_zoom_render(revision))
         self.view_changed.emit()
 
     def _finish_zoom_anchor(
@@ -2011,7 +2012,12 @@ class ImageView(
             vertical.value() + new_label_point.y() - current_label_point.y()
         )
 
-    def _render(self) -> None:
+    def _finish_zoom_render(self, revision: int) -> None:
+        """Replace the fast zoom preview with a smooth render when idle."""
+        if revision == self._zoom_revision:
+            self._render(smooth=True)
+
+    def _render(self, smooth: bool = True) -> None:
         if self._pixmap.isNull():
             self._label.setMinimumSize(240, 180)
             self._label.setPixmap(QPixmap())
@@ -2024,7 +2030,11 @@ class ImageView(
         displayed = self._pixmap.scaled(
             self._pixmap.size() * (fit_scale * self._scale),
             Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
+            (
+                Qt.TransformationMode.SmoothTransformation
+                if smooth
+                else Qt.TransformationMode.FastTransformation
+            ),
         )
         self._draw_vector_pad_labels(displayed)
         self._draw_ruler(displayed)
