@@ -1188,6 +1188,8 @@ class FootprintPickerDialog(QDialog):  # pylint: disable=R0902,R0903
         self._preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._preview.setMinimumSize(360, 360)
         self._preview.setStyleSheet("background: #202124; color: #d0d0d0;")
+        self._preview_size = QLabel("Size: —", self)
+        self._preview_size.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
             parent=self,
@@ -1200,7 +1202,10 @@ class FootprintPickerDialog(QDialog):  # pylint: disable=R0902,R0903
         picker.addWidget(self._list)
         picker.addWidget(self._status)
         content.addLayout(picker, 3)
-        content.addWidget(self._preview, 2)
+        preview_layout = QVBoxLayout()
+        preview_layout.addWidget(self._preview)
+        preview_layout.addWidget(self._preview_size)
+        content.addLayout(preview_layout, 2)
         layout.addLayout(content)
         pad_filter = QHBoxLayout()
         pad_filter.addWidget(QLabel("Filter by pad count"))
@@ -1232,6 +1237,7 @@ class FootprintPickerDialog(QDialog):  # pylint: disable=R0902,R0903
         if row < 0 or row >= len(self._visible_references):
             self._preview.setPixmap(QPixmap())
             self._preview.setText("Select a footprint")
+            self._preview_size.setText("Size: —")
             return
         reference = self._visible_references[row]
         try:
@@ -1247,7 +1253,10 @@ class FootprintPickerDialog(QDialog):  # pylint: disable=R0902,R0903
             )
             self._preview.setPixmap(QPixmap())
             self._preview.setText("Preview unavailable")
+            self._preview_size.setText("Size: —")
             return
+        width_mm, height_mm = footprint.dimensions_mm()
+        self._preview_size.setText(f"Size: {width_mm:.2f} × {height_mm:.2f} mm")
         size = 340
         canvas = QPixmap(size, size)
         canvas.fill(QColor(32, 33, 36))

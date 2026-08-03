@@ -122,6 +122,55 @@ class Footprint:
             )
         return max(distances, default=1.0)
 
+    def dimensions_mm(self) -> tuple[float, float]:
+        """Return the footprint bounding-box width and height in millimeters."""
+        points: list[tuple[float, float]] = []
+        for pad in self.pads:
+            angle = math.radians(pad.rotation)
+            cosine, sine = math.cos(angle), math.sin(angle)
+            for x, y in (
+                (-pad.width / 2, -pad.height / 2),
+                (-pad.width / 2, pad.height / 2),
+                (pad.width / 2, -pad.height / 2),
+                (pad.width / 2, pad.height / 2),
+            ):
+                points.append(
+                    (
+                        pad.x + x * cosine - y * sine,
+                        pad.y + x * sine + y * cosine,
+                    )
+                )
+        for graphic in self.graphics:
+            coordinates = graphic.coordinates
+            if graphic.kind == "circle":
+                radius = (
+                    math.hypot(
+                        coordinates[2] - coordinates[0],
+                        coordinates[3] - coordinates[1],
+                    )
+                    + graphic.width / 2
+                )
+                points.extend(
+                    (
+                        (coordinates[0] - radius, coordinates[1]),
+                        (coordinates[0] + radius, coordinates[1]),
+                        (coordinates[0], coordinates[1] - radius),
+                        (coordinates[0], coordinates[1] + radius),
+                    )
+                )
+                continue
+            for index in range(0, len(coordinates), 2):
+                points.append(
+                    (
+                        coordinates[index],
+                        coordinates[index + 1],
+                    )
+                )
+        if not points:
+            return 0.0, 0.0
+        x_values, y_values = zip(*points)
+        return max(x_values) - min(x_values), max(y_values) - min(y_values)
+
 
 @dataclass(frozen=True)
 class PlacedFootprintPad:
