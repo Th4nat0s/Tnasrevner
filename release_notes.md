@@ -19,7 +19,7 @@
   millimeter length; decimal input now accepts both dot and comma separators.
 - Fixed footprint calibration handle alignment when the image is fitted or
   zoomed, preserving separate move and scale interactions; scaling now keeps
-  the footprint center fixed.
+  the top-left corner fixed while the bottom-right handle moves.
 - Added persistent five-item recent-footprint shortcuts, picker previews, and
   automatic per-family references such as `C1`, `C2`, and `R1`.
 - Added a BOM view with editable device values and Shift-click actions to delete a

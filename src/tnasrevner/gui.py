@@ -309,6 +309,7 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         self._footprint_rotation = 0.0
         self._footprint_drag_mode: str | None = None
         self._footprint_drag_offset = QPointF()
+        self._footprint_scale_anchor: QPointF | None = None
         self._edit_mode = "calibration"
         self._canvas = QLabel()
         self._canvas.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -384,8 +385,9 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         layout.addWidget(
             QLabel(
                 "Draw a scale line, or choose a KiCad footprint and resize it "
-                "over the photo (drag the yellow corner handle to resize and "
-                "the square to move it), then select the crop rectangle."
+                "over the photo (drag the yellow corner handle to resize from "
+                "the top-left, or the square to move it), then select the crop "
+                "rectangle."
             )
         )
         layout.addWidget(self._scroll)
@@ -474,6 +476,7 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
                     )
                     if QLineF(point, handle).length() <= hit_radius:
                         self._footprint_drag_mode = "scale"
+                        self._footprint_scale_anchor = center - QPointF(radius, radius)
                     elif QRectF(
                         center.x() - radius,
                         center.y() - radius,
@@ -482,19 +485,23 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
                     ).contains(point):
                         self._footprint_drag_mode = "move"
                         self._footprint_drag_offset = point - center
+                        self._footprint_scale_anchor = None
                     else:
                         self._footprint_drag_mode = None
+                        self._footprint_scale_anchor = None
                     return True
             if event.type() == QEvent.Type.MouseMove and self._footprint_drag_mode:
                 point = self._footprint_source_point(event.position())
                 if self._footprint_drag_mode == "scale":
-                    center = self._footprint_center
+                    anchor = self._footprint_scale_anchor
                     footprint = self._calibration_footprint
-                    if center is None or footprint is None:
+                    if anchor is None or footprint is None:
                         return True
                     footprint_radius = max(footprint.radius(), 0.1)
-                    radius = max(point.x() - center.x(), point.y() - center.y(), 0.2)
+                    side = max(point.x() - anchor.x(), point.y() - anchor.y(), 0.2)
+                    radius = side / 2.0
                     self._footprint_pixels_per_mm = max(0.01, radius / footprint_radius)
+                    self._footprint_center = anchor + QPointF(radius, radius)
                 else:
                     self._footprint_center = point - self._footprint_drag_offset
                 self._render()
@@ -502,6 +509,7 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
                 return True
             if event.type() == QEvent.Type.MouseButtonRelease:
                 self._footprint_drag_mode = None
+                self._footprint_scale_anchor = None
                 return True
             return super().eventFilter(watched, event)
         if self._edit_mode == "calibration":

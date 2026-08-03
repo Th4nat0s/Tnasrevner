@@ -1082,14 +1082,14 @@ def test_footprint_handle_is_rendered_at_display_scale_and_scales(
     QTest.mousePress(dialog._canvas, Qt.MouseButton.LeftButton, pos=expected)
     assert dialog._footprint_drag_mode == "scale"
     old_scale = dialog._footprint_pixels_per_mm
-    old_center = QPointF(dialog._footprint_center)
+    old_top_left = QPointF(500 - radius, 500 - radius)
     QTest.mouseMove(dialog._canvas, expected + QPoint(20, 20))
     assert dialog._footprint_pixels_per_mm > old_scale
     new_radius = (
         dialog._calibration_footprint.radius() * dialog._footprint_pixels_per_mm
     )
-    assert dialog._footprint_center.x() == pytest.approx(old_center.x())
-    assert dialog._footprint_center.y() == pytest.approx(old_center.y())
+    assert dialog._footprint_center.x() - new_radius == pytest.approx(old_top_left.x())
+    assert dialog._footprint_center.y() - new_radius == pytest.approx(old_top_left.y())
     assert new_radius > radius
     QTest.mouseRelease(dialog._canvas, Qt.MouseButton.LeftButton, pos=expected)
     dialog.close()
