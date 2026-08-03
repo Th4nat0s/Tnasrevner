@@ -1796,7 +1796,9 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
             QTimer.singleShot(0, self._startup_choice)
             QTimer.singleShot(1_000, self._prefetch_footprints)
 
-    def _create_tool_palette(self) -> None:  # pylint: disable=too-many-statements
+    def _create_tool_palette(  # pylint: disable=too-many-locals,too-many-statements
+        self,
+    ) -> None:
         """Create the right-side view control palette."""
         dock = QDockWidget("Tools", self)
         dock.setObjectName("toolsDock")
@@ -1851,6 +1853,10 @@ class MainWindow(QMainWindow):  # pylint: disable=too-many-instance-attributes
         save_button.clicked.connect(self.save_project)
         layout.addWidget(save_button)
         layout.addStretch()
+        quit_button = QPushButton("Quit", panel)
+        quit_button.setToolTip("Quit Tnasrevner")
+        quit_button.clicked.connect(self.close)
+        layout.addWidget(quit_button)
         panel.setLayout(layout)
         dock.setWidget(panel)
         self._tools_dock = dock
