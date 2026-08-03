@@ -1162,7 +1162,12 @@ def test_shift_click_device_edits_bom_value_and_deletes_whole_footprint(
     window._show_pad_menu("top", 0.5, 0.5)
     assert window._pad_menu is not None
     actions = {action.text(): action for action in window._pad_menu.actions()}
-    assert set(actions) == {"Delete device", "Set value…"}
+    assert {
+        "Delete device",
+        "Set value…",
+        "Edit description…",
+        "Edit datasheet…",
+    }.issubset(actions)
     actions["Set value…"].trigger()
     assert window._device_value_dialog is not None
     window._device_value_dialog.setTextValue("100 nF")

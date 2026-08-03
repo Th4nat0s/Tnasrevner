@@ -4563,11 +4563,23 @@ class MainWindow(
         else:
             delete_action = menu.addAction("Delete device")
             value_action = menu.addAction("Set value…")
+            description_action = menu.addAction("Edit description…")
+            datasheet_action = menu.addAction("Edit datasheet…")
             delete_action.triggered.connect(
                 lambda: self._delete_device(device.device_id)
             )
             value_action.triggered.connect(
                 lambda: self._edit_device_value(device.device_id)
+            )
+            description_action.triggered.connect(
+                lambda: self._edit_device_metadata(
+                    device.device_id, "description", "Description"
+                )
+            )
+            datasheet_action.triggered.connect(
+                lambda: self._edit_device_metadata(
+                    device.device_id, "datasheet", "Datasheet URL"
+                )
             )
             if pad is not None and pad.number is not None:
                 pin_action = menu.addAction("Edit pin ID/function…")
@@ -5677,7 +5689,7 @@ class MainWindow(
 
     def _set_device_text(self, device_id: str, field: str, value: str) -> None:
         """Persist a text metadata field and refresh the BOM."""
-        if not self.project or field not in {"description", "note"}:
+        if not self.project or field not in {"description", "note", "datasheet"}:
             return
         self.project.devices = [
             (
@@ -5691,6 +5703,25 @@ class MainWindow(
         self._refresh_bom_table()
         self._schematic_view.set_project(self.project)
         self._update_title()
+
+    def _edit_device_metadata(self, device_id: str, field: str, label: str) -> None:
+        """Edit one short device metadata field from the footprint menu."""
+        if not self.project or field not in {"description", "datasheet"}:
+            return
+        device = next(
+            (item for item in self.project.devices if item.device_id == device_id),
+            None,
+        )
+        if device is None:
+            return
+        value, accepted = QInputDialog.getText(
+            self,
+            label,
+            f"{label} for {device.reference}:",
+            text=getattr(device, field),
+        )
+        if accepted:
+            self._set_device_text(device_id, field, value)
 
     def _bom_object_changed(
         self, device_id: str, combo: QComboBox, selected: str
