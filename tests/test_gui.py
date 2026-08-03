@@ -994,7 +994,7 @@ def test_shift_selected_board_pads_connect_immediately(
     assert window._selected_net == "N1"
     assert window._net_mode_label.isVisible()
     assert view.cursor().shape() == Qt.CursorShape.CrossCursor
-    link_color = view._pixmap.toImage().pixelColor(35, 35)
+    link_color = view._label.pixmap().toImage().pixelColor(35, 35)
     assert min(link_color.red(), link_color.green(), link_color.blue()) > 200
 
     trace_point = QPoint(

@@ -1509,6 +1509,7 @@ class ImageView(
         self._ruler_end: tuple[float, float] | None = None
         self._pad_labels: tuple[Pad, ...] = ()
         self._mirror_pad_labels = False
+        self._footprint_overlays: tuple[tuple, ...] = ()
         self._connection_net: str | None = None
         self._connection_origin_id: str | None = None
         self._label = QLabel(empty_text)
@@ -1558,6 +1559,11 @@ class ImageView(
         """Render pad labels at the current zoom instead of baking them in."""
         self._pad_labels = pads
         self._mirror_pad_labels = mirror_x
+        self._render()
+
+    def set_footprint_overlays(self, footprints: tuple[tuple, ...]) -> None:
+        """Render placed KiCad footprints at the current zoom resolution."""
+        self._footprint_overlays = footprints
         self._render()
 
     def set_trace_selection(self, net: str | None, origin_id: str | None) -> None:
@@ -2045,6 +2051,8 @@ class ImageView(
                 else Qt.TransformationMode.FastTransformation
             ),
         )
+        self._draw_vector_footprints(displayed)
+        self._draw_vector_pads(displayed)
         self._draw_vector_pad_labels(displayed)
         self._draw_ruler(displayed)
         self._label.setPixmap(displayed)
@@ -2122,6 +2130,96 @@ class ImageView(
                 Qt.AlignmentFlag.AlignCenter,
                 pad.name,
             )
+            painter.restore()
+        painter.end()
+
+    def _draw_vector_footprints(self, pixmap: QPixmap) -> None:
+        """Draw placed footprint geometry after image scaling."""
+        if not self._footprint_overlays:
+            return
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        for (
+            footprint,
+            x,
+            y,
+            rotation,
+            pixels_per_mm,
+            side,
+            source_width,
+        ) in self._footprint_overlays:
+            painter.save()
+            painter.translate(x * (pixmap.width() - 1), y * (pixmap.height() - 1))
+            display_scale = pixmap.width() / max(1, source_width)
+            _paint_footprint(
+                painter,
+                footprint,
+                pixels_per_mm * display_scale,
+                side,
+                rotation,
+            )
+            painter.restore()
+        painter.end()
+
+    def _draw_vector_pads(self, pixmap: QPixmap) -> None:
+        """Draw pad rectangles and selected-net traces after image scaling."""
+        if not self._pad_labels:
+            return
+        painter = QPainter(pixmap)
+        radius = max(5, min(pixmap.width(), pixmap.height()) // 100)
+        pads = self._pad_labels
+        if self._connection_net:
+            connected = [pad for pad in pads if pad.net == self._connection_net]
+            centers = {
+                pad.pad_id: QPointF(
+                    (pad.x + pad.width / 2) * (pixmap.width() - 1),
+                    (pad.y + pad.height / 2) * (pixmap.height() - 1),
+                )
+                for pad in connected
+            }
+            origin_id = (
+                self._connection_origin_id
+                if self._connection_origin_id in centers
+                else next(iter(centers), None)
+            )
+            if origin_id is not None:
+                painter.setPen(QPen(Qt.GlobalColor.white, max(2, radius // 2)))
+                for pad_id, target in centers.items():
+                    if pad_id != origin_id:
+                        painter.drawLine(centers[origin_id], target)
+        painter.setOpacity(0.45)
+        for pad in pads:
+            width = max(2, round(pad.width * (pixmap.width() - 1)))
+            height = max(2, round(pad.height * (pixmap.height() - 1)))
+            center = QPointF(
+                (pad.x + pad.width / 2) * (pixmap.width() - 1),
+                (pad.y + pad.height / 2) * (pixmap.height() - 1),
+            )
+            painter.setBrush(
+                Qt.GlobalColor.yellow
+                if pad.device_id is not None and pad.number == "1"
+                else Qt.GlobalColor.red
+            )
+            painter.setPen(
+                QPen(
+                    (
+                        Qt.GlobalColor.white
+                        if pad.pad_id == self._connection_origin_id
+                        else Qt.GlobalColor.yellow
+                    ),
+                    max(2, radius // 2),
+                )
+            )
+            painter.save()
+            painter.translate(center)
+            painter.rotate(pad.rotation)
+            rectangle = QRectF(-width / 2, -height / 2, width, height)
+            if pad.shape in {"circle", "oval"}:
+                painter.drawEllipse(rectangle)
+            elif pad.shape == "roundrect":
+                painter.drawRoundedRect(rectangle, 20, 20, Qt.SizeMode.RelativeSize)
+            else:
+                painter.drawRect(rectangle)
             painter.restore()
         painter.end()
 
@@ -5043,11 +5141,13 @@ class MainWindow(
         images = {side: self._pixmap_for_asset(side) for side in ("top", "bottom")}
         for side, view in self._views.items():
             view.set_trace_selection(self._selected_net, self._selected_pad_id)
+            view.set_footprint_overlays(self._vector_footprints_for_side(side))
             view.set_pad_labels(self._vector_labels_for_side(side))
             view.set_pixmap(images[side])
         self._refresh_overlay(images)
         for side, view in self._side_views.items():
             view.set_trace_selection(self._selected_net, self._selected_pad_id)
+            view.set_footprint_overlays(self._vector_footprints_for_side(side))
             view.set_pad_labels(self._vector_labels_for_side(side))
             view.set_pixmap(images[side])
         overlay_labels = self._vector_labels_for_side("top") + tuple(
@@ -5058,6 +5158,10 @@ class MainWindow(
             )
             for pad in self._vector_labels_for_side("bottom")
         )
+        self._overlay_view.set_trace_selection(
+            self._selected_net, self._selected_pad_id
+        )
+        self._overlay_view.set_footprint_overlays(())
         self._overlay_view.set_pad_labels(overlay_labels)
         self._refresh_net_table()
         self._refresh_bom_table()
@@ -5096,6 +5200,40 @@ class MainWindow(
         if self._pad_display_mode == "image" or not self.project:
             return ()
         return tuple(pad for pad in self.project.pads if pad.side == side)
+
+    def _vector_footprints_for_side(self, side: str) -> tuple[tuple, ...]:
+        """Return placed footprints for vector rendering in one view."""
+        if self._pad_display_mode != "both" or not self.project:
+            return ()
+        image = next(
+            (asset for asset in self.project.images if asset.side == side), None
+        )
+        pixmap = self._base_pixmap_for_asset(side)
+        if image is None or pixmap.isNull():
+            return ()
+        pixels_per_mm = image.measured_pixels_per_mm(pixmap.width(), pixmap.height())
+        if pixels_per_mm is None:
+            pixels_per_mm = image.pixels_per_mm
+        if pixels_per_mm is None:
+            return ()
+        overlays = []
+        for device in self.project.devices:
+            if device.side != side:
+                continue
+            footprint = self._footprint_for_device(device)
+            if footprint is not None:
+                overlays.append(
+                    (
+                        footprint,
+                        device.x,
+                        device.y,
+                        device.rotation,
+                        pixels_per_mm,
+                        side,
+                        pixmap.width(),
+                    )
+                )
+        return tuple(overlays)
 
     def _refresh_net_table(self) -> None:
         """Show pads, logical pins, functions, and assigned nets."""
@@ -5653,10 +5791,6 @@ class MainWindow(
             pixmap = QPixmap(pixmap)
         if self._pad_display_mode == "image":
             return pixmap
-        if self._pad_display_mode == "both":
-            self._draw_devices(pixmap, side)
-        self._draw_pads(pixmap, side)
-        self._draw_connections(pixmap, side)
         return pixmap
 
     def _draw_devices(self, pixmap: QPixmap, side: str) -> None:
