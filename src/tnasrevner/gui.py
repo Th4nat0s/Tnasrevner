@@ -262,16 +262,16 @@ def _configure_logging() -> Path:
 
 
 class ProjectDetailsDialog(QDialog):  # pylint: disable=too-few-public-methods
-    """Collect the names needed to create a project."""
+    """Collect the project name needed to create a project."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("New project")
         self.project_name = QLineEdit()
-        self.board_name = QLineEdit()
+        self.description = QLineEdit()
         form = QFormLayout(self)
         form.addRow("Project name", self.project_name)
-        form.addRow("Board name", self.board_name)
+        form.addRow("Description", self.description)
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
@@ -281,8 +281,8 @@ class ProjectDetailsDialog(QDialog):  # pylint: disable=too-few-public-methods
 
     def accept(self) -> None:
         """Reject empty names before closing the dialog."""
-        if not self.project_name.text().strip() or not self.board_name.text().strip():
-            QMessageBox.warning(self, "Missing name", "Enter project and board names.")
+        if not self.project_name.text().strip():
+            QMessageBox.warning(self, "Missing name", "Enter a project name.")
             return
         super().accept()
 
@@ -5461,9 +5461,9 @@ class MainWindow(
             project_path = project_path.with_suffix(".revp")
         self._remember_project_directory(project_path)
         self.store = ProjectStore(project_path)
-        self.project = ProjectDocument(
-            dialog.project_name.text(), dialog.board_name.text()
-        )
+        project_name = dialog.project_name.text()
+        description = dialog.description.text().strip() or project_name
+        self.project = ProjectDocument(project_name, description)
         self._image_cache.clear()
         self._device_footprint_cache.clear()
         self._cancel_device_placement()

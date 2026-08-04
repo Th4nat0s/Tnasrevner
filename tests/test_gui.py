@@ -74,7 +74,7 @@ def test_create_save_close_reopen_project(
         """Replacement project dialog for non-interactive testing."""
 
         project_name = SimpleNamespace(text=lambda: "Project")
-        board_name = SimpleNamespace(text=lambda: "Board")
+        description = SimpleNamespace(text=lambda: "Description")
 
         def __init__(self, _parent) -> None:
             pass
@@ -103,7 +103,7 @@ def test_create_save_close_reopen_project(
     window.open_project()
     assert window.project is not None
     assert window.project.project_name == "Project"
-    assert window.project.board_name == "Board"
+    assert window.project.board_name == "Description"
 
 
 def test_main_window_has_application_icon(window: MainWindow) -> None:
