@@ -11,7 +11,9 @@ from __future__ import annotations
 # pylint: disable=too-many-branches
 
 from collections.abc import Callable
+import base64
 from dataclasses import dataclass, replace
+import json
 import logging
 from logging.handlers import RotatingFileHandler
 import math
@@ -3169,6 +3171,9 @@ class MainWindow(
         self.project: ProjectDocument | None = None
         self.store: ProjectStore | None = None
         self._dirty = False
+        self._history: list[dict] = []
+        self._history_index = -1
+        self._history_restoring = False
         self._syncing_views = False
         self._pending_pad: Pad | None = None
         self._pending_device: PendingDevice | None = None
@@ -3457,6 +3462,21 @@ class MainWindow(
             self.save_project,
         )
         save_button.setIcon(_save_tool_icon())
+        undo_button = add_button(
+            "Undo",
+            QStyle.StandardPixmap.SP_ArrowBack,
+            "Undo the last action",
+            self.undo,
+        )
+        redo_button = add_button(
+            "Redo",
+            QStyle.StandardPixmap.SP_ArrowForward,
+            "Redo the last undone action",
+            self.redo,
+        )
+        self._undo_button = undo_button
+        self._redo_button = redo_button
+        self._update_history_buttons()
         layout.addStretch()
         add_button(
             "Image",
@@ -4975,6 +4995,155 @@ class MainWindow(
             self._net_dialog is not None,
         )
 
+    def _history_asset_snapshot(self) -> dict[str, str]:
+        """Capture project-referenced assets for one undo snapshot."""
+        if not self.project or not self.store:
+            return {}
+        paths = {
+            path
+            for image in self.project.images
+            for path in (image.path, image.original_path)
+            if path
+        }
+        paths.update(device.footprint_path for device in self.project.devices)
+        assets: dict[str, str] = {}
+        for path in paths:
+            try:
+                content = self.store.read_asset(path)
+            except ProjectFormatError:
+                continue
+            assets[path] = base64.b64encode(content).decode("ascii")
+        return assets
+
+    def _history_snapshot(self) -> dict:
+        """Return JSON-safe project and asset state for undo/redo."""
+        if not self.project:
+            return {}
+        return {
+            "project": self.project.to_dict(),
+            "assets": self._history_asset_snapshot(),
+        }
+
+    @staticmethod
+    def _history_signature(snapshot: dict) -> str:
+        """Return a stable comparison key for one history state."""
+        return json.dumps(snapshot, sort_keys=True, separators=(",", ":"))
+
+    def _record_history(self) -> None:
+        """Record a changed project state, retaining the latest 50 states."""
+        if self._history_restoring or not self.project or not self.store:
+            return
+        snapshot = self._history_snapshot()
+        signature = self._history_signature(snapshot)
+        if self._history and self._history_signature(self._history[-1]) == signature:
+            return
+        if self._history_index < len(self._history) - 1:
+            self._history = self._history[: self._history_index + 1]
+        self._history.append(snapshot)
+        self._history = self._history[-50:]
+        self._history_index = len(self._history) - 1
+        self._update_history_buttons()
+
+    def _reset_history(self) -> None:
+        """Start a fresh history for the current project."""
+        self._history = []
+        self._history_index = -1
+        self._record_history()
+        self._update_history_buttons()
+
+    def _update_history_buttons(self) -> None:
+        """Enable palette Undo/Redo buttons according to the current cursor."""
+        if hasattr(self, "_undo_button"):
+            self._undo_button.setEnabled(self._history_index > 0)
+            self._redo_button.setEnabled(
+                0 <= self._history_index < len(self._history) - 1
+            )
+
+    def _write_history_backup(self) -> None:
+        """Embed the undo journal in the project asset backup."""
+        if not self.store or not self._history:
+            return
+        payload = {
+            "version": 1,
+            "index": self._history_index,
+            "states": self._history,
+        }
+        self.store.write_asset(
+            "assets/.undo-history.json",
+            json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+        )
+
+    def _load_history_backup(self) -> None:
+        """Restore the undo journal embedded in a project archive."""
+        self._history = []
+        self._history_index = -1
+        if not self.store:
+            return
+        try:
+            payload = json.loads(
+                self.store.read_asset("assets/.undo-history.json").decode("utf-8")
+            )
+            states = payload.get("states", [])
+            index = int(payload.get("index", -1))
+            if isinstance(states, list) and all(
+                isinstance(item, dict) for item in states
+            ):
+                self._history = states[-50:]
+                self._history_index = max(-1, min(index, len(self._history) - 1))
+        except (
+            ProjectFormatError,
+            UnicodeError,
+            json.JSONDecodeError,
+            TypeError,
+            ValueError,
+        ):
+            pass
+        if not self._history:
+            self._record_history()
+        self._update_history_buttons()
+
+    def _restore_history_state(self, snapshot: dict) -> None:
+        """Restore project and assets from one undo snapshot."""
+        if not self.store:
+            return
+        project_data = snapshot.get("project")
+        assets = snapshot.get("assets", {})
+        if not isinstance(project_data, dict) or not isinstance(assets, dict):
+            return
+        try:
+            project = ProjectDocument.from_dict(project_data)
+            for path, encoded in assets.items():
+                self.store.write_asset(path, base64.b64decode(encoded))
+        except (ProjectFormatError, ValueError, TypeError):
+            return
+        self._history_restoring = True
+        try:
+            self.project = project
+            self._image_cache.clear()
+            self._device_footprint_cache.clear()
+            self._dirty = True
+            self._refresh_views()
+            self._update_title()
+        finally:
+            self._history_restoring = False
+        self._update_history_buttons()
+
+    def undo(self) -> None:
+        """Undo the latest recorded project action."""
+        if self._history_index <= 0:
+            return
+        self._history_index -= 1
+        self._restore_history_state(self._history[self._history_index])
+        self.statusBar().showMessage("Undo", 1500)
+
+    def redo(self) -> None:
+        """Redo the next recorded project action."""
+        if self._history_index >= len(self._history) - 1:
+            return
+        self._history_index += 1
+        self._restore_history_state(self._history[self._history_index])
+        self.statusBar().showMessage("Redo", 1500)
+
     def _create_actions(self) -> None:
         file_menu = self.menuBar().addMenu("File")
         for label, handler, shortcut in (
@@ -5076,6 +5245,7 @@ class MainWindow(
         self._device_footprint_cache.clear()
         self._cancel_device_placement()
         self._dirty = True
+        self._reset_history()
         self._refresh_views()
         self._update_title()
 
@@ -5099,6 +5269,7 @@ class MainWindow(
             QMessageBox.critical(self, "Open failed", str(error))
             return
         self.store, self.project, self._dirty = store, project, False
+        self._load_history_backup()
         self._image_cache.clear()
         self._device_footprint_cache.clear()
         self._cancel_device_placement()
@@ -5146,6 +5317,8 @@ class MainWindow(
             self.project.display.pan_y,
         ) = display_view.view_state()
         try:
+            self._record_history()
+            self._write_history_backup()
             self.store.save(self.project)
         except (OSError, ProjectFormatError) as error:
             QMessageBox.critical(self, "Save failed", str(error))
@@ -5164,6 +5337,7 @@ class MainWindow(
         self._device_footprint_cache.clear()
         self._cancel_device_placement()
         self._dirty = False
+        self._reset_history()
         self._refresh_views()
         self._update_title()
 
@@ -6538,6 +6712,7 @@ class MainWindow(
         painter.end()
 
     def _update_title(self) -> None:
+        self._record_history()
         name = self.project.project_name if self.project else "No project"
         self.setWindowTitle(f"Tnasrevner — {name}{' *' if self._dirty else ''}")
 
