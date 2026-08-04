@@ -3355,7 +3355,7 @@ class MainWindow(
             button.setFixedSize(40, 36)
             button.setToolTip(tooltip)
             button.setStatusTip(tooltip)
-            button.clicked.connect(callback)
+            button.clicked.connect(lambda _checked=False, action=callback: action())
             layout.addWidget(button)
             return button
 
@@ -3551,6 +3551,11 @@ class MainWindow(
 
     def _set_delete_mode(self, enabled: bool) -> None:
         """Enable or disable deletion mode on every board view."""
+        if enabled:
+            if self._pending_pad is not None:
+                self._cancel_pad_placement()
+            if self._pending_device is not None:
+                self._cancel_device_placement()
         for view in (*self._views.values(), *self._side_views.values()):
             view.set_delete_mode(enabled)
         button = getattr(self, "_delete_button", None)
@@ -3720,6 +3725,7 @@ class MainWindow(
 
     def add_device(self) -> None:
         """Select a footprint, collect its reference, and arm placement."""
+        self._set_delete_mode(False)
         if not self.project or not self.store:
             QMessageBox.information(
                 self, "No project", "Create or open a project first."
@@ -4232,6 +4238,7 @@ class MainWindow(
 
     def create_pad(self) -> None:
         """Start rectangle placement on the currently visible board view."""
+        self._set_delete_mode(False)
         if not self.project:
             QMessageBox.information(
                 self, "No project", "Create or open a project first."
