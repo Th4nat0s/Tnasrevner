@@ -4781,6 +4781,7 @@ class MainWindow(
             replace(item, rotation=rotation) if item.device_id == device_id else item
             for item in self.project.devices
         ]
+        self._rebuild_device_pads(device.side, self._base_pixmap_for_asset(device.side))
         self._dirty = True
         self._refresh_views()
         self._tabs.setCurrentIndex(current_tab)
