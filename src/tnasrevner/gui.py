@@ -4712,12 +4712,16 @@ class MainWindow(
             delete_action.triggered.connect(lambda: self._delete_pad(pad.pad_id))
         else:
             delete_action = menu.addAction("Delete device")
+            rotate_action = menu.addAction("Rotate 45°")
             component_action = menu.addAction("Set Component…")
             value_action = menu.addAction("Set Value…")
             description_action = menu.addAction("Edit description…")
             datasheet_action = menu.addAction("Edit datasheet…")
             delete_action.triggered.connect(
                 lambda: self._delete_device(device.device_id)
+            )
+            rotate_action.triggered.connect(
+                lambda: self._rotate_device(device.device_id)
             )
             value_action.triggered.connect(
                 lambda: self._edit_device_value(device.device_id)
@@ -4758,6 +4762,37 @@ class MainWindow(
             device.device_id if device else None,
         )
         menu.popup(QCursor.pos())
+
+    def _rotate_device(self, device_id: str) -> None:
+        """Rotate one placed footprint clockwise by 45 degrees."""
+        if not self.project:
+            return
+        device = next(
+            (item for item in self.project.devices if item.device_id == device_id),
+            None,
+        )
+        if device is None:
+            return
+        current_tab = self._tabs.currentIndex()
+        views = self._active_views()
+        view_state = views[0].view_state() if views else None
+        rotation = (device.rotation + 45.0) % 360.0
+        self.project.devices = [
+            replace(item, rotation=rotation) if item.device_id == device_id else item
+            for item in self.project.devices
+        ]
+        self._dirty = True
+        self._refresh_views()
+        self._tabs.setCurrentIndex(current_tab)
+        if view_state is not None:
+            self._apply_active_view_state(view_state)
+        self._update_title()
+        LOGGER.info(
+            "Device rotated id=%s reference=%s rotation=%s",
+            device_id,
+            device.reference,
+            rotation,
+        )
 
     def _show_trace_menu(self, side: str, x: float, y: float) -> None:
         """Show Disconnect for the selected trace under the cursor."""
