@@ -2424,7 +2424,14 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
             ),
             default=0,
         )
-        self._logical_width = max(1200, 1080 + net_count * 60)
+        saved_right = max(
+            (
+                (device.schematic_x or 0) + self._symbol_size(device)[0] / 2 + 120
+                for device in devices
+            ),
+            default=0,
+        )
+        self._logical_width = max(1200, 1080 + net_count * 60, int(saved_right))
         self._logical_height = max(900, int(auto_height), int(saved_bottom))
         self.resize(
             round(self._logical_width * self._zoom),
@@ -2439,6 +2446,24 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
             round(self._logical_height * self._zoom),
         )
         self.update()
+
+    def fit_overview(self) -> None:
+        """Fit the complete schematic sheet and center it in the viewport."""
+        viewport = self.viewport().size()
+        width_ratio = viewport.width() / max(1, self._logical_width)
+        height_ratio = viewport.height() / max(1, self._logical_height)
+        self.set_zoom(max(0.5, min(1.0, width_ratio, height_ratio)))
+        self.horizontalScrollBar().setValue(
+            (
+                self.horizontalScrollBar().maximum()
+                + self.horizontalScrollBar().minimum()
+            )
+            // 2
+        )
+        self.verticalScrollBar().setValue(
+            (self.verticalScrollBar().maximum() + self.verticalScrollBar().minimum())
+            // 2
+        )
 
     def _center_for_device(self, device: Device, index: int) -> QPointF:
         """Return persisted schematic position or a stable automatic position."""
@@ -3158,6 +3183,10 @@ class SchematicView(QScrollArea):
     def set_project(self, project: ProjectDocument | None) -> None:
         """Set the project rendered by the schematic canvas."""
         self._canvas.set_project(project)
+
+    def fit_overview(self) -> None:
+        """Fit and center the complete schematic sheet."""
+        self._canvas.fit_overview()
 
     def set_selected_net(self, net: str | None) -> None:
         """Highlight one selected net in the schematic canvas."""
@@ -5468,6 +5497,8 @@ class MainWindow(
         self._device_footprint_cache.clear()
         self._cancel_device_placement()
         self._refresh_views()
+        if self._tabs.currentIndex() == 6:
+            QTimer.singleShot(0, self._schematic_view.fit_overview)
         self._update_title()
 
     def _last_project_directory(self) -> Path:
