@@ -360,7 +360,7 @@ def test_create_pad_from_tools_places_and_persists_marker(
     assert window.project.pads[0].width == 0.2
     assert window.project.pads[0].height == 0.1
     assert any(
-        action.toolTip().startswith("Create a pad")
+        action.toolTip() == "Add a Pad"
         for action in window._tools_dock.widget().findChildren(QPushButton)
     )
 
@@ -445,7 +445,7 @@ def test_add_device_rotates_and_creates_named_footprint_pads(
     assert window._pending_device is None
     assert not view._device_placement
     assert any(
-        button.toolTip().startswith("Select and place")
+        button.toolTip() == "Add Component"
         for button in window._tools_dock.widget().findChildren(QPushButton)
     )
 

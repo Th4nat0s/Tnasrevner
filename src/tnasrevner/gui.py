@@ -3481,19 +3481,19 @@ class MainWindow(
         add_button(
             "1:1",
             QStyle.StandardPixmap.SP_ComputerIcon,
-            "Actual image size",
+            "1:1 Size",
             self._actual_size,
         )
         add_button(
             "FIT",
             QStyle.StandardPixmap.SP_DesktopIcon,
-            "Fit image in view",
+            "Fit",
             self._fit_images,
         )
         add_button(
             "Rotate 90°",
             QStyle.StandardPixmap.SP_BrowserReload,
-            "Rotate the complete board 90 degrees",
+            "Rotate Board",
             self._rotate_board_90,
         )
         center_button = add_button(
@@ -3506,7 +3506,7 @@ class MainWindow(
         ruler_button = add_button(
             "Ruler",
             QStyle.StandardPixmap.SP_FileDialogContentsView,
-            "Measure a distance in millimeters using the image scale",
+            "Measure Tool",
             self._toggle_ruler,
         )
         ruler_button.setCheckable(True)
@@ -3518,7 +3518,7 @@ class MainWindow(
         show_pads_button.setIcon(
             self.style().standardIcon(QStyle.StandardPixmap.SP_DialogYesButton)
         )
-        show_pads_button.setToolTip("Pad + image")
+        show_pads_button.setToolTip("Show/Hide Layers")
         show_pads_button.setStatusTip(show_pads_button.toolTip())
         show_pads_button.clicked.connect(self._cycle_pad_display_mode)
         self._show_pads_button = show_pads_button
@@ -3527,7 +3527,7 @@ class MainWindow(
         device_button = add_button(
             "Add Footprint",
             QStyle.StandardPixmap.SP_FileDialogDetailedView,
-            "Select and place a KiCad footprint",
+            "Add Component",
             self.add_device,
         )
         device_button.setIcon(
@@ -3541,7 +3541,7 @@ class MainWindow(
         pad_button = add_button(
             "Add Pad",
             QStyle.StandardPixmap.SP_FileDialogNewFolder,
-            "Create a pad on the Top or Bottom image",
+            "Add a Pad",
             self.create_pad,
         )
         pad_button.setIcon(_pad_tool_icon())
@@ -3550,17 +3550,11 @@ class MainWindow(
         delete_button = add_button(
             "Delete",
             QStyle.StandardPixmap.SP_TrashIcon,
-            "Delete pads or footprints by clicking them",
+            "Delete Component",
             self._toggle_delete_mode,
         )
         delete_button.setCheckable(True)
         self._delete_button = delete_button
-        add_button(
-            "Log file",
-            QStyle.StandardPixmap.SP_FileDialogInfoView,
-            "Show diagnostic log file path",
-            self._show_log_path,
-        )
         save_button = add_button(
             "Save",
             QStyle.StandardPixmap.SP_DialogSaveButton,
@@ -3589,6 +3583,12 @@ class MainWindow(
             QStyle.StandardPixmap.SP_DialogOpenButton,
             "Choose Top or Bottom image: load, resize, or remove",
             self.manage_picture,
+        )
+        add_button(
+            "Log file",
+            QStyle.StandardPixmap.SP_FileDialogInfoView,
+            "Show diagnostic log file path",
+            self._show_log_path,
         )
         add_button(
             "Quit",
@@ -4693,7 +4693,7 @@ class MainWindow(
             "pads": "Pad only",
         }
         label = labels[self._pad_display_mode]
-        self._show_pads_button.setToolTip(label)
+        self._show_pads_button.setToolTip("Show/Hide Layers")
         self._show_pads_button.setStatusTip(label)
         self.statusBar().showMessage(f"Display: {label}", 2000)
         self._schedule_pad_refresh(self._active_views()[0].view_state())
