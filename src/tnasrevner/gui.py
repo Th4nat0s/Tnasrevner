@@ -3425,6 +3425,7 @@ class MainWindow(
                 self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogNewFolder),
             )
         )
+        device_button.setCheckable(True)
         self._add_device_button = device_button
         pad_button = add_button(
             "Add Pad",
@@ -3433,6 +3434,8 @@ class MainWindow(
             self.create_pad,
         )
         pad_button.setIcon(_pad_tool_icon())
+        pad_button.setCheckable(True)
+        self._add_pad_button = pad_button
         delete_button = add_button(
             "Delete",
             QStyle.StandardPixmap.SP_TrashIcon,
@@ -4109,6 +4112,7 @@ class MainWindow(
         self.statusBar().showMessage(
             f"Place {reference}: left click to place, right click rotates 45°, Esc cancels."
         )
+        self._add_device_button.setChecked(True)
         LOGGER.info(
             "Device placement armed reference=%s footprint=%s",
             reference,
@@ -4246,6 +4250,8 @@ class MainWindow(
         """Cancel a pending footprint without changing project data."""
         self._pending_device = None
         self._clear_device_previews()
+        if hasattr(self, "_add_device_button"):
+            self._add_device_button.setChecked(False)
         if clear_status:
             self.statusBar().clearMessage()
 
@@ -4281,6 +4287,7 @@ class MainWindow(
             if view.has_image():
                 view.set_pad_placement(True)
         LOGGER.debug("Pad placement armed name=%s views=%s", name, tuple(views))
+        self._add_pad_button.setChecked(True)
         self.statusBar().showMessage("Adding Pad - Esc to stop")
 
     def _show_log_path(self) -> None:
@@ -5029,6 +5036,8 @@ class MainWindow(
     def _cancel_pad_placement(self) -> None:
         """Stop continuous pad placement without changing saved pads."""
         self._pending_pad = None
+        if hasattr(self, "_add_pad_button"):
+            self._add_pad_button.setChecked(False)
         for view in (*self._views.values(), *self._side_views.values()):
             view.set_pad_placement(False)
         self.statusBar().clearMessage()
