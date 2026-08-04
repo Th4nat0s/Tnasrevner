@@ -3771,6 +3771,7 @@ class MainWindow(
             else None
         )
         device_name = device.reference if device is not None else "—"
+        value_text = f" | Value: {device.value}" if device and device.value else ""
         footprint_name = device.footprint_name if device is not None else "—"
         net_name = pad.net or "—"
         pin, _ = self._component_pin_for_pad(pad)
@@ -3789,7 +3790,7 @@ class MainWindow(
             else "—"
         )
         self.statusBar().showMessage(
-            f"Pad: {pad.name} | Device: {device_name} | "
+            f"Pad: {pad.name} | Device: {device_name}{value_text} | "
             f"Pin: {pin_name} | Footprint: {footprint_name} | "
             f"Function: {function} | Net: {net_name}"
         )
