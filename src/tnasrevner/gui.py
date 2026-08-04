@@ -2380,7 +2380,7 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
             {pin.net_id for device in devices for pin in device.pins if pin.net_id}
             | {pad.net for pad in independent_pads if pad.net}
         )
-        auto_height = 260 + (device_rows - 1) * 460 + 300 + pad_rows * 54
+        auto_height = 220 + (device_rows - 1) * 280 + 240 + pad_rows * 44
         saved_bottom = max(
             (
                 (device.schematic_y or 0) + self._symbol_size(device)[1] / 2 + 120
@@ -2388,7 +2388,7 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
             ),
             default=0,
         )
-        self._logical_width = max(1600, 1420 + net_count * 80)
+        self._logical_width = max(1200, 1080 + net_count * 60)
         self._logical_height = max(900, int(auto_height), int(saved_bottom))
         self.resize(
             round(self._logical_width * self._zoom),
@@ -2409,7 +2409,7 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
         if device.schematic_x is not None and device.schematic_y is not None:
             return QPointF(device.schematic_x, device.schematic_y)
         columns = 3
-        return QPointF(300 + (index % columns) * 460, 260 + (index // columns) * 460)
+        return QPointF(220 + (index % columns) * 300, 180 + (index // columns) * 280)
 
     @classmethod
     def _symbol_size(cls, device: Device) -> tuple[float, float]:
@@ -2423,6 +2423,8 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
             return 150.0, max(100.0, len(device.pins) * 20.0 + 30.0)
         if cls._symbol_kind(device) == "transistor":
             return 150.0, 130.0
+        if cls._symbol_kind(device) in {"resistor", "capacitor"}:
+            return 110.0, 80.0
         return 150.0, 120.0
 
     @classmethod
@@ -2955,7 +2957,7 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
                 net_points,
             )
         independent_pads = [pad for pad in pads if not pad.device_id]
-        pad_start_y = 260 + math.ceil(len(devices) / 3) * 460
+        pad_start_y = 220 + math.ceil(len(devices) / 3) * 280
         for index, pad in enumerate(independent_pads):
             pad_point = QPointF(
                 180 + (index % 6) * 190,
@@ -3051,6 +3053,8 @@ class SchematicView(QScrollArea):
         self._canvas.pan_requested.connect(self._pan_by)
         self.setWidget(self._canvas)
         self.setWidgetResizable(False)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         self.setMinimumSize(520, 320)
         self.setStyleSheet("QScrollArea { background: #20242b; }")
         self.viewport().setStyleSheet("background: #20242b;")
