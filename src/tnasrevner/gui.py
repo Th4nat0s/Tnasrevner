@@ -3146,7 +3146,8 @@ class SchematicView(QScrollArea):
             super().wheelEvent(event)
             return
         factor = 1.2 if event.angleDelta().y() > 0 else 1 / 1.2
-        self._zoom_by(factor, event.position().toPoint())
+        cursor = self.viewport().mapFrom(self, event.position().toPoint())
+        self._zoom_by(factor, cursor)
         event.accept()
 
     def _zoom_by(self, factor: float, cursor: QPoint | None = None) -> None:
