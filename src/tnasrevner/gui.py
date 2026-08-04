@@ -396,6 +396,7 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         self._zoom_revision = 0
         self._display_scale = 1.0
         self._selection_start: QPoint | None = None
+        self._pan_position: QPoint | None = None
         self._selection = None
         self._selection_source_ratio: tuple[float, float, float, float] | None = None
         self._editing_existing_image = False
@@ -587,6 +588,32 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         ):
             gesture_delta = max(-0.1, min(0.1, event.value()))
             self._zoom_by(max(0.9, 1.0 + gesture_delta))
+            return True
+        if (
+            event.type() == QEvent.Type.MouseButtonPress
+            and event.button() == Qt.MouseButton.LeftButton
+            and self._edit_mode == "crop"
+            and not event.modifiers() & Qt.KeyboardModifier.ShiftModifier
+        ):
+            self._pan_position = event.globalPosition().toPoint()
+            self._canvas.setCursor(QCursor(Qt.CursorShape.ClosedHandCursor))
+            return True
+        if event.type() == QEvent.Type.MouseMove and self._pan_position is not None:
+            current = event.globalPosition().toPoint()
+            delta = current - self._pan_position
+            self._pan_position = current
+            horizontal = self._scroll.horizontalScrollBar()
+            vertical = self._scroll.verticalScrollBar()
+            horizontal.setValue(horizontal.value() - delta.x())
+            vertical.setValue(vertical.value() - delta.y())
+            return True
+        if (
+            event.type() == QEvent.Type.MouseButtonRelease
+            and event.button() == Qt.MouseButton.LeftButton
+            and self._pan_position is not None
+        ):
+            self._pan_position = None
+            self._canvas.unsetCursor()
             return True
         if self._edit_mode == "footprint":
             if event.type() == QEvent.Type.MouseButtonPress:
@@ -847,10 +874,7 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         self._footprint_rotation = 0.0
         self._set_edit_mode("footprint")
         self._update_confirm_state()
-        self._selection = None
-        self._selection_source_ratio = None
-        self._rubber_band.hide()
-        self._render(preserve_selection=False)
+        self._render()
 
     def _footprint_reference_length_mm(self) -> float:
         """Return the known reference diameter used by footprint calibration."""
