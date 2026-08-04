@@ -5002,6 +5002,13 @@ class MainWindow(
         key = event.key()
         if key == Qt.Key.Key_Escape:
             if (
+                getattr(self, "_delete_button", None) is not None
+                and self._delete_button.isChecked()
+            ):
+                self._set_delete_mode(False)
+                event.accept()
+                return
+            if (
                 getattr(self, "_ruler_button", None) is not None
                 and self._ruler_button.isChecked()
             ):
