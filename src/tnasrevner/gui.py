@@ -572,19 +572,14 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         if watched is not self._canvas:
             return super().eventFilter(watched, event)
         if event.type() == QEvent.Type.Wheel:
-            anchor = self._canvas.mapTo(
-                self._scroll.viewport(), event.position().toPoint()
-            )
-            self._zoom_by(
-                1.2 if event.angleDelta().y() > 0 else 1 / 1.2,
-                anchor,
-            )
+            self._zoom_by(1.1 if event.angleDelta().y() > 0 else 1 / 1.1)
             return True
         if (
             event.type() == QEvent.Type.NativeGesture
             and event.gestureType() == Qt.NativeGestureType.ZoomNativeGesture
         ):
-            self._zoom_by(max(0.01, 1.0 + event.value()))
+            gesture_delta = max(-0.1, min(0.1, event.value()))
+            self._zoom_by(max(0.9, 1.0 + gesture_delta))
             return True
         if self._edit_mode == "footprint":
             if event.type() == QEvent.Type.MouseButtonPress:
