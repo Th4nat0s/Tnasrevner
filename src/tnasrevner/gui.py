@@ -397,6 +397,7 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         self._display_scale = 1.0
         self._selection_start: QPoint | None = None
         self._selection = None
+        self._selection_source_ratio: tuple[float, float, float, float] | None = None
         self._editing_existing_image = False
         self._crop_selection_modified = False
         self._resize_edges: set[str] = set()
@@ -426,6 +427,10 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         calibration_button.setCheckable(True)
         calibration_button.setChecked(True)
         calibration_button.clicked.connect(lambda: self._set_edit_mode("calibration"))
+        align_button = QPushButton("Align line")
+        align_button.setToolTip("Draw a line and rotate the image horizontally")
+        align_button.setCheckable(True)
+        align_button.clicked.connect(lambda: self._set_edit_mode("align"))
         footprint_button = QPushButton("Scale footprint")
         footprint_button.setToolTip("Choose a KiCad footprint as a physical reference")
         footprint_button.setEnabled(footprint_selector is not None)
@@ -435,6 +440,7 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         crop_button.setCheckable(True)
         crop_button.clicked.connect(lambda: self._set_edit_mode("crop"))
         self._calibration_button = calibration_button
+        self._align_button = align_button
         self._footprint_button = footprint_button
         self._crop_button = crop_button
         load_image_button = QPushButton("Load")
@@ -488,6 +494,7 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         self._mode_hint.setStyleSheet("color: #66c2ff; font-weight: 600;")
         controls = QHBoxLayout()
         controls.addWidget(calibration_button)
+        controls.addWidget(align_button)
         controls.addWidget(footprint_button)
         controls.addWidget(crop_button)
         controls.addWidget(load_image_button)
@@ -638,6 +645,34 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
                 self._footprint_scale_anchor = None
                 return True
             return super().eventFilter(watched, event)
+        if self._edit_mode == "align":
+            if (
+                event.type() == QEvent.Type.MouseButtonPress
+                and event.button() == Qt.MouseButton.LeftButton
+            ):
+                self._calibration_start = event.position().toPoint()
+                self._calibration_end = self._calibration_start
+                self._render()
+                return True
+            if event.type() == QEvent.Type.MouseMove and self._calibration_start:
+                self._calibration_end = event.position().toPoint()
+                self._render()
+                return True
+            if (
+                event.type() == QEvent.Type.MouseButtonRelease
+                and self._calibration_start
+            ):
+                self._calibration_end = event.position().toPoint()
+                start = self._calibration_start
+                end = self._calibration_end
+                self._calibration_start = None
+                self._calibration_end = None
+                if QLineF(start, end).length() >= 2:
+                    angle = math.degrees(math.atan2(end.y() - start.y(), end.x() - start.x()))
+                    self._set_angle(self._angle - angle)
+                self._set_edit_mode("calibration")
+                return True
+            return super().eventFilter(watched, event)
         if self._edit_mode == "calibration":
             if (
                 event.type() == QEvent.Type.MouseButtonPress
@@ -680,6 +715,7 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
             self._selection_start = position
             if not self._resize_edges:
                 self._selection = None
+                self._selection_source_ratio = None
                 self._rubber_band.hide()
                 self._buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(
                     False
@@ -779,11 +815,15 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         elif mode == "footprint":
             self._calibration_method = "footprint"
             self._millimeters.setEnabled(False)
+        elif mode == "align":
+            self._millimeters.setEnabled(False)
         self._calibration_button.setChecked(mode == "calibration")
+        self._align_button.setChecked(mode == "align")
         self._footprint_button.setChecked(mode == "footprint")
         self._crop_button.setChecked(mode == "crop")
         hints = {
             "calibration": "Scale line: draw from point to point.",
+            "align": "Draw a line to rotate it horizontal.",
             "footprint": "Scale footprint: drag to position or resize.",
             "crop": "Use Shift to draw border",
         }
@@ -808,6 +848,7 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         self._set_edit_mode("footprint")
         self._update_confirm_state()
         self._selection = None
+        self._selection_source_ratio = None
         self._rubber_band.hide()
         self._render(preserve_selection=False)
 
@@ -915,6 +956,7 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
             )
         self._update_confirm_state()
         self._selection = None
+        self._selection_source_ratio = None
         self._rubber_band.hide()
         self._render(preserve_selection=False)
         if selection_ratio is not None:
@@ -1068,6 +1110,8 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
 
     def _selection_ratio(self) -> tuple[float, float, float, float] | None:
         """Return selection bounds as ratios of the source image."""
+        if self._selection_source_ratio is not None:
+            return self._selection_source_ratio
         if self._selection is None:
             return None
         source = self._source_rect(self._selection)
@@ -1093,11 +1137,20 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
             round(selection_ratio[3] * height * self._display_scale),
         ).intersected(self._canvas.rect())
         if selection.width() >= 2 and selection.height() >= 2:
-            self._update_selection(selection)
+            self._update_selection(selection, store_source=False)
 
-    def _update_selection(self, selection: QRect) -> None:
+    def _update_selection(self, selection: QRect, store_source: bool = True) -> None:
         """Apply selection geometry and update validation state."""
         self._selection = selection
+        if store_source:
+            source = self._source_rect(selection)
+            width, height = self._source.width(), self._source.height()
+            self._selection_source_ratio = (
+                source.x() / width,
+                source.y() / height,
+                source.width() / width,
+                source.height() / height,
+            )
         self._rubber_band.setGeometry(self._canvas.rect())
         self._rubber_band.set_selection(self._selection)
         self._rubber_band.show()
