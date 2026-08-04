@@ -13,7 +13,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PySide6.QtCore import QPoint, QPointF, QSettings, Qt
-from PySide6.QtGui import QColor, QImage, QPixmap, QValidator, QWheelEvent
+from PySide6.QtGui import QColor, QImage, QPainter, QPixmap, QValidator, QWheelEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
     QApplication,
@@ -28,6 +28,7 @@ from tnasrevner.gui import (
     ImageEditDialog,
     ImageView,
     MainWindow,
+    SchematicCanvas,
 )
 from tnasrevner.kicad import CacheResult, FootprintReference, parse_footprint
 from tnasrevner.project import (
@@ -646,6 +647,61 @@ def test_footprint_picker_pins_recent_choices_and_shows_preview(
     preview = dialog._preview.pixmap()
     assert preview is not None and not preview.isNull()
     dialog.close()
+
+
+def test_footprint_picker_pad_filter_works_without_index_and_keeps_search(
+    app: QApplication, tmp_path: Path
+) -> None:
+    """Pad filtering falls back to footprint parsing and preserves search."""
+    first_path = tmp_path / "R_0402.kicad_mod"
+    second_path = tmp_path / "R_0603.kicad_mod"
+    first_path.write_bytes(FOOTPRINT)
+    second_path.write_bytes(
+        FOOTPRINT.replace(
+            b'(pad "2" smd rect (at 0.8 0) (size 1 1) (layers "F.Cu"))',
+            b'(pad "2" smd rect (at 0.8 0) (size 1 1) (layers "F.Cu"))\n'
+            b'  (pad "3" smd rect (at 1.8 0) (size 1 1) (layers "F.Cu"))',
+        )
+    )
+    first = FootprintReference("Resistor_SMD", "R_0402", first_path)
+    second = FootprintReference("Resistor_SMD", "R_0603", second_path)
+
+    dialog = FootprintPickerDialog((first, second))
+    dialog._search.setText("0603")
+    dialog._pad_count.setValue(3)
+    app.processEvents()
+
+    assert dialog._list.count() == 1
+    assert dialog.selected_reference() == second
+    dialog.close()
+
+
+def test_schematic_renders_all_symbol_families_with_schemdraw(
+    app: QApplication,
+) -> None:
+    """Every schematic symbol family renders through Schemdraw anchors."""
+    canvas = SchematicCanvas()
+    image = QImage(500, 500, QImage.Format.Format_ARGB32)
+    image.fill(0x20242B)
+    pins = [ComponentPin(str(index), str(index)) for index in range(1, 9)]
+    for kind, count in (
+        ("resistor", 2),
+        ("capacitor", 2),
+        ("diode", 2),
+        ("led", 2),
+        ("battery", 2),
+        ("switch", 2),
+        ("connector", 4),
+        ("transistor", 3),
+        ("uc", 8),
+        ("pad", 1),
+    ):
+        painter = QPainter(image)
+        endpoints = canvas._draw_schemdraw_symbol(painter, kind, pins[:count])
+        painter.end()
+        assert len(endpoints) == count
+    canvas.set_zoom(100)
+    assert canvas._zoom == 100
 
 
 def test_recent_footprints_persist_newest_five(

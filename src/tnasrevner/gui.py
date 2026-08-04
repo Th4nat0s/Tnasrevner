@@ -26,6 +26,7 @@ from uuid import uuid4
 
 from PySide6.QtCore import (
     QBuffer,
+    QByteArray,
     QEvent,
     QIODevice,
     QLineF,
@@ -55,6 +56,7 @@ from PySide6.QtGui import (
     QPixmap,
     QTransform,
 )
+from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -63,6 +65,7 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QComboBox,
     QFileDialog,
+    QFrame,
     QFormLayout,
     QHeaderView,
     QHBoxLayout,
@@ -695,7 +698,9 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
                 self._calibration_start = None
                 self._calibration_end = None
                 if QLineF(start, end).length() >= 2:
-                    angle = math.degrees(math.atan2(end.y() - start.y(), end.x() - start.x()))
+                    angle = math.degrees(
+                        math.atan2(end.y() - start.y(), end.x() - start.x())
+                    )
                     self._set_angle(self._angle - angle)
                 self._set_edit_mode("calibration")
                 return True
@@ -1312,7 +1317,9 @@ class FootprintPickerDialog(QDialog):  # pylint: disable=R0902,R0903
         layout.addLayout(pad_filter)
         layout.addWidget(self._buttons)
         self._search.textChanged.connect(self._refresh_results)
-        self._pad_count.valueChanged.connect(lambda _value: self._refresh_results())
+        self._pad_count.valueChanged.connect(
+            lambda _value: self._refresh_results(self._search.text())
+        )
         minus_button.clicked.connect(self._decrease_pad_filter)
         plus_button.clicked.connect(self._increase_pad_filter)
         self._list.currentRowChanged.connect(self._selection_changed)
@@ -1372,6 +1379,22 @@ class FootprintPickerDialog(QDialog):  # pylint: disable=R0902,R0903
         """Increase the exact pad-count filter."""
         self._pad_count.setValue(self._pad_count.value() + 1)
 
+    def _reference_pad_count(self, reference: FootprintReference) -> int | None:
+        """Return indexed pad count, falling back to parsing one footprint."""
+        indexed = self._pad_counts.get(reference.identifier)
+        if indexed is not None:
+            return indexed if indexed >= 0 else None
+        try:
+            footprint = self._preview_cache.get(reference.identifier)
+            if footprint is None:
+                footprint = parse_footprint(
+                    reference.path.read_bytes(), reference.library
+                )
+                self._preview_cache[reference.identifier] = footprint
+        except (OSError, KiCadFormatError):
+            return None
+        return len(footprint.pads)
+
     def _refresh_results(self, query: str = "") -> None:
         """Refresh search results and apply the optional exact pad filter."""
         words = query.casefold().split()
@@ -1384,7 +1407,7 @@ class FootprintPickerDialog(QDialog):  # pylint: disable=R0902,R0903
         if pad_count:
             filtered: list[FootprintReference] = []
             for reference in matches:
-                if self._pad_counts.get(reference.identifier) == pad_count:
+                if self._reference_pad_count(reference) == pad_count:
                     filtered.append(reference)
             matches = filtered
         matches_by_identifier = {
@@ -2445,7 +2468,13 @@ class ImageView(
 
 
 class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
-    """Paint an electrical schematic using simple IEC-style symbols."""
+    """Paint a borderless, zoomable electrical schematic."""
+
+    # Large enough to feel unbounded, small enough for Qt scroll/layout math.
+    _WORLD_SIZE = 20_000.0
+    MIN_ZOOM = 0.05
+    MAX_ZOOM = 100.0
+    _SCHEMDRAW_UNIT_TO_SVG = 36.0
 
     layout_changed = Signal(str, float, float)
     net_connection_requested = Signal(object, object)
@@ -2460,9 +2489,11 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._project: ProjectDocument | None = None
+        self._project_dirty = False
         self._zoom = 1.0
         self._logical_width = 1400
         self._logical_height = 1100
+        self._auto_centers: dict[str, QPointF] = {}
         self._device_centers: dict[str, QPointF] = {}
         self._drag_device_id: str | None = None
         self._drag_offset = QPointF()
@@ -2481,8 +2512,23 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
     def set_project(self, project: ProjectDocument | None) -> None:
         """Replace the displayed project and repaint the schematic."""
         self._project = project
+        self._project_dirty = True
+        if not self.isVisible():
+            return
+        self._refresh_project()
+
+    def _refresh_project(self) -> None:
+        """Apply pending project data only while canvas is visible."""
+        self._auto_centers = self._layout_devices()
         self._resize_for_project()
+        self._project_dirty = False
         self.update()
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        """Materialize deferred schematic rendering when its tab is opened."""
+        super().showEvent(event)
+        if self._project_dirty:
+            self._refresh_project()
 
     def set_selected_net(self, net: str | None) -> None:
         """Highlight one selected electrical connection."""
@@ -2497,36 +2543,9 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
             self.unsetCursor()
 
     def _resize_for_project(self) -> None:
-        """Grow the logical sheet so every auto-placed symbol remains visible."""
-        devices = self._project.devices if self._project else []
-        independent_pads = (
-            [pad for pad in self._project.pads if not pad.device_id]
-            if self._project
-            else []
-        )
-        device_rows = max(1, math.ceil(len(devices) / 3))
-        pad_rows = math.ceil(len(independent_pads) / 6)
-        net_count = len(
-            {pin.net_id for device in devices for pin in device.pins if pin.net_id}
-            | {pad.net for pad in independent_pads if pad.net}
-        )
-        auto_height = 220 + (device_rows - 1) * 280 + 240 + pad_rows * 44
-        saved_bottom = max(
-            (
-                (device.schematic_y or 0) + self._symbol_size(device)[1] / 2 + 120
-                for device in devices
-            ),
-            default=0,
-        )
-        saved_right = max(
-            (
-                (device.schematic_x or 0) + self._symbol_size(device)[0] / 2 + 120
-                for device in devices
-            ),
-            default=0,
-        )
-        self._logical_width = max(1200, 1080 + net_count * 60, int(saved_right))
-        self._logical_height = max(900, int(auto_height), int(saved_bottom))
+        """Keep a large borderless world around compactly placed content."""
+        self._logical_width = round(self._WORLD_SIZE)
+        self._logical_height = round(self._WORLD_SIZE)
         self.resize(
             round(self._logical_width * self._zoom),
             round(self._logical_height * self._zoom),
@@ -2534,7 +2553,7 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
 
     def set_zoom(self, zoom: float) -> None:
         """Resize the canvas while keeping its schematic geometry vector-based."""
-        self._zoom = max(0.5, min(4.0, zoom))
+        self._zoom = max(self.MIN_ZOOM, min(self.MAX_ZOOM, zoom))
         self.resize(
             round(self._logical_width * self._zoom),
             round(self._logical_height * self._zoom),
@@ -2543,28 +2562,174 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
 
     def fit_overview(self) -> None:
         """Fit the complete schematic sheet and center it in the viewport."""
-        viewport = self.viewport().size()
-        width_ratio = viewport.width() / max(1, self._logical_width)
-        height_ratio = viewport.height() / max(1, self._logical_height)
-        self.set_zoom(max(0.5, min(1.0, width_ratio, height_ratio)))
-        self.horizontalScrollBar().setValue(
-            (
-                self.horizontalScrollBar().maximum()
-                + self.horizontalScrollBar().minimum()
+        parent = self.parentWidget()
+        viewport = parent.size() if parent is not None else self.size()
+        bounds = self._content_bounds()
+        width_ratio = viewport.width() / max(1.0, bounds.width())
+        height_ratio = viewport.height() / max(1.0, bounds.height())
+        self.set_zoom(
+            max(self.MIN_ZOOM, min(self.MAX_ZOOM, width_ratio, height_ratio) * 0.82)
+        )
+        scroll_area = parent
+        while scroll_area is not None and not hasattr(
+            scroll_area, "horizontalScrollBar"
+        ):
+            scroll_area = scroll_area.parentWidget()
+        if scroll_area is not None:
+            scroll_area.horizontalScrollBar().setValue(
+                round((bounds.center().x() * self._zoom) - viewport.width() / 2)
             )
-            // 2
-        )
-        self.verticalScrollBar().setValue(
-            (self.verticalScrollBar().maximum() + self.verticalScrollBar().minimum())
-            // 2
-        )
+            scroll_area.verticalScrollBar().setValue(
+                round((bounds.center().y() * self._zoom) - viewport.height() / 2)
+            )
 
     def _center_for_device(self, device: Device, index: int) -> QPointF:
         """Return persisted schematic position or a stable automatic position."""
         if device.schematic_x is not None and device.schematic_y is not None:
             return QPointF(device.schematic_x, device.schematic_y)
-        columns = 3
-        return QPointF(220 + (index % columns) * 300, 180 + (index // columns) * 280)
+        del index
+        return self._auto_centers.get(
+            device.device_id,
+            QPointF(self._WORLD_SIZE / 2, self._WORLD_SIZE / 2),
+        )
+
+    def _content_bounds(self) -> QRectF:
+        """Return tight bounds around current symbols and independent pads."""
+        if self._project is None:
+            return QRectF(
+                self._WORLD_SIZE / 2 - 240,
+                self._WORLD_SIZE / 2 - 160,
+                480,
+                320,
+            )
+        bounds: QRectF | None = None
+        for index, device in enumerate(self._project.devices):
+            center = self._center_for_device(device, index)
+            item = self._device_bounds(device, center)
+            bounds = item if bounds is None else bounds.united(item)
+        independent_pads = [pad for pad in self._project.pads if not pad.device_id]
+        for index, _pad in enumerate(independent_pads):
+            point = self._independent_pad_center(index, len(independent_pads))
+            item = QRectF(point.x() - 30, point.y() - 30, 60, 60)
+            bounds = item if bounds is None else bounds.united(item)
+        if bounds is None:
+            center = QPointF(self._WORLD_SIZE / 2, self._WORLD_SIZE / 2)
+            return QRectF(center.x() - 240, center.y() - 160, 480, 320)
+        return bounds.adjusted(-80, -80, 80, 80)
+
+    def _independent_pad_center(self, index: int, count: int) -> QPointF:
+        """Return compact position for one independent schematic terminal."""
+        bounds = self._content_bounds_without_pads()
+        columns = max(1, min(6, count))
+        return QPointF(
+            bounds.center().x() + (index % columns - (columns - 1) / 2) * 150,
+            bounds.bottom() + 120 + (index // columns) * 70,
+        )
+
+    def _content_bounds_without_pads(self) -> QRectF:
+        """Return bounds around devices only, with a centered empty fallback."""
+        if self._project is None or not self._project.devices:
+            return QRectF(
+                self._WORLD_SIZE / 2 - 240,
+                self._WORLD_SIZE / 2 - 160,
+                480,
+                320,
+            )
+        bounds: QRectF | None = None
+        for index, device in enumerate(self._project.devices):
+            center = self._center_for_device(device, index)
+            item = self._device_bounds(device, center)
+            bounds = item if bounds is None else bounds.united(item)
+        return bounds or QRectF(
+            self._WORLD_SIZE / 2 - 240,
+            self._WORLD_SIZE / 2 - 160,
+            480,
+            320,
+        )
+
+    def _layout_devices(self) -> dict[str, QPointF]:
+        """Place new symbols with a compact deterministic force-directed layout."""
+        if self._project is None:
+            return {}
+        devices = list(self._project.devices)
+        movable = [
+            device
+            for device in devices
+            if device.schematic_x is None or device.schematic_y is None
+        ]
+        if not movable:
+            return {}
+        locked = {
+            device.device_id: QPointF(device.schematic_x, device.schematic_y)
+            for device in devices
+            if device.schematic_x is not None and device.schematic_y is not None
+        }
+        origin = QPointF(self._WORLD_SIZE / 2, self._WORLD_SIZE / 2)
+        if locked:
+            origin = QPointF(
+                sum(point.x() for point in locked.values()) / len(locked),
+                sum(point.y() for point in locked.values()) / len(locked),
+            )
+        positions: dict[str, QPointF] = dict(locked)
+        for index, device in enumerate(movable):
+            positions[device.device_id] = origin + QPointF(
+                (index % 4 - 1.5) * 240,
+                (index // 4 - (len(movable) - 1) / 8) * 190,
+            )
+        edges = self._layout_edges(devices)
+        for _iteration in range(90):
+            forces = {device.device_id: QPointF() for device in movable}
+            for left_index, left in enumerate(devices):
+                for right in devices[left_index + 1 :]:
+                    delta = positions[right.device_id] - positions[left.device_id]
+                    distance = max(1.0, math.hypot(delta.x(), delta.y()))
+                    minimum = (
+                        max(self._symbol_size(left)) / 2
+                        + max(self._symbol_size(right)) / 2
+                        + 55
+                    )
+                    repulsion = max(0.0, minimum - distance) * 0.11
+                    vector = QPointF(delta.x() / distance, delta.y() / distance)
+                    if left.device_id in forces:
+                        forces[left.device_id] -= vector * repulsion
+                    if right.device_id in forces:
+                        forces[right.device_id] += vector * repulsion
+            for left_id, right_id in edges:
+                delta = positions[right_id] - positions[left_id]
+                distance = max(1.0, math.hypot(delta.x(), delta.y()))
+                vector = QPointF(delta.x() / distance, delta.y() / distance)
+                attraction = (distance - 230) * 0.018
+                if left_id in forces:
+                    forces[left_id] += vector * attraction
+                if right_id in forces:
+                    forces[right_id] -= vector * attraction
+            for device in movable:
+                point = positions[device.device_id]
+                force = forces[device.device_id]
+                positions[device.device_id] = QPointF(
+                    max(500, min(self._WORLD_SIZE - 500, point.x() + force.x())),
+                    max(500, min(self._WORLD_SIZE - 500, point.y() + force.y())),
+                )
+        return {
+            device_id: point
+            for device_id, point in positions.items()
+            if device_id not in locked
+        }
+
+    def _layout_edges(self, devices: list[Device]) -> set[tuple[str, str]]:
+        """Build pairwise graph edges from shared logical nets."""
+        by_net: dict[str, list[str]] = {}
+        for device in devices:
+            for pin in device.pins:
+                if pin.net_id:
+                    by_net.setdefault(pin.net_id, []).append(device.device_id)
+        edges: set[tuple[str, str]] = set()
+        for members in by_net.values():
+            unique = sorted(set(members))
+            for index, left in enumerate(unique):
+                for right in unique[index + 1 :]:
+                    edges.add((left, right))
+        return edges
 
     @classmethod
     def _symbol_size(cls, device: Device) -> tuple[float, float]:
@@ -2572,7 +2737,7 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
         if cls._symbol_kind(device) == "uc":
             pins = max(1, len(device.pins))
             side_pins = max(1, math.ceil(pins / 4))
-            side = max(120.0, side_pins * 22.0 + 30.0)
+            side = max(160.0, side_pins * 36.0 + 56.0)
             return side, side
         if cls._symbol_kind(device) == "connector":
             return 150.0, max(100.0, len(device.pins) * 20.0 + 30.0)
@@ -2594,96 +2759,12 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
         )
 
     @staticmethod
-    def _uc_endpoints(center: QPointF, pin_count: int, side: float) -> list[QPointF]:
-        """Place UC pins on all four square edges, never inside the body."""
-        side_pins = max(1, math.ceil(pin_count / 4))
-        points: list[QPointF] = []
-        half = side / 2
-        for index in range(pin_count):
-            edge = index // side_pins
-            offset = (index % side_pins + 1) / (side_pins + 1) * side - half
-            if edge == 0:
-                points.append(QPointF(center.x() - half, center.y() + offset))
-            elif edge == 1:
-                points.append(QPointF(center.x() + offset, center.y() - half))
-            elif edge == 2:
-                points.append(QPointF(center.x() + half, center.y() - offset))
-            else:
-                points.append(QPointF(center.x() - offset, center.y() + half))
-        return points
-
-    @staticmethod
-    def _pin_label(pin: ComponentPin) -> str:
-        """Return a compact pin number/name suitable for schematic symbols."""
-        semantic = ""
-        if pin.function and pin.function != f"Pin {pin.number}":
-            semantic = pin.function
-        elif pin.pin_id != pin.number:
-            semantic = pin.pin_id
-        return f"{pin.number} {semantic}".strip()
-
-    @staticmethod
     def _pin_annotation(device: Device, pin: ComponentPin) -> tuple[str, str]:
         """Return the complete pin reference and optional function line."""
         function = pin.function.strip()
         if function == f"Pin {pin.number}":
             function = ""
         return f"{device.reference}.{pin.number}", f"- {function}" if function else ""
-
-    def _draw_uc_pins(
-        self,
-        painter: QPainter,
-        device: Device,
-        pins: list[ComponentPin],
-        side: float,
-    ) -> list[QPointF]:
-        """Draw UC pin names inside and terminal wires outside the square."""
-        half = side / 2
-        edge_points = self._uc_endpoints(QPointF(0, 0), len(pins), side)
-        endpoints: list[QPointF] = []
-        metrics = painter.fontMetrics()
-        for pin, edge in zip(pins, edge_points, strict=True):
-            reference, function = self._pin_annotation(device, pin)
-            if math.isclose(edge.x(), -half):
-                outward = QPointF(-1, 0)
-                painter.drawText(int(-half + 7), int(edge.y() - 3), reference)
-                if function:
-                    painter.drawText(int(-half + 7), int(edge.y() + 12), function)
-            elif math.isclose(edge.x(), half):
-                outward = QPointF(1, 0)
-                painter.drawText(
-                    int(half - metrics.horizontalAdvance(reference) - 7),
-                    int(edge.y() - 3),
-                    reference,
-                )
-                if function:
-                    painter.drawText(
-                        int(half - metrics.horizontalAdvance(function) - 7),
-                        int(edge.y() + 12),
-                        function,
-                    )
-            elif math.isclose(edge.y(), -half):
-                outward = QPointF(0, -1)
-                painter.save()
-                painter.translate(edge.x() + 5, -half + 7)
-                painter.rotate(90)
-                painter.drawText(0, 0, reference)
-                if function:
-                    painter.drawText(0, 15, function)
-                painter.restore()
-            else:
-                outward = QPointF(0, 1)
-                painter.save()
-                painter.translate(edge.x() - 5, half - 7)
-                painter.rotate(-90)
-                painter.drawText(0, 0, reference)
-                if function:
-                    painter.drawText(0, 15, function)
-                painter.restore()
-            endpoint = edge + outward * 24
-            painter.drawLine(edge, endpoint)
-            endpoints.append(endpoint)
-        return endpoints
 
     def _device_at(self, point: QPointF) -> str | None:
         """Return the component under a logical canvas point."""
@@ -2832,7 +2913,12 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
             event.accept()
             return
         if self._drag_device_id is None or self._project is None:
+            if self._device_at(point) is not None:
+                self.setCursor(Qt.CursorShape.CrossCursor)
+            else:
+                self.unsetCursor()
             return
+        self.setCursor(Qt.CursorShape.CrossCursor)
         point = event.position() / self._zoom - self._drag_offset
         device = next(
             (
@@ -2916,94 +3002,99 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
         return "uc"
 
     @staticmethod
-    def _draw_resistor(painter: QPainter, center: QPointF) -> None:
-        """Draw a horizontal resistor symbol."""
-        x, y = center.x(), center.y()
-        painter.drawLine(QPointF(x - 58, y), QPointF(x - 34, y))
-        painter.drawLine(QPointF(x + 34, y), QPointF(x + 58, y))
-        points = [QPointF(x - 34, y)]
-        for offset, height in ((-24, -12), (-12, 12), (0, -12), (12, 12), (24, 0)):
-            points.append(QPointF(x + offset, y + height))
-        painter.drawPolyline(points)
+    def _schemdraw_symbol(kind: str, pins: list[ComponentPin]):
+        """Build one Schemdraw element and ordered anchor names."""
+        from schemdraw import elements as elm  # pylint: disable=import-outside-toplevel
 
-    @staticmethod
-    def _draw_capacitor(painter: QPainter, center: QPointF) -> None:
-        """Draw a horizontal capacitor symbol."""
-        x, y = center.x(), center.y()
-        painter.drawLine(QPointF(x - 58, y), QPointF(x - 8, y))
-        painter.drawLine(QPointF(x + 8, y), QPointF(x + 58, y))
-        painter.drawLine(QPointF(x - 8, y - 22), QPointF(x - 8, y + 22))
-        painter.drawLine(QPointF(x + 8, y - 22), QPointF(x + 8, y + 22))
+        if kind == "resistor":
+            return elm.Resistor(), ("start", "end")
+        if kind == "capacitor":
+            return elm.Capacitor(), ("start", "end")
+        if kind == "diode":
+            return elm.Diode(), ("start", "end")
+        if kind == "led":
+            return elm.LED(), ("start", "end")
+        if kind == "battery":
+            return elm.Battery(), ("start", "end")
+        if kind == "switch":
+            return elm.Switch(), ("start", "end")
+        if kind == "transistor":
+            return elm.BjtNpn(), ("base", "collector", "emitter")
+        if kind == "pad":
+            return elm.Terminal(), ("end",)
+        if kind == "connector":
+            names = [pin.number for pin in pins]
+            return elm.Header(rows=max(1, len(names)), pinsright=names), tuple(
+                f"pin{index + 1}" for index in range(len(names))
+            )
+        side_pins = max(1, math.ceil(len(pins) / 4))
+        sides = ("left", "top", "right", "bottom")
+        schematic_pins = []
+        for index, pin in enumerate(pins):
+            side = sides[min(index // side_pins, len(sides) - 1)]
+            schematic_pins.append(
+                elm.IcPin(
+                    name=None,
+                    pin=pin.number,
+                    side=side,
+                    anchorname=f"tnasrevner_pin_{index}",
+                )
+            )
+        return elm.Ic(
+            pins=schematic_pins,
+            edgepadW=0.65,
+            edgepadH=0.65,
+            pinspacing=1,
+        ), tuple(f"tnasrevner_pin_{index}" for index in range(len(pins)))
 
-    @staticmethod
-    def _draw_diode(painter: QPainter, center: QPointF, led: bool = False) -> None:
-        """Draw a diode or LED symbol."""
-        x, y = center.x(), center.y()
-        painter.drawLine(QPointF(x - 58, y), QPointF(x - 18, y))
-        painter.drawLine(QPointF(x + 18, y), QPointF(x + 58, y))
-        painter.drawPolygon(
-            [QPointF(x - 18, y - 22), QPointF(x - 18, y + 22), QPointF(x + 18, y)]
-        )
-        painter.drawLine(QPointF(x + 18, y - 24), QPointF(x + 18, y + 24))
-        if led:
-            painter.drawLine(QPointF(x - 4, y - 28), QPointF(x + 8, y - 40))
-            painter.drawLine(QPointF(x + 8, y - 40), QPointF(x + 5, y - 32))
-            painter.drawLine(QPointF(x + 12, y - 24), QPointF(x + 24, y - 36))
-            painter.drawLine(QPointF(x + 24, y - 36), QPointF(x + 21, y - 28))
-
-    @staticmethod
-    def _draw_battery(painter: QPainter, center: QPointF) -> None:
-        """Draw a two-cell battery symbol."""
-        x, y = center.x(), center.y()
-        painter.drawLine(QPointF(x - 58, y), QPointF(x - 18, y))
-        painter.drawLine(QPointF(x + 18, y), QPointF(x + 58, y))
-        painter.drawLine(QPointF(x - 12, y - 28), QPointF(x - 12, y + 28))
-        painter.drawLine(QPointF(x - 2, y - 16), QPointF(x - 2, y + 16))
-        painter.drawLine(QPointF(x + 2, y - 16), QPointF(x + 2, y + 16))
-        painter.drawLine(QPointF(x + 12, y - 28), QPointF(x + 12, y + 28))
-        painter.drawText(int(x - 8), int(y - 34), "+")
-
-    @staticmethod
-    def _draw_switch(painter: QPainter, center: QPointF) -> None:
-        """Draw an open switch symbol."""
-        x, y = center.x(), center.y()
-        painter.drawLine(QPointF(x - 58, y), QPointF(x - 30, y))
-        painter.drawLine(QPointF(x + 30, y), QPointF(x + 58, y))
-        painter.drawEllipse(QPointF(x - 30, y - 3), 3, 3)
-        painter.drawEllipse(QPointF(x + 30, y - 3), 3, 3)
-        painter.drawLine(QPointF(x - 30, y), QPointF(x + 20, y - 24))
-
-    @staticmethod
-    def _draw_connector(
-        painter: QPainter, center: QPointF, pin_count: int
+    @classmethod
+    def _draw_schemdraw_symbol(
+        cls, painter: QPainter, kind: str, pins: list[ComponentPin]
     ) -> list[QPointF]:
-        """Draw a connector block with one-sided numbered pins."""
-        x, y = center.x(), center.y()
-        height = max(54, pin_count * 20 + 18)
-        box = QRectF(x - 42, y - height / 2, 84, height)
-        painter.drawRect(box)
-        painter.drawText(box, Qt.AlignmentFlag.AlignCenter, "CNX")
-        endpoints = []
-        for index in range(pin_count):
-            pin_y = y + (index - (pin_count - 1) / 2) * 20
-            painter.drawLine(QPointF(x + 42, pin_y), QPointF(x + 68, pin_y))
-            endpoints.append(QPointF(x + 68, pin_y))
-        return endpoints
+        """Render one Schemdraw symbol and return its terminal endpoints."""
+        from schemdraw import Drawing  # pylint: disable=import-outside-toplevel
 
-    @staticmethod
-    def _draw_transistor(painter: QPainter, center: QPointF) -> list[QPointF]:
-        """Draw a compact BJT-style transistor symbol with three terminals."""
-        x, y = center.x(), center.y()
-        painter.drawEllipse(center, 30, 30)
-        painter.drawLine(QPointF(x - 58, y), QPointF(x - 20, y))
-        painter.drawLine(QPointF(x + 5, y - 20), QPointF(x + 58, y - 48))
-        painter.drawLine(QPointF(x + 5, y + 20), QPointF(x + 58, y + 48))
-        painter.drawLine(QPointF(x - 4, y - 20), QPointF(x - 4, y + 20))
-        return [
-            QPointF(x - 58, y),
-            QPointF(x + 58, y - 48),
-            QPointF(x + 58, y + 48),
-        ]
+        element, anchor_names = cls._schemdraw_symbol(kind, pins)
+        drawing = Drawing(show=False, fontsize=10)
+        drawing.add(element)
+        svg = drawing.get_imagedata("svg").replace(b"black", b"#e7edf5")
+        renderer = QSvgRenderer(QByteArray(svg))
+        viewbox = renderer.viewBoxF()
+        center_anchor = element.anchors.get("center")
+        if center_anchor is None:
+            bbox = element.get_bbox()
+            center_anchor = (
+                (bbox.xmin + bbox.xmax) / 2,
+                (bbox.ymin + bbox.ymax) / 2,
+            )
+
+        def svg_coordinates(anchor) -> QPointF:
+            anchor_x = anchor.x if hasattr(anchor, "x") else anchor[0]
+            anchor_y = anchor.y if hasattr(anchor, "y") else anchor[1]
+            return QPointF(
+                anchor_x * cls._SCHEMDRAW_UNIT_TO_SVG,
+                -anchor_y * cls._SCHEMDRAW_UNIT_TO_SVG,
+            )
+
+        center_svg = svg_coordinates(center_anchor)
+        target = QRectF(
+            -(center_svg.x() - viewbox.left()) / viewbox.width() * viewbox.width(),
+            -(center_svg.y() - viewbox.top()) / viewbox.height() * viewbox.height(),
+            viewbox.width(),
+            viewbox.height(),
+        )
+        renderer.render(painter, target)
+
+        def map_anchor(anchor) -> QPointF:
+            svg_point = svg_coordinates(anchor)
+            return QPointF(
+                target.left()
+                + (svg_point.x() - viewbox.left()) / viewbox.width() * target.width(),
+                target.top()
+                + (svg_point.y() - viewbox.top()) / viewbox.height() * target.height(),
+            )
+
+        return [map_anchor(element.anchors[name]) for name in anchor_names]
 
     def _draw_device(
         self,
@@ -3020,47 +3111,7 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
         painter.save()
         painter.translate(center)
         painter.rotate(device.schematic_rotation)
-        origin = QPointF(0, 0)
-        if kind == "resistor":
-            self._draw_resistor(painter, origin)
-            endpoints = [
-                QPointF(-58, 0),
-                QPointF(58, 0),
-            ]
-        elif kind == "capacitor":
-            self._draw_capacitor(painter, origin)
-            endpoints = [
-                QPointF(-58, 0),
-                QPointF(58, 0),
-            ]
-        elif kind in {"diode", "led"}:
-            self._draw_diode(painter, origin, led=kind == "led")
-            endpoints = [
-                QPointF(-58, 0),
-                QPointF(58, 0),
-            ]
-        elif kind == "battery":
-            self._draw_battery(painter, origin)
-            endpoints = [
-                QPointF(-58, 0),
-                QPointF(58, 0),
-            ]
-        elif kind == "switch":
-            self._draw_switch(painter, origin)
-            endpoints = [
-                QPointF(-58, 0),
-                QPointF(58, 0),
-            ]
-        elif kind == "connector":
-            endpoints = self._draw_connector(painter, origin, len(pins))
-        elif kind == "transistor":
-            endpoints = self._draw_transistor(painter, origin)
-        else:
-            side = self._symbol_size(device)[0]
-            box = QRectF(-side / 2, -side / 2, side, side)
-            painter.drawRect(box)
-            painter.drawText(box, Qt.AlignmentFlag.AlignCenter, "UC")
-            endpoints = self._draw_uc_pins(painter, device, pins, side)
+        endpoints = self._draw_schemdraw_symbol(painter, kind, pins)
         transform = QTransform()
         transform.translate(center.x(), center.y())
         transform.rotate(device.schematic_rotation)
@@ -3079,39 +3130,40 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
             painter.setPen(QColor("#c5d2dd"))
             delta_x = endpoint.x() - center.x()
             delta_y = endpoint.y() - center.y()
-            if kind != "uc":
+            if kind == "uc":
+                reference = pin.number
+                function = pin.function.strip()
+                if function == f"Pin {pin.number}":
+                    function = ""
+            else:
                 reference, function = self._pin_annotation(device, pin)
-                if abs(delta_x) >= abs(delta_y):
-                    if delta_x < 0:
-                        text_x = endpoint.x() - 150
-                        alignment = Qt.AlignmentFlag.AlignRight
-                    else:
-                        text_x = endpoint.x() + 8
-                        alignment = Qt.AlignmentFlag.AlignLeft
-                    text_y = endpoint.y() - 17
-                    painter.drawText(
-                        QRectF(text_x, text_y, 142, 18), alignment, reference
-                    )
-                    if function:
-                        painter.drawText(
-                            QRectF(text_x, text_y + 15, 142, 18),
-                            alignment,
-                            function,
-                        )
+            if abs(delta_x) >= abs(delta_y):
+                if delta_x < 0:
+                    text_x = endpoint.x() - 150
+                    alignment = Qt.AlignmentFlag.AlignRight
                 else:
-                    text_x = endpoint.x() - 75
-                    text_y = endpoint.y() - (36 if delta_y < 0 else -8)
+                    text_x = endpoint.x() + 8
+                    alignment = Qt.AlignmentFlag.AlignLeft
+                text_y = endpoint.y() - 17
+                painter.drawText(QRectF(text_x, text_y, 142, 18), alignment, reference)
+                if function:
                     painter.drawText(
-                        QRectF(text_x, text_y, 150, 18),
-                        Qt.AlignmentFlag.AlignCenter,
-                        reference,
+                        QRectF(text_x, text_y + 15, 142, 18), alignment, function
                     )
-                    if function:
-                        painter.drawText(
-                            QRectF(text_x, text_y + 15, 150, 18),
-                            Qt.AlignmentFlag.AlignCenter,
-                            function,
-                        )
+            else:
+                text_x = endpoint.x() - 75
+                text_y = endpoint.y() - (36 if delta_y < 0 else -8)
+                painter.drawText(
+                    QRectF(text_x, text_y, 150, 18),
+                    Qt.AlignmentFlag.AlignCenter,
+                    reference,
+                )
+                if function:
+                    painter.drawText(
+                        QRectF(text_x, text_y + 15, 150, 18),
+                        Qt.AlignmentFlag.AlignCenter,
+                        function,
+                    )
             if pin.net_id:
                 if abs(delta_x) >= abs(delta_y):
                     outward = QPointF(-1 if delta_x < 0 else 1, 0)
@@ -3121,10 +3173,9 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
 
     def paintEvent(self, event) -> None:  # noqa: N802
         """Draw real component symbols, terminals, and net wires."""
-        del event
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.fillRect(self.rect(), QColor("#20242b"))
+        painter.fillRect(event.rect(), QColor("#20242b"))
         painter.scale(self._zoom, self._zoom)
         painter.setClipRect(QRectF(0, 0, self._logical_width, self._logical_height))
         if self._project is None:
@@ -3148,11 +3199,14 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
             {pin.net_id for device in devices for pin in device.pins if pin.net_id}
             | {pad.net for pad in pads if pad.net}
         )
-        painter.setPen(QColor("#e7edf5"))
-        painter.drawText(18, 28, "Schematic")
         if not devices and not pads:
             painter.setPen(QColor("#aeb7c4"))
-            painter.drawText(18, 62, "Place components or pads to build the schematic.")
+            center = QPointF(self._WORLD_SIZE / 2, self._WORLD_SIZE / 2)
+            painter.drawText(
+                QRectF(center.x() - 240, center.y() - 20, 480, 40),
+                Qt.AlignmentFlag.AlignCenter,
+                "Place components or pads to build the schematic.",
+            )
             return
 
         net_points: dict[str, list[tuple[QPointF, QPointF]]] = {}
@@ -3166,22 +3220,21 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
                 net_points,
             )
         independent_pads = [pad for pad in pads if not pad.device_id]
-        pad_start_y = 220 + math.ceil(len(devices) / 3) * 280
         for index, pad in enumerate(independent_pads):
-            pad_point = QPointF(
-                180 + (index % 6) * 190,
-                pad_start_y + (index // 6) * 54,
+            pad_point = self._independent_pad_center(index, len(independent_pads))
+            painter.save()
+            painter.translate(pad_point)
+            self._draw_schemdraw_symbol(
+                painter,
+                "pad",
+                [ComponentPin(pad.number or pad.name, pad.name)],
             )
-            painter.setPen(QPen(QColor("#e7edf5"), 2))
-            painter.drawRect(QRectF(pad_point.x() - 18, pad_point.y() - 10, 36, 20))
-            painter.drawText(int(pad_point.x() - 12), int(pad_point.y() - 16), pad.name)
-            self._terminal_hits.append(
-                (pad_point + QPointF(18, 0), ("pad", pad.pad_id, None))
-            )
+            painter.restore()
+            painter.setPen(QColor("#c5d2dd"))
+            painter.drawText(int(pad_point.x() + 12), int(pad_point.y() - 16), pad.name)
+            self._terminal_hits.append((pad_point, ("pad", pad.pad_id, None)))
             if pad.net:
-                net_points.setdefault(pad.net, []).append(
-                    (pad_point + QPointF(18, 0), QPointF(1, 0))
-                )
+                net_points.setdefault(pad.net, []).append((pad_point, QPointF(1, 0)))
         painter.setPen(QPen(QColor("#e4b363"), 2))
         painter.setBrush(QColor("#e4b363"))
         for name in net_names:
@@ -3264,6 +3317,7 @@ class SchematicView(QScrollArea):
         self._canvas.pan_requested.connect(self._pan_by)
         self.setWidget(self._canvas)
         self.setWidgetResizable(False)
+        self.setFrameShape(QFrame.Shape.NoFrame)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         self.setMinimumSize(520, 320)
@@ -3281,6 +3335,11 @@ class SchematicView(QScrollArea):
     def fit_overview(self) -> None:
         """Fit and center the complete schematic sheet."""
         self._canvas.fit_overview()
+
+    def actual_size(self) -> None:
+        """Display schematic at logical 1:1 scale."""
+        self._zoom = 1.0
+        self._canvas.set_zoom(self._zoom)
 
     def set_selected_net(self, net: str | None) -> None:
         """Highlight one selected net in the schematic canvas."""
@@ -3333,7 +3392,10 @@ class SchematicView(QScrollArea):
     def _zoom_by(self, factor: float, cursor: QPoint | None = None) -> None:
         """Apply one zoom step around the cursor or viewport center."""
         old_zoom = self._zoom
-        self._zoom = max(0.5, min(4.0, self._zoom * factor))
+        self._zoom = max(
+            SchematicCanvas.MIN_ZOOM,
+            min(SchematicCanvas.MAX_ZOOM, self._zoom * factor),
+        )
         if self._zoom == old_zoom:
             return
         cursor = cursor or QPoint(
@@ -3371,6 +3433,7 @@ class MainWindow(
         self._project_needs_save_as = False
         self._history: list[dict] = []
         self._history_index = -1
+        self._history_backup_dirty = True
         self._history_restoring = False
         self._syncing_views = False
         self._pending_pad: Pad | None = None
@@ -3464,6 +3527,7 @@ class MainWindow(
         )
         self._schematic_view.connection_mode_changed.connect(self._set_connection_mode)
         self._tabs.addTab(self._schematic_view, "Schematic")
+        self._tabs.currentChanged.connect(self._update_view_tools)
         for view in (*self._views.values(), *self._side_views.values()):
             view.view_changed.connect(lambda view=view: self._sync_board_views(view))
         for side, view in self._views.items():
@@ -3573,19 +3637,19 @@ class MainWindow(
             layout.addWidget(button)
             return button
 
-        add_button(
+        actual_button = add_button(
             "1:1",
             QStyle.StandardPixmap.SP_ComputerIcon,
             "1:1 Size",
             self._actual_size,
         )
-        add_button(
+        fit_button = add_button(
             "FIT",
             QStyle.StandardPixmap.SP_DesktopIcon,
             "Fit",
             self._fit_images,
         )
-        add_button(
+        rotate_button = add_button(
             "Rotate 90°",
             QStyle.StandardPixmap.SP_BrowserReload,
             "Rotate Board",
@@ -3707,6 +3771,28 @@ class MainWindow(
         dock.setWidget(panel)
         self._tools_dock = dock
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
+        self._view_tool_buttons = (
+            rotate_button,
+            center_button,
+            ruler_button,
+            show_pads_button,
+            device_button,
+            pad_button,
+            delete_button,
+        )
+        self._actual_button = actual_button
+        self._fit_button = fit_button
+        self._update_view_tools(self._tabs.currentIndex())
+
+    def _update_view_tools(self, tab_index: int) -> None:
+        """Enable only controls meaningful for active board or schematic view."""
+        schematic = tab_index == 6
+        for button in getattr(self, "_view_tool_buttons", ()):
+            button.setEnabled(not schematic)
+        if hasattr(self, "_actual_button"):
+            self._actual_button.setEnabled(True)
+        if hasattr(self, "_fit_button"):
+            self._fit_button.setEnabled(True)
 
     def _rotate_board_90(self) -> None:
         """Rotate both board images and all placed geometry by 90 degrees."""
@@ -3979,6 +4065,8 @@ class MainWindow(
 
     def _active_views(self) -> list[ImageView]:
         """Return image views belonging to current tab."""
+        if self._tabs.currentIndex() == 6:
+            return []
         if self._tabs.currentIndex() == 0:
             return [self._views["top"]]
         if self._tabs.currentIndex() == 1:
@@ -4002,11 +4090,17 @@ class MainWindow(
 
     def _actual_size(self) -> None:
         """Set active image view(s) to 1:1 scale."""
+        if self._tabs.currentIndex() == 6:
+            self._schematic_view.actual_size()
+            return
         for view in self._active_views():
             view.actual_size()
 
     def _fit_images(self) -> None:
         """Fit active image view(s) to their available space."""
+        if self._tabs.currentIndex() == 6:
+            self._schematic_view.fit_overview()
+            return
         for view in self._active_views():
             view.fit_image()
 
@@ -5339,6 +5433,7 @@ class MainWindow(
         self._history.append(snapshot)
         self._history = self._history[-50:]
         self._history_index = len(self._history) - 1
+        self._history_backup_dirty = True
         self._update_history_buttons()
 
     def _reset_history(self) -> None:
@@ -5358,7 +5453,7 @@ class MainWindow(
 
     def _write_history_backup(self) -> None:
         """Embed the undo journal in the project asset backup."""
-        if not self.store or not self._history:
+        if not self.store or not self._history or not self._history_backup_dirty:
             return
         payload = {
             "version": 1,
@@ -5369,11 +5464,13 @@ class MainWindow(
             "assets/.undo-history.json",
             json.dumps(payload, separators=(",", ":")).encode("utf-8"),
         )
+        self._history_backup_dirty = False
 
     def _load_history_backup(self) -> None:
         """Restore the undo journal embedded in a project archive."""
         self._history = []
         self._history_index = -1
+        self._history_backup_dirty = False
         if not self.store:
             return
         try:
@@ -5397,6 +5494,8 @@ class MainWindow(
             pass
         if not self._history:
             self._record_history()
+        else:
+            self._history_backup_dirty = False
         self._update_history_buttons()
 
     def _restore_history_state(self, snapshot: dict) -> None:
@@ -5448,6 +5547,7 @@ class MainWindow(
             return
         view_state = self._capture_history_view_state()
         self._history_index -= 1
+        self._history_backup_dirty = True
         self._restore_history_state(self._history[self._history_index])
         self._restore_history_view_state(view_state)
         self.statusBar().showMessage("Undo", 1500)
@@ -5458,6 +5558,7 @@ class MainWindow(
             return
         view_state = self._capture_history_view_state()
         self._history_index += 1
+        self._history_backup_dirty = True
         self._restore_history_state(self._history[self._history_index])
         self._restore_history_view_state(view_state)
         self.statusBar().showMessage("Redo", 1500)
@@ -5646,19 +5747,38 @@ class MainWindow(
             "bom",
             "schematic",
         )[self._tabs.currentIndex()]
-        display_view = self._active_views()[0]
-        (
-            self.project.display.zoom,
-            self.project.display.pan_x,
-            self.project.display.pan_y,
-        ) = display_view.view_state()
+        if self._tabs.currentIndex() == 6:
+            zoom, pan_x, pan_y = self._schematic_view.view_state()
+        else:
+            display_view = self._active_views()[0]
+            zoom, pan_x, pan_y = display_view.view_state()
+        self.project.display.zoom = zoom
+        self.project.display.pan_x = pan_x
+        self.project.display.pan_y = pan_y
+        progress = QProgressDialog("Saving project…", "", 0, 1, self)
+        progress.setWindowTitle("Save project")
+        progress.setCancelButton(None)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.show()
+        QApplication.processEvents()
+
+        def report(label: str, current: int, total: int) -> None:
+            progress.setLabelText(label)
+            progress.setRange(0, max(1, total))
+            progress.setValue(current)
+            QApplication.processEvents()
+
         try:
-            self._record_history()
+            report("Preparing save", 0, 1)
             self._write_history_backup()
-            self.store.save(self.project)
+            self.store.save(self.project, progress=report)
         except (OSError, ProjectFormatError) as error:
             QMessageBox.critical(self, "Save failed", str(error))
             return False
+        finally:
+            progress.close()
+            progress.deleteLater()
         self._dirty = False
         self._update_title()
         return True

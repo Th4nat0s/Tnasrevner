@@ -4,12 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
+from collections.abc import Callable
 import json
 import math
 from pathlib import Path, PurePosixPath
 from typing import Any
 from uuid import uuid4
-from zipfile import ZIP_DEFLATED, BadZipFile, ZipFile
+from zipfile import ZIP_DEFLATED, ZIP_STORED, BadZipFile, ZipFile
 
 from .kicad import KiCadFormatError, parse_footprint
 
@@ -610,19 +611,34 @@ class ProjectStore:
         """Return project metadata file path."""
         return self.path if self.is_archive else self.root / PROJECT_FILENAME
 
-    def save(self, project: ProjectDocument) -> None:
+    def save(
+        self,
+        project: ProjectDocument,
+        progress: Callable[[str, int, int], None] | None = None,
+    ) -> None:
         """Atomically write project metadata to a directory or `.revp` archive."""
         self.root.mkdir(parents=True, exist_ok=True)
         project.updated_at = _utc_now()
         if self.is_archive:
             temporary = self.project_file.with_suffix(".revp.tmp")
+            assets = sorted(self._assets.items())
+            total = max(1, len(assets))
             with ZipFile(temporary, "w", compression=ZIP_DEFLATED) as archive:
                 archive.writestr(
                     PROJECT_FILENAME,
                     json.dumps(project.to_dict(), indent=2, sort_keys=True) + "\n",
                 )
-                for path, content in sorted(self._assets.items()):
-                    archive.writestr(path, content)
+                if progress is not None:
+                    progress("Writing project metadata", 0, total)
+                for index, (path, content) in enumerate(assets, start=1):
+                    compression = (
+                        ZIP_STORED
+                        if path.casefold().endswith((".png", ".jpg", ".jpeg", ".webp"))
+                        else ZIP_DEFLATED
+                    )
+                    archive.writestr(path, content, compress_type=compression)
+                    if progress is not None:
+                        progress(f"Writing {path}", index, total)
             temporary.replace(self.project_file)
             return
         temporary = self.project_file.with_suffix(".json.tmp")
