@@ -5880,14 +5880,14 @@ class MainWindow(
         )
         if device is None:
             return
-        value, accepted = QInputDialog.getText(
-            self,
-            label,
-            f"{label} for {device.reference}:",
-            text=getattr(device, field),
-        )
-        if accepted:
-            self._set_device_text(device_id, field, value)
+        dialog = QInputDialog(self)
+        dialog.setWindowTitle(label)
+        dialog.setLabelText(f"{label} for {device.reference}:")
+        dialog.setTextValue(getattr(device, field))
+        if field == "datasheet":
+            dialog.setMinimumWidth(700)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._set_device_text(device_id, field, dialog.textValue())
 
     def _bom_object_changed(
         self, device_id: str, combo: QComboBox, selected: str
