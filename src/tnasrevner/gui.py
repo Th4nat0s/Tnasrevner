@@ -431,6 +431,7 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         footprint_button.setEnabled(footprint_selector is not None)
         footprint_button.clicked.connect(self._choose_footprint_calibration)
         crop_button = QPushButton("Crop rectangle")
+        crop_button.setToolTip("Use Shift to draw border")
         crop_button.setCheckable(True)
         crop_button.clicked.connect(lambda: self._set_edit_mode("crop"))
         self._calibration_button = calibration_button
@@ -483,6 +484,8 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         self._buttons.accepted.connect(self.accept)
         self._buttons.rejected.connect(self.reject)
         self._buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(False)
+        self._mode_hint = QLabel()
+        self._mode_hint.setStyleSheet("color: #66c2ff; font-weight: 600;")
         controls = QHBoxLayout()
         controls.addWidget(calibration_button)
         controls.addWidget(footprint_button)
@@ -509,11 +512,13 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
                 "rectangle."
             )
         )
+        layout.addWidget(self._mode_hint)
         layout.addWidget(self._scroll)
         layout.addLayout(controls)
         self.showMaximized()
         self._render()
         QTimer.singleShot(0, self._render)
+        self._set_edit_mode("calibration")
 
     def _close_for_image_action(self, callback: Callable[[], None]) -> None:
         """Close editor before changing its project-side image."""
@@ -664,6 +669,13 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
                 return True
             return super().eventFilter(watched, event)
         if (
+            self._edit_mode == "crop"
+            and event.type() == QEvent.Type.MouseButtonPress
+            and event.button() == Qt.MouseButton.LeftButton
+            and not event.modifiers() & Qt.KeyboardModifier.ShiftModifier
+        ):
+            return True
+        if (
             event.type() == QEvent.Type.MouseButtonPress
             and event.button() == Qt.MouseButton.LeftButton
         ):
@@ -775,6 +787,12 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         self._calibration_button.setChecked(mode == "calibration")
         self._footprint_button.setChecked(mode == "footprint")
         self._crop_button.setChecked(mode == "crop")
+        hints = {
+            "calibration": "Scale line: draw from point to point.",
+            "footprint": "Scale footprint: drag to position or resize.",
+            "crop": "Use Shift to draw border",
+        }
+        self._mode_hint.setText(hints[mode])
 
     def _choose_footprint_calibration(self) -> None:
         """Select and place a KiCad footprint for physical calibration."""
@@ -794,7 +812,9 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         self._footprint_rotation = 0.0
         self._set_edit_mode("footprint")
         self._update_confirm_state()
-        self._render()
+        self._selection = None
+        self._rubber_band.hide()
+        self._render(preserve_selection=False)
 
     def _footprint_reference_length_mm(self) -> float:
         """Return the known reference diameter used by footprint calibration."""
@@ -899,7 +919,9 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
                 footprint_ratio[1] * new_size.height(),
             )
         self._update_confirm_state()
-        self._render()
+        self._selection = None
+        self._rubber_band.hide()
+        self._render(preserve_selection=False)
         if selection_ratio is not None:
             selection = QRect(
                 round(selection_ratio[0] * new_size.width() * self._display_scale),
@@ -915,7 +937,6 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         centered = anchor is None
         self._zoom_revision += 1
         revision = self._zoom_revision
-        selection_ratio = self._selection_ratio()
         anchor = anchor or QPoint(
             self._scroll.viewport().width() // 2,
             self._scroll.viewport().height() // 2,
@@ -928,7 +949,6 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         )
         self._zoom = max(0.1, min(self._zoom * factor, 20.0))
         self._render()
-        self._restore_selection(selection_ratio)
         zoom_anchor = None if centered else anchor
         self._restore_zoom_anchor(source_point, zoom_anchor)
         QTimer.singleShot(
@@ -973,11 +993,12 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         self._zoom_revision += 1
         selection_ratio = self._selection_ratio()
         self._zoom = 1.0
-        self._render()
+        self._render(preserve_selection=False)
         self._restore_selection(selection_ratio)
 
-    def _render(self) -> None:
+    def _render(self, preserve_selection: bool = True) -> None:
         """Fit source image to editor viewport."""
+        selection_ratio = self._selection_ratio() if preserve_selection else None
         # maximumViewportSize() excludes the feedback caused by scrollbars
         # appearing during a zoom operation, so FIT remains a stable baseline.
         viewport = self._scroll.maximumViewportSize()
@@ -1041,6 +1062,7 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         self._rubber_band.set_selection(self._selection)
         if self._selection is not None:
             self._rubber_band.show()
+        self._restore_selection(selection_ratio)
 
     def _set_selection(self, start: QPoint, end: QPoint) -> None:
         """Update selection rectangle constrained to displayed image."""
@@ -5448,20 +5470,16 @@ class MainWindow(
         dialog = ProjectDetailsDialog(self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Create project",
-            str(self._last_project_directory()),
-            "Tnasrevner project (*.revp)",
-        )
-        if not path:
-            return
-        project_path = Path(path)
-        if project_path.suffix.lower() != ".revp":
-            project_path = project_path.with_suffix(".revp")
+        project_name = dialog.project_name.text()
+        safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", project_name).strip("._")
+        safe_name = safe_name or "project"
+        project_path = self._last_project_directory() / f"{safe_name}.revp"
+        suffix = 2
+        while project_path.exists():
+            project_path = self._last_project_directory() / f"{safe_name}-{suffix}.revp"
+            suffix += 1
         self._remember_project_directory(project_path)
         self.store = ProjectStore(project_path)
-        project_name = dialog.project_name.text()
         description = dialog.description.text().strip() or project_name
         self.project = ProjectDocument(project_name, description)
         self._image_cache.clear()
@@ -5471,6 +5489,7 @@ class MainWindow(
         self._reset_history()
         self._refresh_views()
         self._update_title()
+        self.manage_picture()
 
     def open_project(self) -> None:
         """Open a `.revp` project file."""

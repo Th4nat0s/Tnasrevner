@@ -68,7 +68,7 @@ def test_create_save_close_reopen_project(
     window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Exercise project creation, archive save, close, and reopen."""
-    archive = tmp_path / "board.revp"
+    archive = tmp_path / "Project.revp"
 
     class FakeDialog:  # pylint: disable=too-few-public-methods
         """Replacement project dialog for non-interactive testing."""
@@ -84,10 +84,8 @@ def test_create_save_close_reopen_project(
             return QDialog.DialogCode.Accepted
 
     monkeypatch.setattr("tnasrevner.gui.ProjectDetailsDialog", FakeDialog)
-    monkeypatch.setattr(
-        "tnasrevner.gui.QFileDialog.getSaveFileName",
-        lambda *_args: (str(archive), ""),
-    )
+    monkeypatch.setattr(window, "_last_project_directory", lambda: tmp_path)
+    monkeypatch.setattr(window, "manage_picture", lambda: None)
     monkeypatch.setattr(
         "tnasrevner.gui.QFileDialog.getOpenFileName",
         lambda *_args: (str(archive), ""),
