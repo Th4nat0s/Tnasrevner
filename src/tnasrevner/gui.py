@@ -1680,6 +1680,14 @@ class ImageView(
         if event.type() == QEvent.Type.MouseButtonPress:
             point = self._label_point(watched, event.position().toPoint())
             if (
+                self._delete_mode
+                and event.button() == Qt.MouseButton.LeftButton
+                and not self._pixmap.isNull()
+                and self._label.rect().contains(point)
+            ):
+                self.delete_requested.emit(*self._normalized_point(point))
+                return True
+            if (
                 event.button() == Qt.MouseButton.LeftButton
                 and event.modifiers() & Qt.KeyboardModifier.MetaModifier
                 and (self._pad_placement or self._device_placement)
@@ -3583,10 +3591,14 @@ class MainWindow(
                 self._delete_device(pad.device_id)
             else:
                 self._delete_pad(pad.pad_id)
+            if self._delete_button.isChecked():
+                self.statusBar().showMessage("Deleting - Esc to stop")
             return
         device = self._device_at(side, x, y)
         if device is not None:
             self._delete_device(device.device_id)
+        if self._delete_button.isChecked():
+            self.statusBar().showMessage("Deleting - Esc to stop")
 
     def _ruler_scale_for_view(self, view: ImageView) -> float:
         """Return calibrated pixels per millimeter for one board view."""
