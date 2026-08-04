@@ -2980,7 +2980,7 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
             painter.setPen(
                 QPen(
                     QColor("#66c2ff") if selected else QColor("#e4b363"),
-                    3 if selected else 2,
+                    6 if selected else 4,
                 )
             )
             painter.setBrush(QColor("#66c2ff") if selected else QColor("#e4b363"))
@@ -3012,7 +3012,7 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
             start = self._pending_wire_start
             end = self._pending_wire_end
             middle_x = (start.x() + end.x()) / 2
-            painter.setPen(QPen(QColor("#66c2ff"), 2, Qt.PenStyle.DashLine))
+            painter.setPen(QPen(QColor("#66c2ff"), 4, Qt.PenStyle.DashLine))
             painter.drawLine(start, QPointF(middle_x, start.y()))
             painter.drawLine(QPointF(middle_x, start.y()), QPointF(middle_x, end.y()))
             painter.drawLine(QPointF(middle_x, end.y()), end)
