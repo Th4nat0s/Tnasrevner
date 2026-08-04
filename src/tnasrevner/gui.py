@@ -2356,6 +2356,7 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
     layout_changed = Signal(str, float, float)
     net_connection_requested = Signal(object, object)
     terminal_selected = Signal(object)
+    terminal_hovered = Signal(object)
     terminal_net_edit_requested = Signal(object)
     terminal_menu_requested = Signal(object)
     device_context_requested = Signal(str)
@@ -2502,9 +2503,18 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
             semantic = pin.pin_id
         return f"{pin.number} {semantic}".strip()
 
+    @staticmethod
+    def _pin_annotation(device: Device, pin: ComponentPin) -> tuple[str, str]:
+        """Return the complete pin reference and optional function line."""
+        function = pin.function.strip()
+        if function == f"Pin {pin.number}":
+            function = ""
+        return f"{device.reference}.{pin.number}", f"- {function}" if function else ""
+
     def _draw_uc_pins(
         self,
         painter: QPainter,
+        device: Device,
         pins: list[ComponentPin],
         side: float,
     ) -> list[QPointF]:
@@ -2514,30 +2524,42 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
         endpoints: list[QPointF] = []
         metrics = painter.fontMetrics()
         for pin, edge in zip(pins, edge_points, strict=True):
-            label = self._pin_label(pin)
+            reference, function = self._pin_annotation(device, pin)
             if math.isclose(edge.x(), -half):
                 outward = QPointF(-1, 0)
-                painter.drawText(int(-half + 7), int(edge.y() + 5), label)
+                painter.drawText(int(-half + 7), int(edge.y() - 3), reference)
+                if function:
+                    painter.drawText(int(-half + 7), int(edge.y() + 12), function)
             elif math.isclose(edge.x(), half):
                 outward = QPointF(1, 0)
                 painter.drawText(
-                    int(half - metrics.horizontalAdvance(label) - 7),
-                    int(edge.y() + 5),
-                    label,
+                    int(half - metrics.horizontalAdvance(reference) - 7),
+                    int(edge.y() - 3),
+                    reference,
                 )
+                if function:
+                    painter.drawText(
+                        int(half - metrics.horizontalAdvance(function) - 7),
+                        int(edge.y() + 12),
+                        function,
+                    )
             elif math.isclose(edge.y(), -half):
                 outward = QPointF(0, -1)
                 painter.save()
                 painter.translate(edge.x() + 5, -half + 7)
                 painter.rotate(90)
-                painter.drawText(0, 0, label)
+                painter.drawText(0, 0, reference)
+                if function:
+                    painter.drawText(0, 15, function)
                 painter.restore()
             else:
                 outward = QPointF(0, 1)
                 painter.save()
                 painter.translate(edge.x() - 5, half - 7)
                 painter.rotate(-90)
-                painter.drawText(0, 0, label)
+                painter.drawText(0, 0, reference)
+                if function:
+                    painter.drawText(0, 15, function)
                 painter.restore()
             endpoint = edge + outward * 24
             painter.drawLine(edge, endpoint)
@@ -2675,6 +2697,9 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
         """Move the selected component on the schematic grid."""
+        point = event.position() / self._zoom
+        terminal_hit = self._terminal_at(point)
+        self.terminal_hovered.emit(terminal_hit[0] if terminal_hit else None)
         if self._pending_terminal is not None:
             self._pending_wire_end = event.position() / self._zoom
             self.update()
@@ -2727,6 +2752,11 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
         self.update()
         self.layout_changed.emit(self._drag_device_id, point.x(), point.y())
         event.accept()
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        """Clear schematic terminal hover information when leaving the canvas."""
+        self.terminal_hovered.emit(None)
+        super().leaveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
         """Finish component dragging."""
@@ -2911,7 +2941,7 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
             box = QRectF(-side / 2, -side / 2, side, side)
             painter.drawRect(box)
             painter.drawText(box, Qt.AlignmentFlag.AlignCenter, "UC")
-            endpoints = self._draw_uc_pins(painter, pins, side)
+            endpoints = self._draw_uc_pins(painter, device, pins, side)
         transform = QTransform()
         transform.translate(center.x(), center.y())
         transform.rotate(device.schematic_rotation)
@@ -2931,13 +2961,38 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
             delta_x = endpoint.x() - center.x()
             delta_y = endpoint.y() - center.y()
             if kind != "uc":
+                reference, function = self._pin_annotation(device, pin)
                 if abs(delta_x) >= abs(delta_y):
-                    text_x = endpoint.x() - (74 if delta_x < 0 else -8)
-                    text_y = endpoint.y() - 5
+                    if delta_x < 0:
+                        text_x = endpoint.x() - 150
+                        alignment = Qt.AlignmentFlag.AlignRight
+                    else:
+                        text_x = endpoint.x() + 8
+                        alignment = Qt.AlignmentFlag.AlignLeft
+                    text_y = endpoint.y() - 17
+                    painter.drawText(
+                        QRectF(text_x, text_y, 142, 18), alignment, reference
+                    )
+                    if function:
+                        painter.drawText(
+                            QRectF(text_x, text_y + 15, 142, 18),
+                            alignment,
+                            function,
+                        )
                 else:
-                    text_x = endpoint.x() - 12
-                    text_y = endpoint.y() - (10 if delta_y < 0 else -20)
-                painter.drawText(int(text_x), int(text_y), self._pin_label(pin))
+                    text_x = endpoint.x() - 75
+                    text_y = endpoint.y() - (36 if delta_y < 0 else -8)
+                    painter.drawText(
+                        QRectF(text_x, text_y, 150, 18),
+                        Qt.AlignmentFlag.AlignCenter,
+                        reference,
+                    )
+                    if function:
+                        painter.drawText(
+                            QRectF(text_x, text_y + 15, 150, 18),
+                            Qt.AlignmentFlag.AlignCenter,
+                            function,
+                        )
             if pin.net_id:
                 if abs(delta_x) >= abs(delta_y):
                     outward = QPointF(-1 if delta_x < 0 else 1, 0)
@@ -3067,6 +3122,7 @@ class SchematicView(QScrollArea):
     layout_changed = Signal(str, float, float)
     net_connection_requested = Signal(object, object)
     terminal_selected = Signal(object)
+    terminal_hovered = Signal(object)
     terminal_net_edit_requested = Signal(object)
     terminal_menu_requested = Signal(object)
     device_context_requested = Signal(str)
@@ -3079,6 +3135,7 @@ class SchematicView(QScrollArea):
         self._canvas.layout_changed.connect(self.layout_changed)
         self._canvas.net_connection_requested.connect(self.net_connection_requested)
         self._canvas.terminal_selected.connect(self.terminal_selected)
+        self._canvas.terminal_hovered.connect(self.terminal_hovered)
         self._canvas.terminal_net_edit_requested.connect(
             self.terminal_net_edit_requested
         )
@@ -3269,6 +3326,9 @@ class MainWindow(
             self._connect_schematic_terminals
         )
         self._schematic_view.terminal_selected.connect(self._select_schematic_terminal)
+        self._schematic_view.terminal_hovered.connect(
+            self._show_schematic_terminal_hover
+        )
         self._schematic_view.terminal_net_edit_requested.connect(
             self._edit_schematic_terminal_net
         )
@@ -3713,9 +3773,62 @@ class MainWindow(
         device_name = device.reference if device is not None else "—"
         footprint_name = device.footprint_name if device is not None else "—"
         net_name = pad.net or "—"
+        pin, _ = self._component_pin_for_pad(pad)
+        function = (
+            pin.function
+            if pin is not None and pin.function
+            else (
+                self._default_pin_function(device, pin)
+                if pin is not None
+                else pad.function
+            )
+        ) or "—"
         self.statusBar().showMessage(
             f"Pad: {pad.name} | Device: {device_name} | "
-            f"Footprint: {footprint_name} | Net: {net_name}"
+            f"Footprint: {footprint_name} | Function: {function} | Net: {net_name}"
+        )
+
+    def _show_schematic_terminal_hover(self, terminal: object) -> None:
+        """Display pin or pad function information in the status bar."""
+        if not isinstance(terminal, tuple) or len(terminal) != 3 or not self.project:
+            if self._pending_pad is None and self._pending_device is None:
+                self.statusBar().clearMessage()
+            return
+        kind, object_id, number = terminal
+        if kind == "pad":
+            pad = next(
+                (item for item in self.project.pads if item.pad_id == object_id),
+                None,
+            )
+            if pad is None:
+                return
+            pin, device = self._component_pin_for_pad(pad)
+            function = (
+                pin.function
+                if pin is not None and pin.function
+                else (
+                    self._default_pin_function(device, pin)
+                    if pin is not None
+                    else pad.function
+                )
+            ) or "—"
+            self.statusBar().showMessage(
+                f"Pad: {pad.name} | Function: {function} | Net: {pad.net or '—'}"
+            )
+            return
+        device = next(
+            (item for item in self.project.devices if item.device_id == object_id),
+            None,
+        )
+        if device is None or not isinstance(number, str):
+            return
+        pin = next((item for item in device.pins if item.number == number), None)
+        function = self._default_pin_function(device, pin) if pin else "—"
+        if pin is not None and pin.function:
+            function = pin.function
+        net = pin.net_id if pin is not None and pin.net_id else "—"
+        self.statusBar().showMessage(
+            f"Pin: {device.reference}.{number} | Function: {function} | Net: {net}"
         )
 
     def _create_view_menu(self) -> None:
