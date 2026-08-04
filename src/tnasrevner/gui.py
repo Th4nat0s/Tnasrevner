@@ -3467,6 +3467,7 @@ class MainWindow(
         layout.addWidget(self._net_mode_label)
         panel.setStyleSheet(
             "QPushButton { padding: 6px 8px; }"
+            "QPushButton:checked { background: #b84a4a; color: white; }"
             "QPushButton:hover { background: palette(highlight); "
             "color: palette(highlighted-text); }"
         )
@@ -3547,7 +3548,7 @@ class MainWindow(
     def _toggle_delete_mode(self) -> None:
         """Toggle continuous deletion mode from the tools palette."""
         button = getattr(self, "_delete_button", None)
-        self._set_delete_mode(not button.isChecked() if button is not None else True)
+        self._set_delete_mode(button.isChecked() if button is not None else True)
 
     def _set_delete_mode(self, enabled: bool) -> None:
         """Enable or disable deletion mode on every board view."""
