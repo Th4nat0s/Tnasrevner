@@ -3783,9 +3783,15 @@ class MainWindow(
                 else pad.function
             )
         ) or "—"
+        pin_name = (
+            f"{device.reference}.{pin.number}"
+            if device is not None and pin is not None
+            else "—"
+        )
         self.statusBar().showMessage(
             f"Pad: {pad.name} | Device: {device_name} | "
-            f"Footprint: {footprint_name} | Function: {function} | Net: {net_name}"
+            f"Pin: {pin_name} | Footprint: {footprint_name} | "
+            f"Function: {function} | Net: {net_name}"
         )
 
     def _show_schematic_terminal_hover(self, terminal: object) -> None:
