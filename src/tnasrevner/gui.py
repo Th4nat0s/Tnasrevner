@@ -6785,6 +6785,8 @@ class MainWindow(
 
     def _update_title(self) -> None:
         self._record_history()
+        if hasattr(self, "_bom_table"):
+            self._refresh_bom_table()
         name = self.project.project_name if self.project else "No project"
         self.setWindowTitle(f"Tnasrevner — {name}{' *' if self._dirty else ''}")
 
