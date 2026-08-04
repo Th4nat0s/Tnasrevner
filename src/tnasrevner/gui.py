@@ -3106,6 +3106,22 @@ class SchematicView(QScrollArea):
         """Highlight one selected net in the schematic canvas."""
         self._canvas.set_selected_net(net)
 
+    def view_state(self) -> tuple[float, int, int]:
+        """Return schematic zoom and scroll positions."""
+        return (
+            self._zoom,
+            self.horizontalScrollBar().value(),
+            self.verticalScrollBar().value(),
+        )
+
+    def apply_view_state(self, state: tuple[float, int, int]) -> None:
+        """Restore schematic zoom and scroll positions."""
+        self._zoom = state[0]
+        self._canvas.set_zoom(self._zoom)
+        self.horizontalScrollBar().setValue(state[1])
+        self.verticalScrollBar().setValue(state[2])
+        self._canvas.update()
+
     def set_connection_mode(self, enabled: bool) -> None:
         """Set schematic cursor for connection editing."""
         self._canvas.set_connection_mode(enabled)
@@ -5128,20 +5144,41 @@ class MainWindow(
             self._history_restoring = False
         self._update_history_buttons()
 
+    def _capture_history_view_state(self) -> tuple:
+        """Capture the current tab and viewport without project content."""
+        tab = self._tabs.currentIndex()
+        if tab == 6:
+            return tab, self._schematic_view.view_state()
+        views = self._active_views()
+        return tab, views[0].view_state() if views else None
+
+    def _restore_history_view_state(self, state: tuple) -> None:
+        """Restore the tab and viewport after an undo or redo refresh."""
+        tab, view_state = state
+        self._tabs.setCurrentIndex(tab)
+        if tab == 6 and view_state is not None:
+            self._schematic_view.apply_view_state(view_state)
+        elif view_state is not None:
+            self._apply_active_view_state(view_state)
+
     def undo(self) -> None:
         """Undo the latest recorded project action."""
         if self._history_index <= 0:
             return
+        view_state = self._capture_history_view_state()
         self._history_index -= 1
         self._restore_history_state(self._history[self._history_index])
+        self._restore_history_view_state(view_state)
         self.statusBar().showMessage("Undo", 1500)
 
     def redo(self) -> None:
         """Redo the next recorded project action."""
         if self._history_index >= len(self._history) - 1:
             return
+        view_state = self._capture_history_view_state()
         self._history_index += 1
         self._restore_history_state(self._history[self._history_index])
+        self._restore_history_view_state(view_state)
         self.statusBar().showMessage("Redo", 1500)
 
     def _create_actions(self) -> None:
