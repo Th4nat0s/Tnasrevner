@@ -13,6 +13,7 @@ from tnasrevner.project import (
     Device,
     DisplaySettings,
     ImageAsset,
+    Net,
     Pad,
     ProjectDocument,
     ProjectFormatError,
@@ -286,6 +287,19 @@ def test_legacy_device_without_value_defaults_to_empty() -> None:
 
 def test_bom_display_mode_is_valid() -> None:
     assert DisplaySettings(mode="bom").mode == "bom"
+
+
+def test_net_registry_migrates_legacy_assignments_and_preserves_uuid() -> None:
+    """Legacy named assignments receive stable persisted NET identities."""
+    project = ProjectDocument(
+        "Project",
+        "Board",
+        pads=[Pad("P1", "top", 0.1, 0.1, "one", net="GND")],
+    )
+
+    assert len(project.nets) == 1
+    assert project.nets[0].name == "GND"
+    assert Net.from_dict(project.nets[0].to_dict()) == project.nets[0]
 
 
 def test_missing_or_malformed_device_footprint_is_rejected(tmp_path: Path) -> None:

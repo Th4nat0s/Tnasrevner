@@ -1,5 +1,7 @@
 """Versioned, portable persistence model for minimal Tnasrevner projects."""
 
+# pylint: disable=duplicate-code
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
@@ -19,7 +21,16 @@ PROJECT_FILENAME = "project.json"
 PROJECT_ARCHIVE_SUFFIX = ".revp"
 _SIDES = frozenset({"top", "bottom"})
 _DISPLAY_MODES = frozenset(
-    {"top", "bottom", "side_by_side", "both", "nets", "bom", "schematic"}
+    {
+        "top",
+        "bottom",
+        "side_by_side",
+        "both",
+        "nets",
+        "net_summary",
+        "bom",
+        "schematic",
+    }
 )
 _PAD_SHAPES = frozenset({"rect", "circle", "oval", "roundrect", "trapezoid"})
 
@@ -48,8 +59,8 @@ def _relative_asset_path(value: Any) -> str:
 
 
 @dataclass(frozen=True)
-class ImageAsset:
-    """An imported image with original and lightweight working versions."""
+class ImageAsset:  # pylint: disable=too-many-instance-attributes
+    """An imported image with original source and replayable transformations."""
 
     side: str
     path: str
@@ -58,6 +69,7 @@ class ImageAsset:
     original_path: str | None = None
     calibration_line: tuple[float, float, float, float] | None = None
     calibration_length_mm: float | None = None
+    transformations: tuple[tuple[float, tuple[float, float, float, float]], ...] = ()
 
     def __post_init__(self) -> None:
         if self.side not in _SIDES:
@@ -88,6 +100,24 @@ class ImageAsset:
             raise ProjectFormatError(
                 "image calibration_length_mm requires calibration_line"
             )
+        for rotation, crop in self.transformations:
+            if not isinstance(rotation, (int, float)) or not math.isfinite(rotation):
+                raise ProjectFormatError("image rotation must be a finite number")
+            if len(crop) != 4 or not all(
+                isinstance(value, (int, float)) and math.isfinite(value)
+                for value in crop
+            ):
+                raise ProjectFormatError("image crop must have four numbers")
+            x, y, width, height = crop
+            if (  # pylint: disable=too-many-boolean-expressions
+                x < 0
+                or y < 0
+                or width <= 0
+                or height <= 0
+                or x + width > 1
+                or y + height > 1
+            ):
+                raise ProjectFormatError("image crop must fit between 0 and 1")
 
     def measured_pixels_per_mm(
         self, image_width: int, image_height: int
@@ -114,6 +144,10 @@ class ImageAsset:
             "original_path": self.original_path,
             "calibration_line": self.calibration_line,
             "calibration_length_mm": self.calibration_length_mm,
+            "transformations": [
+                {"rotation": rotation, "crop": crop}
+                for rotation, crop in self.transformations
+            ],
         }
 
     @classmethod
@@ -121,6 +155,19 @@ class ImageAsset:
         """Build an image asset from validated JSON-like data."""
         if not isinstance(data, dict):
             raise ProjectFormatError("image asset must be an object")
+        transformations = data.get("transformations", [])
+        if not isinstance(transformations, list):
+            raise ProjectFormatError("image transformations must be an array")
+        parsed_transformations = []
+        for transformation in transformations:
+            if not isinstance(transformation, dict):
+                raise ProjectFormatError("image transformation must be an object")
+            crop = transformation.get("crop")
+            if not isinstance(crop, (list, tuple)):
+                raise ProjectFormatError("image crop must be an array")
+            parsed_transformations.append(
+                (transformation.get("rotation", 0.0), tuple(crop))
+            )
         return cls(
             side=_required_string(data.get("side"), "image side"),
             path=_relative_asset_path(data.get("path")),
@@ -135,6 +182,7 @@ class ImageAsset:
                 else None
             ),
             calibration_length_mm=data.get("calibration_length_mm"),
+            transformations=tuple(parsed_transformations),
         )
 
 
@@ -494,6 +542,32 @@ class DisplaySettings:
         )
 
 
+@dataclass(frozen=True)
+class Net:
+    """Stable electrical net identity with an editable display name."""
+
+    net_id: str = field(default_factory=lambda: str(uuid4()))
+    name: str = ""
+
+    def __post_init__(self) -> None:
+        _required_string(self.net_id, "net id")
+        _required_string(self.name, "net name")
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return JSON-compatible net data."""
+        return {"net_id": self.net_id, "name": self.name}
+
+    @classmethod
+    def from_dict(cls, data: Any) -> "Net":
+        """Build a net from validated JSON-like data."""
+        if not isinstance(data, dict):
+            raise ProjectFormatError("net must be an object")
+        return cls(
+            net_id=_required_string(data.get("net_id"), "net id"),
+            name=_required_string(data.get("name"), "net name"),
+        )
+
+
 @dataclass
 class ProjectDocument:  # pylint: disable=too-many-instance-attributes
     """Minimal persisted project state."""
@@ -506,6 +580,7 @@ class ProjectDocument:  # pylint: disable=too-many-instance-attributes
     images: list[ImageAsset] = field(default_factory=list)
     pads: list[Pad] = field(default_factory=list)
     devices: list[Device] = field(default_factory=list)
+    nets: list[Net] = field(default_factory=list)
     display: DisplaySettings = field(default_factory=DisplaySettings)
     format_version: int = CURRENT_FORMAT_VERSION
 
@@ -542,6 +617,28 @@ class ProjectDocument:  # pylint: disable=too-many-instance-attributes
         }
         if unknown_devices:
             raise ProjectFormatError("pad references an unknown device")
+        net_names = {
+            net
+            for net in (
+                [pad.net for pad in self.pads]
+                + [pin.net_id for device in self.devices for pin in device.pins]
+            )
+            if net
+        }
+        nets_by_name: dict[str, Net] = {}
+        for net in self.nets:
+            key = net.name.casefold()
+            if key in nets_by_name:
+                raise ProjectFormatError("net names must be unique")
+            nets_by_name[key] = net
+        for name in sorted(net_names):
+            if name.casefold() not in nets_by_name:
+                generated = Net(name=name)
+                self.nets.append(generated)
+                nets_by_name[name.casefold()] = generated
+        net_ids = [net.net_id for net in self.nets]
+        if len(set(net_ids)) != len(net_ids):
+            raise ProjectFormatError("net ids must be unique")
 
     def to_dict(self) -> dict[str, Any]:
         """Return complete JSON-compatible project data."""
@@ -555,6 +652,7 @@ class ProjectDocument:  # pylint: disable=too-many-instance-attributes
             "images": [image.to_dict() for image in self.images],
             "pads": [pad.to_dict() for pad in self.pads],
             "devices": [device.to_dict() for device in self.devices],
+            "nets": [net.to_dict() for net in self.nets],
             "display": self.display.to_dict(),
         }
 
@@ -575,6 +673,9 @@ class ProjectDocument:  # pylint: disable=too-many-instance-attributes
         devices = data.get("devices", [])
         if not isinstance(devices, list):
             raise ProjectFormatError("devices must be an array")
+        nets = data.get("nets", [])
+        if not isinstance(nets, list):
+            raise ProjectFormatError("nets must be an array")
         return cls(
             format_version=version,
             project_id=_required_string(data.get("project_id"), "project_id"),
@@ -585,6 +686,7 @@ class ProjectDocument:  # pylint: disable=too-many-instance-attributes
             images=[ImageAsset.from_dict(image) for image in images],
             pads=_pads_from_dict(pads),
             devices=[Device.from_dict(device) for device in devices],
+            nets=[Net.from_dict(net) for net in nets],
             display=DisplaySettings.from_dict(data.get("display", {})),
         )
 

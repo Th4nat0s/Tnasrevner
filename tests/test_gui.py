@@ -6,6 +6,7 @@
 # pylint: disable=unused-argument,protected-access,too-many-lines
 
 import os
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -29,6 +30,7 @@ from tnasrevner.gui import (
     ImageView,
     MainWindow,
     SchematicCanvas,
+    SchematicView,
 )
 from tnasrevner.kicad import CacheResult, FootprintReference, parse_footprint
 from tnasrevner.project import (
@@ -227,6 +229,81 @@ def test_image_view_zoom_keeps_center_and_footprint_scale(
     view.close()
 
 
+def test_image_view_pan_sync_does_not_rerender_unchanged_scale(
+    app: QApplication, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Synchronized pan changes reuse the already scaled board pixmap."""
+    view = ImageView("No image")
+    image = QImage(1200, 800, QImage.Format.Format_RGB32)
+    image.fill(0xFFFFFF)
+    view.set_pixmap(QPixmap.fromImage(image))
+    renders: list[bool] = []
+    monkeypatch.setattr(view, "_render", lambda smooth=True: renders.append(smooth))
+
+    view.apply_view_state((view._scale, 0.75, 0.25))
+
+    assert not renders
+    view.close()
+
+
+def test_image_view_fast_zoom_preview_skips_vector_redraw(
+    app: QApplication, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Interactive previews resize the composite and redraw vectors only at rest."""
+    view = ImageView("No image")
+    image = QImage(1200, 800, QImage.Format.Format_RGB32)
+    image.fill(0xFFFFFF)
+    view.set_pixmap(QPixmap.fromImage(image))
+    redraws: list[str] = []
+    monkeypatch.setattr(
+        view, "_draw_vector_footprints", lambda _pixmap: redraws.append("footprints")
+    )
+    monkeypatch.setattr(
+        view, "_draw_vector_pads", lambda _pixmap: redraws.append("pads")
+    )
+    monkeypatch.setattr(
+        view, "_draw_vector_pad_labels", lambda _pixmap: redraws.append("labels")
+    )
+
+    view._render(smooth=False)
+    assert not redraws
+
+    view._render(smooth=True)
+    assert redraws == ["footprints", "pads", "labels"]
+    view.close()
+
+
+def test_board_view_sync_defers_hidden_views(
+    window: MainWindow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Zooming one tab must not repaint the three hidden board views."""
+    window._tabs.setCurrentIndex(0)
+    source = window._views["top"]
+    followers = (
+        window._views["bottom"],
+        window._side_views["top"],
+        window._side_views["bottom"],
+    )
+    applied: list[ImageView] = []
+    deferred: list[ImageView] = []
+    for view in followers:
+        monkeypatch.setattr(
+            view,
+            "apply_view_state",
+            lambda _state, view=view: applied.append(view),
+        )
+        monkeypatch.setattr(
+            view,
+            "defer_view_state",
+            lambda _state, view=view: deferred.append(view),
+        )
+
+    window._sync_board_views(source)
+
+    assert not applied
+    assert deferred == list(followers)
+
+
 def test_image_view_mouse_and_zoom_mapping(app: QApplication) -> None:
     """Wheel zooms; pad clicks route actions; empty-space drag pans."""
     view = ImageView("No image")
@@ -313,28 +390,28 @@ def test_save_and_restore_bom_view(window: MainWindow, tmp_path: Path) -> None:
     """The BOM tab is a persisted project display mode."""
     window.store = ProjectStore(tmp_path / "board.revp")
     window.project = ProjectDocument("Project", "Board")
-    window._tabs.setCurrentIndex(5)
+    window._tabs.setCurrentIndex(6)
 
     assert window.save_project()
     assert window.project.display.mode == "bom"
 
     window._tabs.setCurrentIndex(0)
     window._refresh_views()
-    assert window._tabs.currentIndex() == 5
+    assert window._tabs.currentIndex() == 6
 
 
 def test_save_and_restore_schematic_view(window: MainWindow, tmp_path: Path) -> None:
     """The Schematic tab is a persisted project display mode."""
     window.store = ProjectStore(tmp_path / "board.revp")
     window.project = ProjectDocument("Project", "Board")
-    window._tabs.setCurrentIndex(6)
+    window._tabs.setCurrentIndex(7)
 
     assert window.save_project()
     assert window.project.display.mode == "schematic"
 
     window._tabs.setCurrentIndex(0)
     window._refresh_views()
-    assert window._tabs.currentIndex() == 6
+    assert window._tabs.currentIndex() == 7
 
 
 def test_create_pad_from_tools_places_and_persists_marker(
@@ -700,8 +777,35 @@ def test_schematic_renders_all_symbol_families_with_schemdraw(
         endpoints = canvas._draw_schemdraw_symbol(painter, kind, pins[:count])
         painter.end()
         assert len(endpoints) == count
+
+    cache_key = ("uc", tuple(pin.number for pin in pins))
+    cached_renderer = canvas._schemdraw_cache[cache_key][0]
+    painter = QPainter(image)
+    endpoints = canvas._draw_schemdraw_symbol(painter, "uc", pins)
+    painter.end()
+    assert len(endpoints) == len(pins)
+    assert canvas._schemdraw_cache[cache_key][0] is cached_renderer
     canvas.set_zoom(100)
     assert canvas._zoom == 100
+
+
+def test_schematic_fit_keeps_zoom_state_for_next_zoom(app: QApplication) -> None:
+    """Zoom after FIT uses the canvas zoom instead of a stale viewport value."""
+    view = SchematicView()
+    view.resize(700, 500)
+    view.show()
+    app.processEvents()
+
+    view.fit_overview()
+    app.processEvents()
+    fitted_zoom = view._canvas._zoom
+    assert view._zoom == fitted_zoom
+
+    view._zoom_by(1.2, QPoint(200, 150))
+
+    assert view._zoom == pytest.approx(fitted_zoom * 1.2)
+    assert view._canvas._zoom == view._zoom
+    view.close()
 
 
 def test_recent_footprints_persist_newest_five(
@@ -892,6 +996,7 @@ def test_clicking_pad_toggles_links_without_resetting_zoom(
     window._select_pad("top", 0.55, 0.55)
     assert window._selected_pad_id == "two"
     assert window._selected_net == "GND"
+    assert window._schematic_view._canvas._selected_net == "GND"
     assert window._views["top"]._scale == 3.0
 
     window._select_pad("top", 0.55, 0.55)
@@ -937,7 +1042,7 @@ def test_net_view_and_right_click_assignment(window: MainWindow) -> None:
     assert window._net_table.item(0, 0).text() == "P1"
     assert window._net_table.item(0, 1).text() == "GND"
     assert not window._net_table.item(0, 0).flags() & Qt.ItemFlag.ItemIsEditable
-    assert window._net_table.item(0, 1).flags() & Qt.ItemFlag.ItemIsEditable
+    assert not window._net_table.item(0, 1).flags() & Qt.ItemFlag.ItemIsEditable
     assert not window._net_table.item(0, 2).flags() & Qt.ItemFlag.ItemIsEditable
     assert window._net_table.item(0, 3).flags() & Qt.ItemFlag.ItemIsEditable
     assert not window._net_table.item(0, 4).flags() & Qt.ItemFlag.ItemIsEditable
@@ -947,6 +1052,101 @@ def test_net_view_and_right_click_assignment(window: MainWindow) -> None:
     window._net_dialog.reject()
     QApplication.processEvents()
     assert window._net_dialog is None
+
+
+def test_net_summary_renames_every_assignment_and_counts_connections(
+    window: MainWindow,
+) -> None:
+    """NET summary exposes editable names and read-only terminal counts."""
+    assert window._tabs.tabText(4) == "Connections"
+    assert window._tabs.tabText(5) == "NET"
+    device = Device(
+        "U1",
+        "top",
+        0.5,
+        0.5,
+        "Package_QFP",
+        "QFP",
+        "assets/kicad/u1.kicad_mod",
+        "a" * 40,
+        device_id="device",
+        pins=[ComponentPin("1", "IO", net_id="GND")],
+    )
+    window.project = ProjectDocument(
+        "Project",
+        "Board",
+        pads=[
+            Pad("P1", "top", 0.1, 0.1, "one", net="GND"),
+            Pad(
+                "U1.1",
+                "top",
+                0.3,
+                0.3,
+                "pin-pad",
+                net="GND",
+                device_id="device",
+                number="1",
+            ),
+        ],
+        devices=[device],
+    )
+    window._refresh_nets_table()
+
+    assert window._nets_table.rowCount() == 1
+    assert window._nets_table.item(0, 0).text() == "GND"
+    assert window._nets_table.item(0, 1).text() == "3"
+    assert window._nets_table.item(0, 0).flags() & Qt.ItemFlag.ItemIsEditable
+    assert not window._nets_table.item(0, 1).flags() & Qt.ItemFlag.ItemIsEditable
+    net_id = window._nets_table.item(0, 0).data(Qt.ItemDataRole.UserRole)
+
+    window._nets_table.item(0, 0).setText("GROUND")
+    QApplication.processEvents()
+
+    assert [pad.net for pad in window.project.pads] == ["GROUND", "GROUND"]
+    assert window.project.devices[0].pins[0].net_id == "GROUND"
+    assert window.project.nets[0].net_id == net_id
+    assert window.project.nets[0].name == "GROUND"
+
+    window.project.pads = [replace(pad, net=None) for pad in window.project.pads]
+    window.project.devices[0].pins[0] = replace(
+        window.project.devices[0].pins[0], net_id=None
+    )
+    window._refresh_nets_table()
+    assert window._nets_table.rowCount() == 0
+    assert window.project.nets == []
+
+
+def test_edit_pin_refreshes_connections_function(
+    window: MainWindow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Editing a PIN immediately updates its Connections row."""
+    device = Device(
+        "U1",
+        "top",
+        0.5,
+        0.5,
+        "Package_QFP",
+        "QFP",
+        "assets/kicad/u1.kicad_mod",
+        "a" * 40,
+        device_id="device",
+        pins=[ComponentPin("1", "OLD", footprint_pad="1")],
+    )
+    window.project = ProjectDocument(
+        "Project",
+        "Board",
+        pads=[Pad("U1.1", "top", 0.1, 0.1, "pad", device_id="device", number="1")],
+        devices=[device],
+    )
+    window._refresh_net_table()
+    monkeypatch.setattr(
+        "tnasrevner.gui.QInputDialog.getText",
+        lambda *_args, **_kwargs: ("NEW", True),
+    )
+
+    window._edit_component_pin("device", "1")
+
+    assert window._net_table.item(0, 3).text() == "NEW"
 
 
 def test_disconnect_other_pad_keeps_active_link_selection(window: MainWindow) -> None:
@@ -995,19 +1195,19 @@ def test_shift_selected_terminals_create_generic_net(window: MainWindow) -> None
     )
 
     window._connect_schematic_terminals(("pin", "device", "1"), ("pin", "device", "1"))
-    assert window.project.devices[0].pins[0].net_id == "N1"
+    assert window.project.devices[0].pins[0].net_id == "NT1"
     assert window.project.pads[1].net is None
 
     window._connect_schematic_terminals(
         ("pin", "device", "1"), ("pad", "standalone", None)
     )
-    assert {pad.net for pad in window.project.pads} == {"N1"}
+    assert {pad.net for pad in window.project.pads} == {"NT1"}
 
 
-def test_shift_selected_board_pads_connect_immediately(
+def test_connect_button_links_shift_selected_board_pads_on_release(
     window: MainWindow, tmp_path: Path
 ) -> None:
-    """Shift-click links a target to the selected origin before Escape."""
+    """Connect mode links every Shift-selected pad when Shift is released."""
     window.store = ProjectStore(tmp_path / "board.revp")
     window.project = ProjectDocument(
         "Project",
@@ -1027,18 +1227,25 @@ def test_shift_selected_board_pads_connect_immediately(
     window.show()
     QApplication.processEvents()
     view = window._views["top"]
+    window._connect_button.click()
+    QApplication.processEvents()
+    assert window._connection_mode
+    assert window.statusBar().currentMessage() == "Connection mode, Esc to exit"
 
     origin = QPoint(
         round(0.15 * (view._label.width() - 1)),
         round(0.15 * (view._label.height() - 1)),
     )
-    QTest.mouseClick(view._label, Qt.MouseButton.LeftButton, pos=origin)
-    QApplication.processEvents()
-    assert window._selected_pad_id == "one"
-
     target = QPoint(
         round(0.55 * (view._label.width() - 1)),
         round(0.55 * (view._label.height() - 1)),
+    )
+    QTest.keyPress(window, Qt.Key.Key_Shift)
+    QTest.mouseClick(
+        view._label,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.ShiftModifier,
+        origin,
     )
     QTest.mouseClick(
         view._label,
@@ -1047,10 +1254,14 @@ def test_shift_selected_board_pads_connect_immediately(
         target,
     )
     QApplication.processEvents()
-    assert window._pending_board_connection_pads == ["one", "two"]
-    assert [pad.net for pad in window.project.pads] == ["N1", "N1"]
-    assert window._selected_net == "N1"
-    assert window._net_mode_label.isVisible()
+    assert len(window._pending_connection_terminals) == 2
+    assert [pad.net for pad in window.project.pads] == [None, None]
+    QTest.keyRelease(window, Qt.Key.Key_Shift)
+    QApplication.processEvents()
+    assert [pad.net for pad in window.project.pads] == ["NT1", "NT1"]
+    assert window._selected_net == "NT1"
+    assert "NT1" in window.statusBar().currentMessage()
+    assert "Connection mode, Esc to exit" in window.statusBar().currentMessage()
     assert view.cursor().shape() == Qt.CursorShape.CrossCursor
     link_color = view._label.pixmap().toImage().pixelColor(35, 35)
     assert min(link_color.red(), link_color.green(), link_color.blue()) > 200
@@ -1065,16 +1276,71 @@ def test_shift_selected_board_pads_connect_immediately(
     assert [action.text() for action in window._pad_menu.actions()] == ["Disconnect"]
     window._pad_menu.actions()[0].trigger()
     QApplication.processEvents()
-    assert [pad.net for pad in window.project.pads] == ["N1", None]
-    assert window._selected_net == "N1"
-    assert window._selected_pad_id == "one"
+    assert [pad.net for pad in window.project.pads] == ["NT1", None]
+    assert window._selected_net == "NT1"
 
     QTest.keyClick(window, Qt.Key.Key_Escape)
 
-    assert [pad.net for pad in window.project.pads] == ["N1", None]
-    assert not window._pending_board_connection_pads
-    assert not window._net_mode_label.isVisible()
+    assert [pad.net for pad in window.project.pads] == ["NT1", None]
+    assert not window._pending_connection_terminals
+    assert not window._connection_mode
     assert view.cursor().shape() != Qt.CursorShape.CrossCursor
+
+
+def test_multi_terminal_connection_reuses_existing_net_and_advances_nt_names(
+    window: MainWindow,
+) -> None:
+    """A selected existing net wins; otherwise the next NT name is generated."""
+    window.project = ProjectDocument(
+        "Project",
+        "Board",
+        pads=[
+            Pad("P1", "top", 0.1, 0.1, "one", net="GND"),
+            Pad("P2", "top", 0.3, 0.1, "two", net="VCC"),
+            Pad("P3", "top", 0.5, 0.1, "three"),
+            Pad("P4", "top", 0.7, 0.1, "four", net="NT1"),
+            Pad("P5", "top", 0.1, 0.3, "five"),
+            Pad("P6", "top", 0.3, 0.3, "six"),
+        ],
+    )
+
+    window._connect_terminals((("pad", "two", None), ("pad", "three", None)))
+
+    assert [pad.net for pad in window.project.pads] == [
+        "GND",
+        "VCC",
+        "VCC",
+        "NT1",
+        None,
+        None,
+    ]
+
+    window._connect_terminals(
+        (("pad", "one", None), ("pad", "two", None), ("pad", "three", None))
+    )
+    assert [pad.net for pad in window.project.pads] == [
+        "GND",
+        "GND",
+        "GND",
+        "NT1",
+        None,
+        None,
+    ]
+
+    window._connect_terminals((("pad", "five", None), ("pad", "six", None)))
+    assert [pad.net for pad in window.project.pads[-2:]] == ["NT2", "NT2"]
+
+
+def test_info_exits_connection_mode(window: MainWindow) -> None:
+    """Info button cancels Connect mode and clears its selection."""
+    window.project = ProjectDocument("Project", "Board")
+    window._set_connection_mode(True)
+    window._pending_connection_terminals.append(("pad", "missing", None))
+
+    window._show_info()
+
+    assert not window._connection_mode
+    assert not window._pending_connection_terminals
 
 
 def test_net_table_enter_keeps_nets_tab(window: MainWindow) -> None:
@@ -1372,7 +1638,8 @@ def test_import_image_stores_selected_side(
     window.import_picture()
 
     assert window.project.images[0].side == "top"
-    assert window.store.read_asset("assets/top.png").startswith(b"\x89PNG")
+    assert window.project.images[0].path == "assets/original/top.png"
+    assert window.store.read_asset("assets/original/top.png").startswith(b"\x89PNG")
     original_path = window.project.images[0].original_path
     assert original_path == "assets/original/top.png"
     assert window.store.read_asset(original_path).startswith(b"\x89PNG")
@@ -1458,6 +1725,33 @@ def test_editing_existing_image_preserves_physical_scale(app: QApplication) -> N
     dialog.close()
 
 
+def test_rotate_board_does_not_overwrite_original_image(
+    window: MainWindow, tmp_path: Path
+) -> None:
+    """Board rotation records an operation instead of destroying the source."""
+    window.store = ProjectStore(tmp_path / "board.revp")
+    window.project = ProjectDocument("Project", "Board")
+    image = QImage(80, 40, QImage.Format.Format_RGB32)
+    image.fill(0x123456)
+    source = window._pixmap_bytes(QPixmap.fromImage(image))
+    source_path = "assets/original/top.png"
+    window.store.write_asset(source_path, source)
+    window.project.images.append(
+        ImageAsset(
+            "top",
+            source_path,
+            "top.png",
+            original_path=source_path,
+        )
+    )
+    window._refresh_views()
+
+    window._rotate_board_90()
+
+    assert window.store.read_asset(source_path) == source
+    assert window.project.images[0].transformations == ((90.0, (0.0, 0.0, 1.0, 1.0)),)
+
+
 def test_scaling_footprint_does_not_recrop_existing_image(
     app: QApplication,
 ) -> None:
@@ -1476,6 +1770,26 @@ def test_scaling_footprint_does_not_recrop_existing_image(
     dialog.accept()
 
     assert dialog.result_pixmap().size() == image.size()
+    dialog.close()
+
+
+def test_canceling_footprint_selection_keeps_image_editor_open(
+    app: QApplication,
+) -> None:
+    """Canceling footprint calibration leaves the image editor open."""
+    image = QImage(200, 100, QImage.Format.Format_RGB32)
+    image.fill(0xFFFFFF)
+    dialog = ImageEditDialog(
+        QPixmap.fromImage(image), footprint_selector=lambda _: None
+    )
+    dialog.show()
+    app.processEvents()
+
+    dialog._footprint_button.click()
+    app.processEvents()
+
+    assert dialog.isVisible()
+    assert dialog._calibration_method == "line"
     dialog.close()
 
 

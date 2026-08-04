@@ -105,6 +105,7 @@ from .project import (
     ComponentPin,
     Device,
     ImageAsset,
+    Net,
     Pad,
     ProjectDocument,
     ProjectFormatError,
@@ -171,6 +172,10 @@ _RECENT_FOOTPRINTS_KEY = "kicad/recent-footprints"
 _REFERENCE_PREFIX_KEY = "kicad/reference-prefix"
 _LAST_PROJECT_DIRECTORY_KEY = "projects/last-directory"
 _MAX_RECENT_FOOTPRINTS = 5
+_CONNECTIONS_TAB = 4
+_NETS_TAB = 5
+_BOM_TAB = 6
+_SCHEMATIC_TAB = 7
 _DEFAULT_REFERENCE_PREFIXES = {
     "antenna": "AE",
     "battery": "BT",
@@ -409,6 +414,9 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         self._calibration_end: QPoint | None = None
         self._calibration_line: tuple[QPointF, QPointF] | None = None
         self._result_calibration_line: tuple[float, float, float, float] | None = None
+        self._result_transformation: (
+            tuple[float, tuple[float, float, float, float]] | None
+        ) = None
         self._calibration_method = "line"
         self._footprint_selector = footprint_selector
         self._calibration_footprint: Footprint | None = None
@@ -804,6 +812,15 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
             if self._editing_existing_image and not self._crop_selection_modified
             else self._source_rect(selection)
         )
+        self._result_transformation = (
+            self._angle,
+            (
+                source_rect.x() / self._source.width(),
+                source_rect.y() / self._source.height(),
+                source_rect.width() / self._source.width(),
+                source_rect.height() / self._source.height(),
+            ),
+        )
         calibration_line = self._active_calibration_line()
         if calibration_line is not None:
             start, end = calibration_line
@@ -838,6 +855,12 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
             return self._footprint_reference_length_mm()
         return self._millimeters.value()
 
+    def transformation(self) -> tuple[float, tuple[float, float, float, float]]:
+        """Return accepted rotation and crop relative to the input image."""
+        if self._result_transformation is None:
+            raise ProjectFormatError("image transformation is not available")
+        return self._result_transformation
+
     def _set_edit_mode(self, mode: str) -> None:
         """Switch between scale-line and crop-rectangle drawing."""
         self._edit_mode = mode
@@ -867,6 +890,12 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
             return
         footprint = self._footprint_selector(self)
         if footprint is None:
+            if self._calibration_method == "footprint":
+                self._set_edit_mode("calibration")
+                self._render()
+            self.show()
+            self.raise_()
+            self.activateWindow()
             return
         self._calibration_footprint = footprint
         self._footprint_center = QPointF(
@@ -880,6 +909,9 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         self._set_edit_mode("footprint")
         self._update_confirm_state()
         self._render()
+        self.show()
+        self.raise_()
+        self.activateWindow()
 
     def _footprint_reference_length_mm(self) -> float:
         """Return the known reference diameter used by footprint calibration."""
@@ -1629,6 +1661,7 @@ class ImageView(
         self._scale = 1.0
         self._zoom_revision = 0
         self._zoom_render_pending = False
+        self._pending_view_state: tuple[float, float, float] | None = None
         self._drag_position: QPoint | None = None
         self._temporary_pan = False
         self._pad_placement = False
@@ -1890,6 +1923,7 @@ class ImageView(
             or self._ruler_enabled
             or self._pad_placement
             or self._device_placement
+            or self._drag_position is not None
         ):
             point = self._label_point(watched, event.position().toPoint())
             hovered = self._pad_at_point(point)
@@ -2224,8 +2258,11 @@ class ImageView(
         self._label.setText("")
         self._label.setMinimumSize(0, 0)
         fit_scale = self._fit_scale()
-        displayed = self._pixmap.scaled(
-            self._pixmap.size() * (fit_scale * self._scale),
+        target_size = self._pixmap.size() * (fit_scale * self._scale)
+        current = self._label.pixmap()
+        preview = not smooth and current is not None and not current.isNull()
+        displayed = (current if preview else self._pixmap).scaled(
+            target_size,
             Qt.AspectRatioMode.KeepAspectRatio,
             (
                 Qt.TransformationMode.SmoothTransformation
@@ -2233,10 +2270,11 @@ class ImageView(
                 else Qt.TransformationMode.FastTransformation
             ),
         )
-        self._draw_vector_footprints(displayed)
-        self._draw_vector_pads(displayed)
-        self._draw_vector_pad_labels(displayed)
-        self._draw_ruler(displayed)
+        if not preview:
+            self._draw_vector_footprints(displayed)
+            self._draw_vector_pads(displayed)
+            self._draw_vector_pad_labels(displayed)
+            self._draw_ruler(displayed)
         self._label.setPixmap(displayed)
         self._label.resize(self._label.pixmap().size())
         if self._device_placement:
@@ -2278,7 +2316,10 @@ class ImageView(
             x = pad.x * (pixmap.width() - 1)
             if self._mirror_pad_labels:
                 x = (1.0 - pad.x - pad.width) * (pixmap.width() - 1)
-            center = QPointF(x, pad.y * (pixmap.height() - 1))
+            center = QPointF(
+                x + width / 2,
+                pad.y * (pixmap.height() - 1) + height / 2,
+            )
             label_angle = pad.rotation + (90.0 if width < height else 0.0)
             label_angle %= 360.0
             if 90.0 < label_angle < 270.0:
@@ -2367,6 +2408,11 @@ class ImageView(
                 connection_pen = QPen(Qt.GlobalColor.white, 1.5)
                 connection_pen.setCosmetic(True)
                 painter.setPen(connection_pen)
+                if len(connected) == 1:
+                    center = centers[origin_id]
+                    radius = max(8.0, min(pixmap.width(), pixmap.height()) * 0.008)
+                    painter.drawEllipse(center, radius, radius)
+                    painter.drawText(center + QPointF(10, -10), self._connection_net)
                 for pad_id, target in centers.items():
                     if pad_id != origin_id:
                         painter.drawLine(centers[origin_id], target)
@@ -2379,9 +2425,13 @@ class ImageView(
                 (pad.y + pad.height / 2) * (pixmap.height() - 1),
             )
             painter.setBrush(
-                Qt.GlobalColor.yellow
-                if pad.device_id is not None and pad.number == "1"
-                else Qt.GlobalColor.red
+                QColor("#3b82f6")
+                if pad.net
+                else (
+                    Qt.GlobalColor.yellow
+                    if pad.device_id is not None and pad.number == "1"
+                    else Qt.GlobalColor.red
+                )
             )
             pad_pen = QPen(
                 (
@@ -2445,15 +2495,28 @@ class ImageView(
             vertical.value() / vertical.maximum() if vertical.maximum() else 0.5,
         )
 
+    def defer_view_state(self, state: tuple[float, float, float]) -> None:
+        """Remember synchronized state without rendering a hidden board view."""
+        self._pending_view_state = state
+
     def apply_view_state(self, state: tuple[float, float, float]) -> None:
         """Apply zoom and normalized pan from another board-side view."""
-        self._zoom_revision += 1
-        self._scale = max(0.1, min(state[0], 20.0))
-        self._render()
+        self._pending_view_state = None
+        scale = max(0.1, min(state[0], 20.0))
+        if not math.isclose(scale, self._scale):
+            self._zoom_revision += 1
+            self._scale = scale
+            self._render()
         horizontal = self.horizontalScrollBar()
         vertical = self.verticalScrollBar()
         horizontal.setValue(round(state[1] * horizontal.maximum()))
         vertical.setValue(round(state[2] * vertical.maximum()))
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        """Render the latest synchronized state when a hidden view becomes visible."""
+        super().showEvent(event)
+        if self._pending_view_state is not None:
+            self.apply_view_state(self._pending_view_state)
 
     def _fit_scale(self) -> float:
         """Calculate scale needed to fit image in viewport."""
@@ -2477,14 +2540,12 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
     _SCHEMDRAW_UNIT_TO_SVG = 36.0
 
     layout_changed = Signal(str, float, float)
-    net_connection_requested = Signal(object, object)
     terminal_selected = Signal(object)
     terminal_hovered = Signal(object)
     terminal_net_edit_requested = Signal(object)
     terminal_menu_requested = Signal(object)
     device_context_requested = Signal(str)
     pan_requested = Signal(int, int)
-    connection_mode_changed = Signal(bool)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -2498,12 +2559,12 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
         self._drag_device_id: str | None = None
         self._drag_offset = QPointF()
         self._terminal_hits: list[tuple[QPointF, tuple[str, str, str | None]]] = []
-        self._pending_terminal: tuple[str, str, str | None] | None = None
-        self._pending_terminals: list[tuple[str, str, str | None]] = []
-        self._pending_wire_start: QPointF | None = None
-        self._pending_wire_end: QPointF | None = None
         self._selected_net: str | None = None
         self._pan_position: QPoint | None = None
+        self._schemdraw_cache: dict[
+            tuple[str, tuple[str, ...]],
+            tuple[QSvgRenderer, QRectF, tuple[QPointF, ...]],
+        ] = {}
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.resize(self._logical_width, self._logical_height)
@@ -2559,6 +2620,10 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
             round(self._logical_height * self._zoom),
         )
         self.update()
+
+    def zoom(self) -> float:
+        """Return the current canvas zoom factor."""
+        return self._zoom
 
     def fit_overview(self) -> None:
         """Fit the complete schematic sheet and center it in the viewport."""
@@ -2786,29 +2851,12 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
         candidates = [
             (QLineF(point, terminal_point).length(), terminal, terminal_point)
             for terminal_point, terminal in self._terminal_hits
-            if QLineF(point, terminal_point).length() <= 18.0
+            if QLineF(point, terminal_point).length() <= 28.0
         ]
         if not candidates:
             return None
         _distance, terminal, terminal_point = min(candidates, key=lambda item: item[0])
         return terminal, terminal_point
-
-    def _clear_pending_wire(self) -> None:
-        """Cancel the interactive net wire preview."""
-        self._pending_terminal = None
-        self._pending_terminals = []
-        self._pending_wire_start = None
-        self._pending_wire_end = None
-        self.set_connection_mode(False)
-        self.connection_mode_changed.emit(False)
-        self.update()
-
-    def finish_connection(self) -> bool:
-        """Leave connector mode after its links were created incrementally."""
-        if not self._pending_terminals:
-            return False
-        self._clear_pending_wire()
-        return True
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         """Start dragging a schematic component."""
@@ -2819,22 +2867,9 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
         ):
             hit = self._terminal_at(point)
             if hit is None:
-                self._clear_pending_wire()
                 return
-            terminal, terminal_point = hit
-            if self._pending_terminal is None:
-                self.set_connection_mode(True)
-                self.connection_mode_changed.emit(True)
-                self._pending_terminal = terminal
-                self._pending_terminals = [terminal]
-                self._pending_wire_start = terminal_point
-                self._pending_wire_end = point
-            elif terminal not in self._pending_terminals:
-                self._pending_terminals.append(terminal)
-                self._pending_terminal = terminal
-                self._pending_wire_start = terminal_point
-                self._pending_wire_end = point
-                self.net_connection_requested.emit(self._pending_terminals[0], terminal)
+            terminal, _terminal_point = hit
+            self.terminal_selected.emit(terminal)
             self.setFocus()
             event.accept()
             self.update()
@@ -2864,18 +2899,7 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
         ):
             if terminal_hit is not None:
                 terminal, _terminal_point = terminal_hit
-                if self._pending_terminals:
-                    if terminal not in self._pending_terminals:
-                        self._pending_terminals.append(terminal)
-                        self.net_connection_requested.emit(
-                            self._pending_terminals[0], terminal
-                        )
-                    self._pending_terminal = terminal
-                    self._pending_wire_start = terminal_hit[1]
-                    self._pending_wire_end = point
-                    self.update()
-                else:
-                    self.terminal_selected.emit(terminal)
+                self.terminal_selected.emit(terminal)
                 event.accept()
                 return
         device_id = self._device_at(point)
@@ -2900,11 +2924,6 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
         point = event.position() / self._zoom
         terminal_hit = self._terminal_at(point)
         self.terminal_hovered.emit(terminal_hit[0] if terminal_hit else None)
-        if self._pending_terminal is not None:
-            self._pending_wire_end = event.position() / self._zoom
-            self.update()
-            event.accept()
-            return
         if self._pan_position is not None:
             current = event.globalPosition().toPoint()
             delta = current - self._pan_position
@@ -2969,13 +2988,6 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
         self._pan_position = None
         self.unsetCursor()
         super().mouseReleaseEvent(event)
-
-    def keyPressEvent(self, event) -> None:  # noqa: N802
-        """Finish connector mode explicitly with Escape."""
-        if event.key() == Qt.Key.Key_Escape and self.finish_connection():
-            event.accept()
-            return
-        super().keyPressEvent(event)
 
     @staticmethod
     def _symbol_kind(device: Device) -> str:
@@ -3047,14 +3059,20 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
             pinspacing=1,
         ), tuple(f"tnasrevner_pin_{index}" for index in range(len(pins)))
 
-    @classmethod
     def _draw_schemdraw_symbol(
-        cls, painter: QPainter, kind: str, pins: list[ComponentPin]
+        self, painter: QPainter, kind: str, pins: list[ComponentPin]
     ) -> list[QPointF]:
         """Render one Schemdraw symbol and return its terminal endpoints."""
         from schemdraw import Drawing  # pylint: disable=import-outside-toplevel
 
-        element, anchor_names = cls._schemdraw_symbol(kind, pins)
+        cache_key = kind, tuple(pin.number for pin in pins)
+        cached = self._schemdraw_cache.get(cache_key)
+        if cached is not None:
+            renderer, target, endpoints = cached
+            renderer.render(painter, target)
+            return list(endpoints)
+
+        element, anchor_names = self._schemdraw_symbol(kind, pins)
         drawing = Drawing(show=False, fontsize=10)
         drawing.add(element)
         svg = drawing.get_imagedata("svg").replace(b"black", b"#e7edf5")
@@ -3072,8 +3090,8 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
             anchor_x = anchor.x if hasattr(anchor, "x") else anchor[0]
             anchor_y = anchor.y if hasattr(anchor, "y") else anchor[1]
             return QPointF(
-                anchor_x * cls._SCHEMDRAW_UNIT_TO_SVG,
-                -anchor_y * cls._SCHEMDRAW_UNIT_TO_SVG,
+                anchor_x * self._SCHEMDRAW_UNIT_TO_SVG,
+                -anchor_y * self._SCHEMDRAW_UNIT_TO_SVG,
             )
 
         center_svg = svg_coordinates(center_anchor)
@@ -3083,7 +3101,6 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
             viewbox.width(),
             viewbox.height(),
         )
-        renderer.render(painter, target)
 
         def map_anchor(anchor) -> QPointF:
             svg_point = svg_coordinates(anchor)
@@ -3094,7 +3111,10 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
                 + (svg_point.y() - viewbox.top()) / viewbox.height() * target.height(),
             )
 
-        return [map_anchor(element.anchors[name]) for name in anchor_names]
+        endpoints = tuple(map_anchor(element.anchors[name]) for name in anchor_names)
+        self._schemdraw_cache[cache_key] = renderer, target, endpoints
+        renderer.render(painter, target)
+        return list(endpoints)
 
     def _draw_device(
         self,
@@ -3270,15 +3290,6 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
                     text_y = stub.y() + (16 if outward.y() > 0 else -6)
                     painter.drawText(int(text_x), int(text_y), name)
 
-        if self._pending_wire_start is not None and self._pending_wire_end is not None:
-            start = self._pending_wire_start
-            end = self._pending_wire_end
-            middle_x = (start.x() + end.x()) / 2
-            painter.setPen(QPen(QColor("#66c2ff"), 10, Qt.PenStyle.DashLine))
-            painter.drawLine(start, QPointF(middle_x, start.y()))
-            painter.drawLine(QPointF(middle_x, start.y()), QPointF(middle_x, end.y()))
-            painter.drawLine(QPointF(middle_x, end.y()), end)
-
         orphan_y = 82 + len(devices) * 150
         for pad in pads:
             if pad.device_id or pad.net:
@@ -3292,20 +3303,17 @@ class SchematicView(QScrollArea):
     """Scrollable, zoomable schematic viewport."""
 
     layout_changed = Signal(str, float, float)
-    net_connection_requested = Signal(object, object)
     terminal_selected = Signal(object)
     terminal_hovered = Signal(object)
     terminal_net_edit_requested = Signal(object)
     terminal_menu_requested = Signal(object)
     device_context_requested = Signal(str)
-    connection_mode_changed = Signal(bool)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._zoom = 1.0
         self._canvas = SchematicCanvas()
         self._canvas.layout_changed.connect(self.layout_changed)
-        self._canvas.net_connection_requested.connect(self.net_connection_requested)
         self._canvas.terminal_selected.connect(self.terminal_selected)
         self._canvas.terminal_hovered.connect(self.terminal_hovered)
         self._canvas.terminal_net_edit_requested.connect(
@@ -3313,7 +3321,6 @@ class SchematicView(QScrollArea):
         )
         self._canvas.terminal_menu_requested.connect(self.terminal_menu_requested)
         self._canvas.device_context_requested.connect(self.device_context_requested)
-        self._canvas.connection_mode_changed.connect(self.connection_mode_changed)
         self._canvas.pan_requested.connect(self._pan_by)
         self.setWidget(self._canvas)
         self.setWidgetResizable(False)
@@ -3324,8 +3331,7 @@ class SchematicView(QScrollArea):
         self.setStyleSheet("QScrollArea { background: #20242b; }")
         self.viewport().setStyleSheet("background: #20242b;")
         self.setToolTip(
-            "Wheel/pinch: zoom; Shift+click: connector mode; Esc: finish; "
-            "Shift+right-click: edit net"
+            "Wheel/pinch: zoom; Connect + Shift+click: select terminals; Esc: exit"
         )
 
     def set_project(self, project: ProjectDocument | None) -> None:
@@ -3335,6 +3341,7 @@ class SchematicView(QScrollArea):
     def fit_overview(self) -> None:
         """Fit and center the complete schematic sheet."""
         self._canvas.fit_overview()
+        self._zoom = self._canvas.zoom()
 
     def actual_size(self) -> None:
         """Display schematic at logical 1:1 scale."""
@@ -3364,10 +3371,6 @@ class SchematicView(QScrollArea):
     def set_connection_mode(self, enabled: bool) -> None:
         """Set schematic cursor for connection editing."""
         self._canvas.set_connection_mode(enabled)
-
-    def finish_connection(self) -> bool:
-        """Finish a pending Shift-click connector session."""
-        return self._canvas.finish_connection()
 
     def event(self, event) -> bool:  # noqa: N802
         """Zoom schematic with native trackpad pinch gestures."""
@@ -3427,6 +3430,9 @@ class MainWindow(
         settings: QSettings | None = None,
     ) -> None:
         super().__init__()
+        application = QApplication.instance()
+        if application is not None:
+            application.installEventFilter(self)
         self.project: ProjectDocument | None = None
         self.store: ProjectStore | None = None
         self._dirty = False
@@ -3436,13 +3442,16 @@ class MainWindow(
         self._history_backup_dirty = True
         self._history_restoring = False
         self._syncing_views = False
+        self._board_view_sync_pending = False
+        self._pending_board_view_sync_source: ImageView | None = None
+        self._connection_mode = False
+        self._pending_connection_terminals: list[tuple[str, str, str | None]] = []
         self._pending_pad: Pad | None = None
         self._pending_device: PendingDevice | None = None
         self._add_device_pending = False
         self._selected_net: str | None = None
         self._selected_pad_id: str | None = None
         self._selected_schematic_terminal: tuple[str, str, str | None] | None = None
-        self._pending_board_connection_pads: list[str] = []
         self._pads_visible = True
         self._pad_display_mode = "both"
         self._pad_refresh_pending = False
@@ -3491,7 +3500,11 @@ class MainWindow(
             ["Pad", "Net", "Pin", "Function", "Component", "Value"]
         )
         self._net_table.cellChanged.connect(self._net_table_cell_changed)
-        self._tabs.addTab(self._net_table, "Nets")
+        self._tabs.addTab(self._net_table, "Connections")
+        self._nets_table = QTableWidget(0, 2)
+        self._nets_table.setHorizontalHeaderLabels(["NET Name", "Connections"])
+        self._nets_table.cellChanged.connect(self._nets_table_cell_changed)
+        self._tabs.addTab(self._nets_table, "NET")
         self._bom_table = QTableWidget(0, 6)
         self._bom_table.setHorizontalHeaderLabels(
             [
@@ -3509,9 +3522,6 @@ class MainWindow(
         self._tabs.addTab(self._bom_table, "BOM")
         self._schematic_view = SchematicView()
         self._schematic_view.layout_changed.connect(self._schematic_layout_changed)
-        self._schematic_view.net_connection_requested.connect(
-            self._connect_schematic_terminals
-        )
         self._schematic_view.terminal_selected.connect(self._select_schematic_terminal)
         self._schematic_view.terminal_hovered.connect(
             self._show_schematic_terminal_hover
@@ -3525,11 +3535,12 @@ class MainWindow(
         self._schematic_view.device_context_requested.connect(
             self._show_schematic_device_menu
         )
-        self._schematic_view.connection_mode_changed.connect(self._set_connection_mode)
         self._tabs.addTab(self._schematic_view, "Schematic")
         self._tabs.currentChanged.connect(self._update_view_tools)
         for view in (*self._views.values(), *self._side_views.values()):
-            view.view_changed.connect(lambda view=view: self._sync_board_views(view))
+            view.view_changed.connect(
+                lambda view=view: self._schedule_board_view_sync(view)
+            )
         for side, view in self._views.items():
             view.pad_clicked.connect(
                 lambda x, y, side=side: self._select_pad(side, x, y)
@@ -3683,6 +3694,13 @@ class MainWindow(
         self._show_pads_button = show_pads_button
         layout.addWidget(show_pads_button)
         layout.addSpacing(12)
+        info_button = add_button(
+            "Info",
+            QStyle.StandardPixmap.SP_FileDialogInfoView,
+            "Component or pad information",
+            self._show_info,
+        )
+        self._info_button = info_button
         device_button = add_button(
             "Add Footprint",
             QStyle.StandardPixmap.SP_FileDialogDetailedView,
@@ -3706,6 +3724,14 @@ class MainWindow(
         pad_button.setIcon(_pad_tool_icon())
         pad_button.setCheckable(True)
         self._add_pad_button = pad_button
+        connect_button = add_button(
+            "Connect",
+            QStyle.StandardPixmap.SP_DialogApplyButton,
+            "Connection mode: Shift+click pads or pins",
+            self._toggle_connection_mode,
+        )
+        connect_button.setCheckable(True)
+        self._connect_button = connect_button
         delete_button = add_button(
             "Delete",
             QStyle.StandardPixmap.SP_TrashIcon,
@@ -3755,12 +3781,6 @@ class MainWindow(
             "Quit Tnasrevner",
             self.close,
         )
-        self._net_mode_label = QLabel("Net edition - Esc to Stop", panel)
-        self._net_mode_label.setObjectName("netModeLabel")
-        self._net_mode_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._net_mode_label.setStyleSheet("color: #66c2ff; font-weight: 600;")
-        self._net_mode_label.setVisible(False)
-        layout.addWidget(self._net_mode_label)
         panel.setStyleSheet(
             "QPushButton { padding: 6px 8px; }"
             "QPushButton:checked { background: #b84a4a; color: white; }"
@@ -3786,9 +3806,9 @@ class MainWindow(
 
     def _update_view_tools(self, tab_index: int) -> None:
         """Enable only controls meaningful for active board or schematic view."""
-        schematic = tab_index == 6
+        non_image = tab_index >= _CONNECTIONS_TAB
         for button in getattr(self, "_view_tool_buttons", ()):
-            button.setEnabled(not schematic)
+            button.setEnabled(not non_image)
         if hasattr(self, "_actual_button"):
             self._actual_button.setEnabled(True)
         if hasattr(self, "_fit_button"):
@@ -3796,14 +3816,9 @@ class MainWindow(
 
     def _rotate_board_90(self) -> None:
         """Rotate both board images and all placed geometry by 90 degrees."""
+        self._exit_connection_mode()
         if not self.project or not self.store or not self.project.images:
             return
-        for asset in self.project.images:
-            pixmap = self._base_pixmap_for_asset(asset.side)
-            if pixmap.isNull():
-                continue
-            rotated = pixmap.transformed(QTransform().rotate(90))
-            self.store.write_asset(asset.path, self._pixmap_bytes(rotated))
 
         def rotate_point(x: float, y: float) -> tuple[float, float]:
             # QPixmap/QPainter +90° maps (x, y) to (1-y, x).
@@ -3821,6 +3836,22 @@ class MainWindow(
                 start = rotate_point(line[0], line[1])
                 end = rotate_point(line[2], line[3])
                 line = (*start, *end)
+            if asset.path == asset.original_path and asset.original_path:
+                transformations = asset.transformations + (
+                    (90.0, (0.0, 0.0, 1.0, 1.0)),
+                )
+                rotated_images.append(
+                    replace(
+                        asset,
+                        calibration_line=line,
+                        transformations=transformations,
+                    )
+                )
+                continue
+            pixmap = self._base_pixmap_for_asset(asset.side)
+            if not pixmap.isNull():
+                rotated = pixmap.transformed(QTransform().rotate(90))
+                self.store.write_asset(asset.path, self._pixmap_bytes(rotated))
             rotated_images.append(replace(asset, calibration_line=line))
         self.project.images = rotated_images
         self.project.pads = [
@@ -3857,11 +3888,90 @@ class MainWindow(
         self.statusBar().showMessage("Board rotated 90 degrees.", 3000)
 
     def _set_connection_mode(self, enabled: bool) -> None:
-        """Update cursor and palette status for connection editing."""
+        """Set global terminal-selection mode and cursor."""
+        self._connection_mode = enabled
+        if not enabled:
+            self._pending_connection_terminals.clear()
+        button = getattr(self, "_connect_button", None)
+        if button is not None:
+            button.blockSignals(True)
+            button.setChecked(enabled)
+            button.blockSignals(False)
         for view in (*self._views.values(), *self._side_views.values()):
             view.set_connection_mode(enabled)
         self._schematic_view.set_connection_mode(enabled)
-        self._net_mode_label.setVisible(enabled)
+        if enabled:
+            self.statusBar().showMessage("Connection mode, Esc to exit")
+
+    def _exit_connection_mode(self) -> None:
+        """Leave Connect mode without creating a partial connection."""
+        if not self._connection_mode:
+            return
+        self._set_connection_mode(False)
+        self.statusBar().clearMessage()
+
+    def _toggle_connection_mode(self) -> None:
+        """Toggle multi-terminal connection selection."""
+        if self._connection_mode:
+            self._exit_connection_mode()
+            return
+        self._cancel_pad_placement()
+        self._cancel_device_placement()
+        self._set_delete_mode(False)
+        self._disable_ruler()
+        self._set_connection_mode(True)
+
+    def _append_connection_terminal(self, value: object) -> None:
+        """Add one unique pad/pin to current Shift-click selection."""
+        if not self._connection_mode or not self.project:
+            return
+        terminal = self._validated_terminal(value)
+        if terminal is None or terminal in self._pending_connection_terminals:
+            return
+        self._pending_connection_terminals.append(terminal)
+        count = len(self._pending_connection_terminals)
+        self.statusBar().showMessage(
+            f"Connection mode, {count} terminal(s) selected, release Shift"
+        )
+
+    def _finish_connection_selection(self) -> bool:
+        """Create one net from all terminals selected before Shift release."""
+        if not self._connection_mode:
+            return False
+        terminals = tuple(self._pending_connection_terminals)
+        self._pending_connection_terminals.clear()
+        if len(terminals) >= 2:
+            target_net = self._connect_terminals(terminals)
+            if target_net is not None:
+                self.statusBar().showMessage(
+                    f"Connected terminals to net {target_net} — Connection mode, Esc to exit"
+                )
+                return True
+        self.statusBar().showMessage("Connection mode, Esc to exit")
+        return True
+
+    def _show_info(self) -> None:
+        """Show selected terminal info and exit any active connection mode."""
+        self._exit_connection_mode()
+        if not self.project:
+            QMessageBox.information(self, "Info", "No project loaded.")
+            return
+        if self._selected_schematic_terminal is not None:
+            self._show_schematic_terminal_hover(self._selected_schematic_terminal)
+            return
+        if self._selected_pad_id is not None:
+            pad = next(
+                (
+                    item
+                    for item in self.project.pads
+                    if item.pad_id == self._selected_pad_id
+                ),
+                None,
+            )
+            if pad is not None:
+                self._show_pad_hover(pad)
+                return
+        self.statusBar().showMessage("Select a component, pad, or pin for info", 3000)
 
     def _toggle_delete_mode(self) -> None:
         """Toggle continuous deletion mode from the tools palette."""
@@ -3871,6 +3981,7 @@ class MainWindow(
     def _set_delete_mode(self, enabled: bool) -> None:
         """Enable or disable deletion mode on every board view."""
         if enabled:
+            self._exit_connection_mode()
             if self._pending_pad is not None:
                 self._cancel_pad_placement()
             if self._pending_device is not None:
@@ -3932,6 +4043,7 @@ class MainWindow(
         if not enabled:
             self._disable_ruler()
             return
+        self._exit_connection_mode()
         views = self._active_views()
         scales = [self._ruler_scale_for_view(view) for view in views]
         if not any(scales):
@@ -4065,13 +4177,14 @@ class MainWindow(
 
     def _active_views(self) -> list[ImageView]:
         """Return image views belonging to current tab."""
-        if self._tabs.currentIndex() == 6:
+        index = self._tabs.currentIndex()
+        if index >= _CONNECTIONS_TAB:
             return []
-        if self._tabs.currentIndex() == 0:
+        if index == 0:
             return [self._views["top"]]
-        if self._tabs.currentIndex() == 1:
+        if index == 1:
             return [self._views["bottom"]]
-        if self._tabs.currentIndex() == 2:
+        if index == 2:
             return list(self._side_views.values())
         return [self._overlay_view]
 
@@ -4080,17 +4193,39 @@ class MainWindow(
         if self._syncing_views:
             return
         state = source.view_state()
+        active_views = tuple(self._active_views())
         self._syncing_views = True
         try:
             for view in (*self._views.values(), *self._side_views.values()):
                 if view is not source:
-                    view.apply_view_state(state)
+                    if view in active_views:
+                        view.apply_view_state(state)
+                    else:
+                        view.defer_view_state(state)
         finally:
             self._syncing_views = False
 
+    def _schedule_board_view_sync(self, source: ImageView) -> None:
+        """Coalesce scrollbar and zoom signals into one board-view sync."""
+        if self._syncing_views:
+            return
+        self._pending_board_view_sync_source = source
+        if self._board_view_sync_pending:
+            return
+        self._board_view_sync_pending = True
+        QTimer.singleShot(0, self._finish_board_view_sync)
+
+    def _finish_board_view_sync(self) -> None:
+        """Apply the newest coalesced board-view state."""
+        source = self._pending_board_view_sync_source
+        self._pending_board_view_sync_source = None
+        self._board_view_sync_pending = False
+        if source is not None:
+            self._sync_board_views(source)
+
     def _actual_size(self) -> None:
         """Set active image view(s) to 1:1 scale."""
-        if self._tabs.currentIndex() == 6:
+        if self._tabs.currentIndex() == _SCHEMATIC_TAB:
             self._schematic_view.actual_size()
             return
         for view in self._active_views():
@@ -4098,7 +4233,7 @@ class MainWindow(
 
     def _fit_images(self) -> None:
         """Fit active image view(s) to their available space."""
-        if self._tabs.currentIndex() == 6:
+        if self._tabs.currentIndex() == _SCHEMATIC_TAB:
             self._schematic_view.fit_overview()
             return
         for view in self._active_views():
@@ -4116,6 +4251,7 @@ class MainWindow(
 
     def add_device(self) -> None:
         """Select a footprint, collect its reference, and arm placement."""
+        self._exit_connection_mode()
         self._set_delete_mode(False)
         if not self.project or not self.store:
             QMessageBox.information(
@@ -4632,6 +4768,7 @@ class MainWindow(
 
     def create_pad(self) -> None:
         """Start rectangle placement on the currently visible board view."""
+        self._exit_connection_mode()
         self._set_delete_mode(False)
         if not self.project:
             QMessageBox.information(
@@ -4774,8 +4911,7 @@ class MainWindow(
 
     def _select_pad(self, side: str, x: float, y: float) -> None:
         """Toggle same-net connections without changing the current view."""
-        if self._pending_board_connection_pads:
-            self._select_board_connection_pad(side, x, y)
+        if self._connection_mode:
             return
         view_state = self._active_views()[0].view_state()
         pad = self._pad_at(side, x, y)
@@ -4785,6 +4921,7 @@ class MainWindow(
         else:
             self._selected_net = pad.net if pad else None
             self._selected_pad_id = pad.pad_id if pad else None
+        self._schematic_view.set_selected_net(self._selected_net)
         LOGGER.info(
             "Pad click side=%s point=(%.5f,%.5f) pad=%s net=%s selected=%s",
             side,
@@ -4797,56 +4934,13 @@ class MainWindow(
         self._schedule_pad_refresh(view_state)
 
     def _select_board_connection_pad(self, side: str, x: float, y: float) -> None:
-        """Connect each new Shift-clicked pad to the session origin immediately."""
+        """Collect one Shift-clicked board pad for the current connection group."""
+        if not self._connection_mode:
+            return
         pad = self._pad_at(side, x, y)
         if pad is None:
             return
-        self._set_connection_mode(True)
-        view_state = self._active_views()[0].view_state()
-        if not self._pending_board_connection_pads:
-            selected = next(
-                (
-                    item
-                    for item in self.project.pads
-                    if item.pad_id == self._selected_pad_id
-                ),
-                None,
-            )
-            if selected is not None:
-                self._pending_board_connection_pads.append(selected.pad_id)
-            else:
-                self._pending_board_connection_pads.append(pad.pad_id)
-                self._selected_pad_id = pad.pad_id
-                self._selected_net = pad.net
-                self.statusBar().showMessage(
-                    "Connector mode: origin selected; Shift-click another pad."
-                )
-                self._schedule_pad_refresh(view_state)
-                return
-        if pad.pad_id in self._pending_board_connection_pads:
-            return
-        origin = next(
-            (
-                item
-                for item in self.project.pads
-                if item.pad_id == self._pending_board_connection_pads[0]
-            ),
-            None,
-        )
-        if origin is None:
-            self._pending_board_connection_pads = []
-            return
-        self._pending_board_connection_pads.append(pad.pad_id)
-        self._selected_pad_id = origin.pad_id
-        self._set_connection_mode(True)
-        self._connect_schematic_terminals(
-            self._pad_terminal(origin), self._pad_terminal(pad)
-        )
-        self._apply_active_view_state(view_state)
-        count = len(self._pending_board_connection_pads)
-        self.statusBar().showMessage(
-            f"Connector mode: {count} pad(s) linked; Esc finishes."
-        )
+        self._append_connection_terminal(self._pad_terminal(pad))
 
     @staticmethod
     def _pad_terminal(pad: Pad) -> tuple[str, str, str | None]:
@@ -4854,15 +4948,6 @@ class MainWindow(
         if pad.device_id and pad.number:
             return "pin", pad.device_id, pad.number
         return "pad", pad.pad_id, None
-
-    def _finish_board_connection(self) -> bool:
-        """Leave board connector mode; links were created after every click."""
-        if not self._pending_board_connection_pads:
-            return False
-        self._pending_board_connection_pads = []
-        self._set_connection_mode(False)
-        self.statusBar().showMessage("Connector mode finished.", 3000)
-        return True
 
     def _set_pads_visible(self, visible: bool) -> None:
         """Show or hide pad overlays while preserving the current view."""
@@ -4911,10 +4996,12 @@ class MainWindow(
     def _refresh_views_preserving_state(self) -> None:
         """Refresh overlays without changing the current tab, zoom, or pan."""
         current_tab = self._tabs.currentIndex()
-        state = self._active_views()[0].view_state()
+        active_views = self._active_views()
+        state = active_views[0].view_state() if active_views else None
         self._refresh_views()
         self._tabs.setCurrentIndex(current_tab)
-        self._apply_active_view_state(state)
+        if state is not None:
+            self._apply_active_view_state(state)
 
     def _apply_active_view_state(self, state: tuple[float, float, float]) -> None:
         """Restore zoom and pan after refreshing visible pad markers."""
@@ -4924,7 +5011,7 @@ class MainWindow(
                 view.apply_view_state(state)
         finally:
             self._syncing_views = False
-        if self._tabs.currentIndex() not in (3, 4, 5, 6):
+        if self._tabs.currentIndex() < _CONNECTIONS_TAB:
             self._sync_board_views(self._active_views()[0])
 
     def _connect_pad_to_net(self, side: str, x: float, y: float) -> None:
@@ -5079,7 +5166,7 @@ class MainWindow(
                 )
             )
             if pad is not None and pad.number is not None:
-                pin_action = menu.addAction("Edit function…")
+                pin_action = menu.addAction("Edit PIN…")
                 pin_action.triggered.connect(
                     lambda: self._edit_component_pin(device.device_id, pad.number)
                 )
@@ -5227,6 +5314,8 @@ class MainWindow(
             for item in self.project.devices
         ]
         self._dirty = True
+        self._refresh_net_table()
+        self._schematic_view.set_project(self.project)
         self._update_title()
 
     def _pad_menu_closed(self, menu: QMenu) -> None:
@@ -5386,34 +5475,11 @@ class MainWindow(
             self._net_dialog is not None,
         )
 
-    def _history_asset_snapshot(self) -> dict[str, str]:
-        """Capture project-referenced assets for one undo snapshot."""
-        if not self.project or not self.store:
-            return {}
-        paths = {
-            path
-            for image in self.project.images
-            for path in (image.path, image.original_path)
-            if path
-        }
-        paths.update(device.footprint_path for device in self.project.devices)
-        assets: dict[str, str] = {}
-        for path in paths:
-            try:
-                content = self.store.read_asset(path)
-            except ProjectFormatError:
-                continue
-            assets[path] = base64.b64encode(content).decode("ascii")
-        return assets
-
     def _history_snapshot(self) -> dict:
-        """Return JSON-safe project and asset state for undo/redo."""
+        """Return the JSON project state for undo/redo."""
         if not self.project:
             return {}
-        return {
-            "project": self.project.to_dict(),
-            "assets": self._history_asset_snapshot(),
-        }
+        return {"project": self.project.to_dict()}
 
     @staticmethod
     def _history_signature(snapshot: dict) -> str:
@@ -5482,8 +5548,14 @@ class MainWindow(
             if isinstance(states, list) and all(
                 isinstance(item, dict) for item in states
             ):
-                self._history = states[-50:]
+                legacy_assets = any("assets" in item for item in states[-50:])
+                self._history = [
+                    {"project": item["project"]}
+                    for item in states[-50:]
+                    if isinstance(item.get("project"), dict)
+                ]
                 self._history_index = max(-1, min(index, len(self._history) - 1))
+                self._history_backup_dirty = legacy_assets
         except (
             ProjectFormatError,
             UnicodeError,
@@ -5527,7 +5599,7 @@ class MainWindow(
     def _capture_history_view_state(self) -> tuple:
         """Capture the current tab and viewport without project content."""
         tab = self._tabs.currentIndex()
-        if tab == 6:
+        if tab == _SCHEMATIC_TAB:
             return tab, self._schematic_view.view_state()
         views = self._active_views()
         return tab, views[0].view_state() if views else None
@@ -5536,7 +5608,7 @@ class MainWindow(
         """Restore the tab and viewport after an undo or redo refresh."""
         tab, view_state = state
         self._tabs.setCurrentIndex(tab)
-        if tab == 6 and view_state is not None:
+        if tab == _SCHEMATIC_TAB and view_state is not None:
             self._schematic_view.apply_view_state(view_state)
         elif view_state is not None:
             self._apply_active_view_state(view_state)
@@ -5585,6 +5657,17 @@ class MainWindow(
         quit_action.triggered.connect(self.close)
         file_menu.addAction(quit_action)
 
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802
+        """Commit the current terminal group when Shift is released."""
+        if (
+            self._connection_mode
+            and event.type() == QEvent.Type.KeyRelease
+            and event.key() == Qt.Key.Key_Shift
+        ):
+            self._finish_connection_selection()
+            return True
+        return super().eventFilter(watched, event)
+
     def keyPressEvent(self, event) -> None:  # noqa: N802
         """Switch board view with `T`, `B`, or a double press."""
         key = event.key()
@@ -5607,9 +5690,8 @@ class MainWindow(
                 self._cancel_pad_placement()
                 event.accept()
                 return
-            connected = self._finish_board_connection()
-            connected = self._schematic_view.finish_connection() or connected
-            if connected:
+            if self._connection_mode:
+                self._exit_connection_mode()
                 event.accept()
                 return
         if key == Qt.Key.Key_Escape and self._pending_device is not None:
@@ -5692,7 +5774,7 @@ class MainWindow(
         self._device_footprint_cache.clear()
         self._cancel_device_placement()
         self._refresh_views()
-        if self._tabs.currentIndex() == 6:
+        if self._tabs.currentIndex() == _SCHEMATIC_TAB:
             QTimer.singleShot(0, self._schematic_view.fit_overview)
         self._update_title()
 
@@ -5744,11 +5826,18 @@ class MainWindow(
             "side_by_side",
             "both",
             "nets",
+            "net_summary",
             "bom",
             "schematic",
         )[self._tabs.currentIndex()]
-        if self._tabs.currentIndex() == 6:
+        if self._tabs.currentIndex() == _SCHEMATIC_TAB:
             zoom, pan_x, pan_y = self._schematic_view.view_state()
+        elif self._tabs.currentIndex() >= _CONNECTIONS_TAB:
+            zoom, pan_x, pan_y = (
+                self.project.display.zoom,
+                self.project.display.pan_x,
+                self.project.display.pan_y,
+            )
         else:
             display_view = self._active_views()[0]
             zoom, pan_x, pan_y = display_view.view_state()
@@ -5820,6 +5909,9 @@ class MainWindow(
     ) -> None:  # noqa: N802  # pylint: disable=invalid-name
         """Prevent accidental loss of unsaved project changes."""
         if self._close_when_cache_finishes:
+            application = QApplication.instance()
+            if application is not None:
+                application.removeEventFilter(self)
             event.accept()
             return
         if not self._confirm_pending_changes():
@@ -5835,10 +5927,14 @@ class MainWindow(
             self.hide()
             event.ignore()
             return
+        application = QApplication.instance()
+        if application is not None:
+            application.removeEventFilter(self)
         event.accept()
 
     def manage_picture(self) -> None:
         """Choose a side, then load it or open its image editor."""
+        self._exit_connection_mode()
         if not self.project or not self.store:
             QMessageBox.information(
                 self, "No project", "Create or open a project first."
@@ -5879,27 +5975,34 @@ class MainWindow(
         edited = self._edit_imported_image(QPixmap(str(source_path)), side=side)
         if edited is None:
             return
-        edited_image, pixels_per_mm, calibration_line, calibration_length_mm = edited
-        relative_path = f"assets/{side}.png"
+        if len(edited) == 4:
+            edited = (*edited, (0.0, (0.0, 0.0, 1.0, 1.0)))
+        (
+            edited_image,
+            pixels_per_mm,
+            calibration_line,
+            calibration_length_mm,
+            transformation,
+        ) = edited
         original_path = f"assets/original/{side}{source_path.suffix.lower()}"
         try:
             self.store.write_asset(original_path, source_path.read_bytes())
         except OSError as error:
             QMessageBox.critical(self, "Import failed", str(error))
             return
-        self.store.write_asset(relative_path, self._pixmap_bytes(edited_image))
         self.project.images = [
             image for image in self.project.images if image.side != side
         ]
         self.project.images.append(
             ImageAsset(
                 side,
-                relative_path,
+                original_path,
                 source_path.name,
                 pixels_per_mm,
                 original_path,
                 calibration_line,
                 calibration_length_mm,
+                (transformation,),
             )
         )
         self._image_cache.pop(side, None)
@@ -5951,9 +6054,8 @@ class MainWindow(
         if asset is None:
             QMessageBox.information(self, "No image", f"No {side} image imported.")
             return
-        image = QPixmap()
         try:
-            image.loadFromData(self.store.read_asset(asset.path))
+            image = self._base_pixmap_for_asset(side)
         except ProjectFormatError as error:
             QMessageBox.warning(self, "Edit failed", str(error))
             return
@@ -5969,8 +6071,21 @@ class MainWindow(
         )
         if edited is None:
             return
-        edited_image, pixels_per_mm, calibration_line, calibration_length_mm = edited
-        self.store.write_asset(asset.path, self._pixmap_bytes(edited_image))
+        if len(edited) == 4:
+            edited = (*edited, (0.0, (0.0, 0.0, 1.0, 1.0)))
+        (
+            edited_image,
+            pixels_per_mm,
+            calibration_line,
+            calibration_length_mm,
+            transformation,
+        ) = edited
+        transformations = asset.transformations + (transformation,)
+        legacy_working_image = asset.original_path is not None and (
+            asset.path != asset.original_path or not asset.transformations
+        )
+        if legacy_working_image:
+            self.store.write_asset(asset.path, self._pixmap_bytes(edited_image))
         self.project.images = [
             (
                 ImageAsset(
@@ -5981,6 +6096,7 @@ class MainWindow(
                     image.original_path,
                     calibration_line,
                     calibration_length_mm,
+                    transformations,
                 )
                 if image.side == side
                 else image
@@ -6006,6 +6122,7 @@ class MainWindow(
             float,
             tuple[float, float, float, float] | None,
             float,
+            tuple[float, tuple[float, float, float, float]],
         ]
         | None
     ):
@@ -6028,6 +6145,7 @@ class MainWindow(
             dialog.pixels_per_mm(),
             dialog.calibration_line(),
             dialog.calibration_length_mm(),
+            dialog.transformation(),
         )
 
     @staticmethod
@@ -6077,8 +6195,10 @@ class MainWindow(
         self._overlay_view.set_footprint_overlays(())
         self._overlay_view.set_pad_labels(overlay_labels)
         self._refresh_net_table()
+        self._refresh_nets_table()
         self._refresh_bom_table()
         self._schematic_view.set_project(self.project)
+        self._schematic_view.set_selected_net(self._selected_net)
         if self.project:
             self._tabs.setCurrentIndex(
                 {
@@ -6087,8 +6207,9 @@ class MainWindow(
                     "side_by_side": 2,
                     "both": 3,
                     "nets": 4,
-                    "bom": 5,
-                    "schematic": 6,
+                    "net_summary": 5,
+                    "bom": 6,
+                    "schematic": 7,
                 }[self.project.display.mode]
             )
             state = (
@@ -6102,7 +6223,7 @@ class MainWindow(
                     view.apply_view_state(state)
             finally:
                 self._syncing_views = False
-            if self._tabs.currentIndex() not in (3, 4, 5, 6):
+            if self._tabs.currentIndex() < _CONNECTIONS_TAB:
                 self._sync_board_views(self._active_views()[0])
         else:
             self._sync_board_views(self._views["top"])
@@ -6181,7 +6302,7 @@ class MainWindow(
                     (5, device.value if device is not None else ""),
                 ):
                     item = QTableWidgetItem(value)
-                    if column in (2, 4, 5):
+                    if column in (1, 2, 4, 5):
                         item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                     item.setData(
                         Qt.ItemDataRole.UserRole,
@@ -6194,6 +6315,125 @@ class MainWindow(
                     self._net_table.setItem(row, column, item)
         finally:
             self._net_table.blockSignals(False)
+
+    def _sync_net_registry(self) -> None:
+        """Keep registry entries aligned with assigned pads and pins."""
+        if not self.project:
+            return
+        names = {
+            net
+            for net in (
+                [pad.net for pad in self.project.pads]
+                + [pin.net_id for device in self.project.devices for pin in device.pins]
+            )
+            if net
+        }
+        used = {name.casefold() for name in names}
+        self.project.nets = [
+            net for net in self.project.nets if net.name.casefold() in used
+        ]
+        if self._selected_net and self._selected_net.casefold() not in used:
+            self._selected_net = None
+        known = {net.name.casefold() for net in self.project.nets}
+        for name in sorted(names):
+            key = name.casefold()
+            if key not in known:
+                self.project.nets.append(Net(name=name))
+                known.add(key)
+
+    def _refresh_nets_table(self) -> None:
+        """Show one editable row per NET and its terminal count."""
+        if not self.project:
+            self._nets_table.setRowCount(0)
+            return
+        self._ensure_component_pins()
+        self._sync_net_registry()
+        counts = {
+            net.name: sum(pad.net == net.name for pad in self.project.pads)
+            + sum(
+                pin.net_id == net.name
+                for device in self.project.devices
+                for pin in device.pins
+            )
+            for net in self.project.nets
+        }
+        nets = sorted(self.project.nets, key=lambda net: net.name.casefold())
+        self._nets_table.blockSignals(True)
+        try:
+            self._nets_table.setRowCount(len(nets))
+            for row, net in enumerate(nets):
+                name_item = QTableWidgetItem(net.name)
+                name_item.setData(Qt.ItemDataRole.UserRole, net.net_id)
+                self._nets_table.setItem(row, 0, name_item)
+                count_item = QTableWidgetItem(str(counts[net.name]))
+                count_item.setFlags(count_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                self._nets_table.setItem(row, 1, count_item)
+        finally:
+            self._nets_table.blockSignals(False)
+
+    def _nets_table_cell_changed(self, row: int, column: int) -> None:
+        """Rename a NET from the summary table; connection count stays read-only."""
+        if not self.project or column != 0:
+            return
+        item = self._nets_table.item(row, column)
+        if item is None:
+            return
+        net_id = item.data(Qt.ItemDataRole.UserRole)
+        net = next(
+            (
+                candidate
+                for candidate in self.project.nets
+                if candidate.net_id == net_id
+            ),
+            None,
+        )
+        if net is None:
+            return
+        new_name = item.text().strip()
+        if not new_name or any(
+            candidate.net_id != net.net_id
+            and candidate.name.casefold() == new_name.casefold()
+            for candidate in self.project.nets
+        ):
+            self._nets_table.blockSignals(True)
+            item.setText(net.name)
+            self._nets_table.blockSignals(False)
+            self.statusBar().showMessage("NET name invalid or already used", 3000)
+            return
+        self._rename_net(net, new_name)
+
+    def _rename_net(self, net: Net, new_name: str) -> None:
+        """Rename NET registry entry and every pad/pin assignment."""
+        old_name = net.name
+        if old_name == new_name:
+            return
+        self.project.nets = [
+            replace(item, name=new_name) if item.net_id == net.net_id else item
+            for item in self.project.nets
+        ]
+        self.project.pads = [
+            replace(pad, net=new_name) if pad.net == old_name else pad
+            for pad in self.project.pads
+        ]
+        self.project.devices = [
+            replace(
+                device,
+                pins=[
+                    replace(pin, net_id=new_name) if pin.net_id == old_name else pin
+                    for pin in device.pins
+                ],
+            )
+            for device in self.project.devices
+        ]
+        if self._selected_net == old_name:
+            self._selected_net = new_name
+        self._dirty = True
+        current_tab = self._tabs.currentIndex()
+        self._refresh_views()
+        self._tabs.setCurrentIndex(current_tab)
+        self._schematic_view.set_selected_net(self._selected_net)
+        self._update_title()
+        self.statusBar().showMessage(f"NET renamed: {old_name} → {new_name}", 3000)
 
     def _ensure_component_pins(self) -> None:
         """Migrate loaded footprint pads into complete component pin records."""
@@ -6269,7 +6509,7 @@ class MainWindow(
 
     def _net_table_cell_changed(self, row: int, column: int) -> None:
         """Persist function or net edits made in the Nets tab."""
-        if not self.project or column not in (1, 3):
+        if not self.project or column != 3:
             return
         pad_item = self._net_table.item(row, 0)
         value_item = self._net_table.item(row, column)
@@ -6281,9 +6521,6 @@ class MainWindow(
         value = value_item.text().strip()
         pad = next((item for item in self.project.pads if item.pad_id == pad_id), None)
         _, device = self._component_pin_for_pad(pad) if pad else (None, None)
-        if column == 1:
-            self._assign_pad_net(pad_id, value)
-            return
         if pad is None:
             return
         if device is None:
@@ -6647,7 +6884,18 @@ class MainWindow(
         if device is None:
             return None
         pin = next((item for item in device.pins if item.number == number), None)
-        return pin.net_id if pin else None
+        if pin is None:
+            return None
+        if pin.net_id:
+            return pin.net_id
+        return next(
+            (
+                pad.net
+                for pad in self.project.pads
+                if pad.device_id == object_id and pad.number == number and pad.net
+            ),
+            None,
+        )
 
     @staticmethod
     def _validated_terminal(value: object) -> tuple[str, str, str | None] | None:
@@ -6669,17 +6917,38 @@ class MainWindow(
         terminal = self._validated_terminal(value)
         if terminal is None:
             return
+        if self._connection_mode:
+            self._append_connection_terminal(terminal)
+            return
         if terminal == self._selected_schematic_terminal:
             self._selected_schematic_terminal = None
             self._selected_net = None
             self._selected_pad_id = None
+            self.statusBar().clearMessage()
         else:
             self._selected_schematic_terminal = terminal
             self._selected_net = self._terminal_net(terminal)
             kind, object_id, number = terminal
             if kind == "pad":
                 self._selected_pad_id = object_id
+                selected_label = next(
+                    (pad.name for pad in self.project.pads if pad.pad_id == object_id),
+                    "Pad",
+                )
             else:
+                device = next(
+                    (
+                        item
+                        for item in self.project.devices
+                        if item.device_id == object_id
+                    ),
+                    None,
+                )
+                selected_label = (
+                    f"{device.reference}.{number}"
+                    if device is not None
+                    else f"Pin {number}"
+                )
                 pad = next(
                     (
                         item
@@ -6689,6 +6958,9 @@ class MainWindow(
                     None,
                 )
                 self._selected_pad_id = pad.pad_id if pad else None
+            self.statusBar().showMessage(
+                f"{selected_label} | Net: {self._selected_net or '—'}"
+            )
         self._schematic_view.set_selected_net(self._selected_net)
 
     def _assign_schematic_terminal_net(
@@ -6778,10 +7050,10 @@ class MainWindow(
         self._pad_menu = menu
         menu.popup(QCursor.pos())
 
-    def _next_generic_net_name(self) -> str:
-        """Return the first unused automatic net name N1, N2, etc."""
+    def _next_connection_net_name(self) -> str:
+        """Return first unused NT1..NT9999 name."""
         if not self.project:
-            return "N1"
+            return "NT1"
         used = {
             net.casefold()
             for net in (
@@ -6790,32 +7062,43 @@ class MainWindow(
             )
             if net
         }
-        index = 1
-        while f"n{index}" in used:
-            index += 1
-        return f"N{index}"
+        for index in range(1, 10_000):
+            candidate = f"NT{index}"
+            if candidate.casefold() not in used:
+                return candidate
+        return "NT9999"
 
-    @Slot(object, object)
-    def _connect_schematic_terminals(self, first: object, second: object) -> None:
-        """Create or merge a net between two selected terminals."""
+    def _connect_terminals(self, values: tuple[object, ...]) -> str | None:
+        """Create one shared net for all selected pads/pins."""
         if not self.project:
-            return
-        first = self._validated_terminal(first)
-        second = self._validated_terminal(second)
-        if first is None or second is None:
-            return
-        first_net = self._terminal_net(first)
-        second_net = self._terminal_net(second)
-        target_net = first_net or second_net or self._next_generic_net_name()
-        merged_net = second_net if first_net and second_net != first_net else None
-        terminals = {first, second}
+            return None
+        terminals = tuple(
+            terminal
+            for value in values
+            if (terminal := self._validated_terminal(value)) is not None
+        )
+        if len(terminals) < 2:
+            return None
+        view_state = self._capture_history_view_state()
+        existing_nets = tuple(
+            dict.fromkeys(
+                self._terminal_net(terminal)
+                for terminal in terminals
+                if self._terminal_net(terminal) is not None
+            )
+        )
+        target_net = (
+            existing_nets[0] if existing_nets else self._next_connection_net_name()
+        )
+        merged_nets = set(existing_nets)
+        terminal_set = set(terminals)
         self.project.pads = [
             replace(
                 pad,
                 net=(
                     target_net
-                    if ("pad", pad.pad_id, None) in terminals
-                    or (merged_net is not None and pad.net == merged_net)
+                    if pad.net in merged_nets
+                    or ("pad", pad.pad_id, None) in terminal_set
                     else pad.net
                 ),
             )
@@ -6828,8 +7111,8 @@ class MainWindow(
                     pin,
                     net_id=(
                         target_net
-                        if ("pin", device.device_id, pin.number) in terminals
-                        or (merged_net is not None and pin.net_id == merged_net)
+                        if pin.net_id in merged_nets
+                        or ("pin", device.device_id, pin.number) in terminal_set
                         else pin.net_id
                     ),
                 )
@@ -6839,7 +7122,7 @@ class MainWindow(
         self.project.devices = devices
         pin_terminals = {
             (object_id, number)
-            for kind, object_id, number in terminals
+            for kind, object_id, number in terminal_set
             if kind == "pin"
         }
         self.project.pads = [
@@ -6852,12 +7135,17 @@ class MainWindow(
         ]
         self._selected_net = target_net
         self._dirty = True
-        current_tab = self._tabs.currentIndex()
         self._refresh_views()
-        self._tabs.setCurrentIndex(current_tab)
+        self._restore_history_view_state(view_state)
         self._schematic_view.set_selected_net(self._selected_net)
         self._update_title()
         self.statusBar().showMessage(f"Connected terminals to net {target_net}.", 3000)
+        return target_net
+
+    @Slot(object, object)
+    def _connect_schematic_terminals(self, first: object, second: object) -> None:
+        """Compatibility wrapper for direct two-terminal net actions."""
+        self._connect_terminals((first, second))
 
     def _refresh_overlay(self, images: dict[str, QPixmap]) -> None:
         """Compose top and bottom images in the same CMS top-view orientation."""
@@ -6903,43 +7191,6 @@ class MainWindow(
         if self._pad_display_mode == "image":
             return pixmap
         return pixmap
-
-    def _draw_devices(self, pixmap: QPixmap, side: str) -> None:
-        """Draw every persisted KiCad footprint at calibrated physical scale."""
-        if not self.project or not self.store:
-            return
-        image = next(
-            (asset for asset in self.project.images if asset.side == side), None
-        )
-        if image is None:
-            return
-        pixels_per_mm = image.measured_pixels_per_mm(pixmap.width(), pixmap.height())
-        if pixels_per_mm is None:
-            pixels_per_mm = image.pixels_per_mm
-        if pixels_per_mm is None:
-            return
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        for device in self.project.devices:
-            if device.side != side:
-                continue
-            footprint = self._footprint_for_device(device)
-            if footprint is None:
-                continue
-            painter.save()
-            painter.translate(
-                device.x * (pixmap.width() - 1),
-                device.y * (pixmap.height() - 1),
-            )
-            _paint_footprint(
-                painter,
-                footprint,
-                pixels_per_mm,
-                side,
-                device.rotation,
-            )
-            painter.restore()
-        painter.end()
 
     def _footprint_for_device(self, device: Device) -> Footprint | None:
         """Decode and cache an embedded footprint used by a placed device."""
@@ -7044,7 +7295,7 @@ class MainWindow(
             )
 
     def _base_pixmap_for_asset(self, side: str) -> QPixmap:
-        """Load and cache one undecorated working image."""
+        """Load the source image and replay its crop/rotation operations."""
         if not self.project or not self.store:
             return QPixmap()
         asset = next(
@@ -7054,20 +7305,46 @@ class MainWindow(
             return QPixmap()
         if side in self._image_cache:
             return self._image_cache[side]
+        source_path = asset.path
         try:
             if self.store.is_archive:
                 pixmap = QPixmap()
-                pixmap.loadFromData(self.store.read_asset(asset.path))
+                pixmap.loadFromData(self.store.read_asset(source_path))
             else:
-                pixmap = QPixmap(str(self.store.root / asset.path))
-        except ProjectFormatError as error:
-            QMessageBox.warning(self, "Image unavailable", str(error))
-            return QPixmap()
+                pixmap = QPixmap(str(self.store.root / source_path))
+        except ProjectFormatError:
+            if not asset.original_path:
+                QMessageBox.warning(
+                    self, "Image unavailable", f"Missing image asset: {source_path}"
+                )
+                return QPixmap()
+            source_path = asset.original_path
+            if self.store.is_archive:
+                pixmap = QPixmap()
+                pixmap.loadFromData(self.store.read_asset(source_path))
+            else:
+                pixmap = QPixmap(str(self.store.root / source_path))
         if pixmap.isNull():
             QMessageBox.warning(
-                self, "Image unavailable", f"Cannot decode image asset: {asset.path}"
+                self, "Image unavailable", f"Cannot decode image asset: {source_path}"
             )
             return pixmap
+        if asset.transformations and source_path == asset.original_path:
+            for rotation, crop in asset.transformations:
+                if rotation:
+                    pixmap = pixmap.transformed(
+                        QTransform().rotate(rotation),
+                        Qt.TransformationMode.SmoothTransformation,
+                    )
+                x, y, width, height = crop
+                rect = QRect(
+                    round(x * pixmap.width()),
+                    round(y * pixmap.height()),
+                    round(width * pixmap.width()),
+                    round(height * pixmap.height()),
+                ).intersected(pixmap.rect())
+                if rect.width() >= 2 and rect.height() >= 2:
+                    pixmap = pixmap.copy(rect)
         self._image_cache[side] = pixmap
         LOGGER.debug(
             "Cached working image side=%s size=%sx%s",
@@ -7076,97 +7353,6 @@ class MainWindow(
             pixmap.height(),
         )
         return pixmap
-
-    def _draw_pads(  # pylint: disable=too-many-locals,too-many-statements
-        self, pixmap: QPixmap, side: str
-    ) -> None:
-        """Draw persisted pad markers over one board-side image."""
-        if (
-            self._pad_display_mode == "image"
-            or not self.project
-            or not self.project.pads
-        ):
-            return
-        painter = QPainter(pixmap)
-        radius = max(5, min(pixmap.width(), pixmap.height()) // 100)
-        pads = [pad for pad in self.project.pads if pad.side == side]
-        painter.setOpacity(0.45)
-        for pad in pads:
-            pin_one = pad.device_id is not None and pad.number == "1"
-            painter.setBrush(Qt.GlobalColor.yellow if pin_one else Qt.GlobalColor.red)
-            painter.setPen(
-                QPen(
-                    (
-                        Qt.GlobalColor.white
-                        if pad.pad_id == self._selected_pad_id
-                        else Qt.GlobalColor.yellow
-                    ),
-                    (
-                        max(2, radius // 2)
-                        if pad.pad_id == self._selected_pad_id
-                        else max(2, radius // 3)
-                    ),
-                )
-            )
-            left = round(pad.x * (pixmap.width() - 1))
-            top = round(pad.y * (pixmap.height() - 1))
-            right = max(left + 2, round((pad.x + pad.width) * (pixmap.width() - 1)))
-            bottom = max(top + 2, round((pad.y + pad.height) * (pixmap.height() - 1)))
-            width, height = right - left, bottom - top
-            center = QPointF(left + width / 2, top + height / 2)
-            painter.save()
-            painter.translate(center)
-            painter.rotate(pad.rotation)
-            rectangle = QRectF(-width / 2, -height / 2, width, height)
-            if pad.shape in {"circle", "oval"}:
-                painter.drawEllipse(rectangle)
-            elif pad.shape == "roundrect":
-                painter.drawRoundedRect(rectangle, 20, 20, Qt.SizeMode.RelativeSize)
-            else:
-                painter.drawRect(rectangle)
-            painter.restore()
-            painter.setOpacity(0.45)
-        painter.end()
-
-    def _draw_connections(self, pixmap: QPixmap, side: str) -> None:
-        """Draw traces last: above image, footprint, and pad layers."""
-        if (
-            self._pad_display_mode == "image"
-            or not self.project
-            or not self._selected_net
-        ):
-            return
-        pads = [
-            pad
-            for pad in self.project.pads
-            if pad.side == side and pad.net == self._selected_net
-        ]
-        if len(pads) < 2:
-            return
-        centers = {
-            pad.pad_id: QPoint(
-                round((pad.x + pad.width / 2) * (pixmap.width() - 1)),
-                round((pad.y + pad.height / 2) * (pixmap.height() - 1)),
-            )
-            for pad in pads
-        }
-        origin_id = (
-            self._selected_pad_id
-            if self._selected_pad_id in centers
-            else pads[0].pad_id
-        )
-        origin = centers[origin_id]
-        painter = QPainter(pixmap)
-        painter.setPen(
-            QPen(
-                Qt.GlobalColor.white,
-                max(2, min(pixmap.width(), pixmap.height()) // 200),
-            )
-        )
-        for pad_id, target in centers.items():
-            if pad_id != origin_id:
-                painter.drawLine(origin, target)
-        painter.end()
 
     def _update_title(self) -> None:
         self._record_history()
