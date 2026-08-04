@@ -1498,6 +1498,8 @@ class ImageView(
     pad_connection_requested = Signal(float, float)
     device_placed = Signal(float, float)
     device_rotated = Signal()
+    delete_requested = Signal(float, float)
+    delete_mode_changed = Signal(bool)
     ruler_measured = Signal(float)
     pad_hovered = Signal(object)
 
@@ -1514,6 +1516,7 @@ class ImageView(
         self._pad_start: QPoint | None = None
         self._click_position: QPoint | None = None
         self._device_placement = False
+        self._delete_mode = False
         self._device_preview_point = (0.5, 0.5)
         self._ruler_enabled = False
         self._ruler_pixels_per_mm = 0.0
@@ -1644,6 +1647,10 @@ class ImageView(
             if self._ruler_enabled:
                 self.set_ruler(False)
                 return True
+            if self._delete_mode:
+                self.set_delete_mode(False)
+                self.delete_mode_changed.emit(False)
+                return True
             return super().eventFilter(watched, event)
         if event.type() == QEvent.Type.Leave:
             if self._hover_pad_id is not None:
@@ -1652,6 +1659,14 @@ class ImageView(
             return super().eventFilter(watched, event)
         if event.type() == QEvent.Type.MouseButtonDblClick:
             point = self._label_point(watched, event.position().toPoint())
+            if (
+                self._delete_mode
+                and event.button() == Qt.MouseButton.LeftButton
+                and not self._pixmap.isNull()
+                and self._label.rect().contains(point)
+            ):
+                self.delete_requested.emit(*self._normalized_point(point))
+                return True
             if (
                 event.button() == Qt.MouseButton.LeftButton
                 and not self._device_placement
@@ -1924,6 +1939,16 @@ class ImageView(
             self._click_position = None
             self._drag_position = None
             self.unsetCursor()
+
+    def set_delete_mode(self, enabled: bool) -> None:
+        """Enable continuous deletion clicks on this board view."""
+        self._delete_mode = enabled
+        if enabled:
+            self.setCursor(QCursor(Qt.CursorShape.CrossCursor))
+            self._label.setCursor(QCursor(Qt.CursorShape.CrossCursor))
+        else:
+            self.unsetCursor()
+            self._label.unsetCursor()
 
     def set_device_placement(
         self,
@@ -3252,6 +3277,10 @@ class MainWindow(
                 lambda x, y, side=side: self._place_device(side, x, y)
             )
             view.device_rotated.connect(self._rotate_pending_device)
+            view.delete_requested.connect(
+                lambda x, y, side=side: self._delete_at(side, x, y)
+            )
+            view.delete_mode_changed.connect(self._delete_mode_changed)
         for side, view in self._side_views.items():
             view.pad_selected.connect(
                 lambda x, y, width, height, side=side: self._place_pad(
@@ -3277,6 +3306,10 @@ class MainWindow(
                 lambda x, y, side=side: self._place_device(side, x, y)
             )
             view.device_rotated.connect(self._rotate_pending_device)
+            view.delete_requested.connect(
+                lambda x, y, side=side: self._delete_at(side, x, y)
+            )
+            view.delete_mode_changed.connect(self._delete_mode_changed)
         for view in (
             *self._views.values(),
             *self._side_views.values(),
@@ -3392,6 +3425,14 @@ class MainWindow(
             self.create_pad,
         )
         pad_button.setIcon(_pad_tool_icon())
+        delete_button = add_button(
+            "Delete",
+            QStyle.StandardPixmap.SP_TrashIcon,
+            "Delete pads or footprints by clicking them",
+            self._toggle_delete_mode,
+        )
+        delete_button.setCheckable(True)
+        self._delete_button = delete_button
         add_button(
             "Log file",
             QStyle.StandardPixmap.SP_FileDialogInfoView,
@@ -3502,6 +3543,44 @@ class MainWindow(
             view.set_connection_mode(enabled)
         self._schematic_view.set_connection_mode(enabled)
         self._net_mode_label.setVisible(enabled)
+
+    def _toggle_delete_mode(self) -> None:
+        """Toggle continuous deletion mode from the tools palette."""
+        button = getattr(self, "_delete_button", None)
+        self._set_delete_mode(not button.isChecked() if button is not None else True)
+
+    def _set_delete_mode(self, enabled: bool) -> None:
+        """Enable or disable deletion mode on every board view."""
+        for view in (*self._views.values(), *self._side_views.values()):
+            view.set_delete_mode(enabled)
+        button = getattr(self, "_delete_button", None)
+        if button is not None:
+            button.blockSignals(True)
+            button.setChecked(enabled)
+            button.blockSignals(False)
+        if enabled:
+            self.statusBar().showMessage("Deleting - Esc to stop")
+        else:
+            self.statusBar().clearMessage()
+
+    def _delete_mode_changed(self, enabled: bool) -> None:
+        """Synchronize palette state when Escape exits deletion mode."""
+        self._set_delete_mode(enabled)
+
+    def _delete_at(self, side: str, x: float, y: float) -> None:
+        """Delete the pad or footprint under a deletion-mode click."""
+        if not self.project:
+            return
+        pad = self._pad_at(side, x, y)
+        if pad is not None:
+            if pad.device_id:
+                self._delete_device(pad.device_id)
+            else:
+                self._delete_pad(pad.pad_id)
+            return
+        device = self._device_at(side, x, y)
+        if device is not None:
+            self._delete_device(device.device_id)
 
     def _ruler_scale_for_view(self, view: ImageView) -> float:
         """Return calibrated pixels per millimeter for one board view."""
