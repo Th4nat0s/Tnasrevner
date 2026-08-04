@@ -656,6 +656,12 @@ class ProjectStore:
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(content)
 
+    def copy_pending_assets_to(  # pylint: disable=protected-access
+        self, target: "ProjectStore"
+    ) -> None:
+        """Copy in-memory archive assets to another store."""
+        target._assets.update(self._assets)
+
     def read_asset(self, relative_path: str) -> bytes:
         """Read asset bytes from the archive or project directory."""
         relative_path = _relative_asset_path(relative_path)

@@ -3368,6 +3368,7 @@ class MainWindow(
         self.project: ProjectDocument | None = None
         self.store: ProjectStore | None = None
         self._dirty = False
+        self._project_needs_save_as = False
         self._history: list[dict] = []
         self._history_index = -1
         self._history_restoring = False
@@ -5554,6 +5555,7 @@ class MainWindow(
         self.store = ProjectStore(project_path)
         description = dialog.description.text().strip() or project_name
         self.project = ProjectDocument(project_name, description)
+        self._project_needs_save_as = True
         self._image_cache.clear()
         self._device_footprint_cache.clear()
         self._cancel_device_placement()
@@ -5583,6 +5585,7 @@ class MainWindow(
             QMessageBox.critical(self, "Open failed", str(error))
             return
         self.store, self.project, self._dirty = store, project, False
+        self._project_needs_save_as = False
         self._load_history_backup()
         self._image_cache.clear()
         self._device_footprint_cache.clear()
@@ -5617,6 +5620,23 @@ class MainWindow(
                 self, "No project", "Create or open a project first."
             )
             return False
+        if self._project_needs_save_as:
+            path, _ = QFileDialog.getSaveFileName(
+                self,
+                "Save project",
+                str(self._last_project_directory()),
+                "Tnasrevner project (*.revp)",
+            )
+            if not path:
+                return False
+            project_path = Path(path)
+            if project_path.suffix.lower() != ".revp":
+                project_path = project_path.with_suffix(".revp")
+            new_store = ProjectStore(project_path)
+            self.store.copy_pending_assets_to(new_store)
+            self.store = new_store
+            self._project_needs_save_as = False
+            self._remember_project_directory(project_path)
         self.project.display.mode = (
             "top",
             "bottom",
@@ -5649,6 +5669,7 @@ class MainWindow(
             return
         self.project = None
         self.store = None
+        self._project_needs_save_as = False
         self._image_cache.clear()
         self._device_footprint_cache.clear()
         self._cancel_device_placement()

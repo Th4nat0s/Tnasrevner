@@ -87,6 +87,10 @@ def test_create_save_close_reopen_project(
     monkeypatch.setattr(window, "_last_project_directory", lambda: tmp_path)
     monkeypatch.setattr(window, "manage_picture", lambda: None)
     monkeypatch.setattr(
+        "tnasrevner.gui.QFileDialog.getSaveFileName",
+        lambda *_args: (str(archive), ""),
+    )
+    monkeypatch.setattr(
         "tnasrevner.gui.QFileDialog.getOpenFileName",
         lambda *_args: (str(archive), ""),
     )
