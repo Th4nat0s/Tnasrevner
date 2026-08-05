@@ -430,6 +430,7 @@ class BomTabMixin:
             return
         menu = QMenu(self)
         set_id_action = menu.addAction("Set Component…")
+        glue_action = menu.addAction("Unglue" if device.schematic_glued else "Glue")
         rotate_action = menu.addAction("Rotate 90°")
         action = menu.exec(QCursor.pos())
         if action == set_id_action:
@@ -441,7 +442,11 @@ class BomTabMixin:
             )
             if accepted:
                 self._rename_device(device_id, reference)
+        elif action == glue_action:
+            self._set_schematic_glued(device_id, not device.schematic_glued)
         elif action == rotate_action:
+            if device.schematic_glued:
+                return
             self.project.devices = [
                 (
                     replace(
@@ -456,3 +461,26 @@ class BomTabMixin:
             self._dirty = True
             self._schematic_view.set_project(self.project)
             self._update_title()
+
+    def _set_schematic_glued(self, device_id: str, glued: bool) -> None:
+        """Persist the fixed-position state of one schematic component.
+
+        Args:
+            device_id: Stable identifier of the component to update.
+            glued: Whether movement and rotation must be blocked.
+        """
+        if not self.project:
+            return
+        if not any(item.device_id == device_id for item in self.project.devices):
+            return
+        self.project.devices = [
+            (
+                replace(item, schematic_glued=glued)
+                if item.device_id == device_id
+                else item
+            )
+            for item in self.project.devices
+        ]
+        self._dirty = True
+        self._schematic_view.set_project(self.project)
+        self._update_title()

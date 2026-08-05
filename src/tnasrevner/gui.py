@@ -255,6 +255,9 @@ class MainWindow(
         self._schematic_view = SchematicView()
         self._schematic_view.zoom_changed.connect(self._show_zoom_ratio)
         self._schematic_view.layout_changed.connect(self._schematic_layout_changed)
+        self._schematic_view.layout_started.connect(self._schematic_layout_started)
+        self._schematic_view.layout_finished.connect(self._schematic_layout_finished)
+        self._schematic_view.layout_optimized.connect(self._schematic_layout_optimized)
         self._schematic_view.terminal_selected.connect(self._select_schematic_terminal)
         self._schematic_view.terminal_hovered.connect(
             self._show_schematic_terminal_hover

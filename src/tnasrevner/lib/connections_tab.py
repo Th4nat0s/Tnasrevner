@@ -516,6 +516,23 @@ class ConnectionsTabMixin:
     def _schematic_layout_changed(self, _device_id: str, _x: float, _y: float) -> None:
         """Mark schematic drag/rotation changes for project persistence."""
         self._dirty = True
+        self._update_title(record_history=False)
+
+    @Slot(str)
+    def _schematic_layout_started(self, _device_id: str) -> None:
+        """Record the pre-drag state once before a component moves."""
+        self._record_history()
+
+    @Slot(str)
+    def _schematic_layout_finished(self, _device_id: str) -> None:
+        """Record one final state after a component drag is released."""
+        self._record_history()
+        self._update_title(record_history=False)
+
+    @Slot()
+    def _schematic_layout_optimized(self) -> None:
+        """Mark an explicit schematic optimization as a project change."""
+        self._dirty = True
         self._update_title()
 
     def _terminal_net(self, terminal: tuple[str, str, str | None]) -> str | None:
@@ -700,11 +717,45 @@ class ConnectionsTabMixin:
                 lambda: self._edit_component_pin(object_id, number)
             )
         elif kind == "pad":
+            pad = next(
+                (item for item in self.project.pads if item.pad_id == object_id),
+                None,
+            )
+            if pad is not None and pad.device_id is None:
+                glue_action = menu.addAction(
+                    "Unglue" if pad.schematic_glued else "Glue"
+                )
+                glue_action.triggered.connect(
+                    lambda: self._set_schematic_pad_glued(
+                        object_id, not pad.schematic_glued
+                    )
+                )
             delete_action = menu.addAction("Delete pad")
             delete_action.triggered.connect(lambda: self._delete_pad(object_id))
         menu.aboutToHide.connect(lambda menu=menu: self._pad_menu_closed(menu))
         self._pad_menu = menu
         menu.popup(QCursor.pos())
+
+    def _set_schematic_pad_glued(self, pad_id: str, glued: bool) -> None:
+        """Persist fixed-position state for one independent schematic pad.
+
+        Args:
+            pad_id: Stable pad identifier.
+            glued: Whether schematic dragging is blocked.
+        """
+        if not self.project:
+            return
+        if not any(
+            pad.pad_id == pad_id and pad.device_id is None for pad in self.project.pads
+        ):
+            return
+        self.project.pads = [
+            replace(pad, schematic_glued=glued) if pad.pad_id == pad_id else pad
+            for pad in self.project.pads
+        ]
+        self._dirty = True
+        self._schematic_view.set_project(self.project)
+        self._update_title()
 
     def _next_connection_net_name(self) -> str:
         """Return first unused NT1..NT9999 name."""

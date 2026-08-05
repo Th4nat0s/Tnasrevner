@@ -268,6 +268,13 @@ class BoardControlsMixin:
         connect_button.setText("--")
         connect_button.setCheckable(True)
         self._connect_button = connect_button
+        optimize_button = add_button(
+            "Optimize Schematic",
+            QStyle.StandardPixmap.SP_BrowserReload,
+            "Optimize schematic layout",
+            self._optimize_schematic,
+        )
+        self._optimize_schematic_button = optimize_button
         delete_button = add_button(
             "Delete",
             QStyle.StandardPixmap.SP_TrashIcon,
@@ -349,6 +356,47 @@ class BoardControlsMixin:
             self._actual_button.setEnabled(True)
         if hasattr(self, "_fit_button"):
             self._fit_button.setEnabled(True)
+        if hasattr(self, "_optimize_schematic_button"):
+            self._optimize_schematic_button.setVisible(tab_index == _SCHEMATIC_TAB)
+            self._optimize_schematic_button.setEnabled(tab_index == _SCHEMATIC_TAB)
+
+    def _optimize_schematic(self) -> None:
+        """Run the explicit optimizer with a live non-blocking progress dialog."""
+        if (
+            self._tabs.currentIndex() != _SCHEMATIC_TAB
+            or not self.project
+            or getattr(self, "_optimization_progress", None) is not None
+        ):
+            return
+        progress = QProgressDialog(
+            "Optimizing schematic layout…",
+            "Cancel",
+            0,
+            100,
+            self,
+        )
+        progress.setWindowTitle("Schematic optimization")
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(False)
+        progress.setValue(0)
+        progress.canceled.connect(self._schematic_view.cancel_optimization)
+        self._optimization_progress = progress
+        self._schematic_view.optimization_progress.connect(progress.setValue)
+        self._schematic_view.optimization_finished.connect(
+            self._finish_schematic_optimization
+        )
+        progress.show()
+        self._schematic_view.optimize_layout()
+
+    def _finish_schematic_optimization(self) -> None:
+        """Close and release the schematic optimization progress dialog."""
+        progress = getattr(self, "_optimization_progress", None)
+        if progress is None:
+            return
+        progress.close()
+        progress.deleteLater()
+        self._optimization_progress = None
 
     def _rotate_board_90(self) -> None:
         """Rotate both board images and all placed geometry by 90 degrees."""

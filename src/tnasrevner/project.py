@@ -238,6 +238,9 @@ class Pad:  # pylint: disable=too-many-instance-attributes
     shape: str = "rect"
     rotation: float = 0.0
     function: str = ""
+    schematic_x: float | None = None
+    schematic_y: float | None = None
+    schematic_glued: bool = False
 
     def __post_init__(self) -> None:
         _required_string(self.name, "pad name")
@@ -248,6 +251,15 @@ class Pad:  # pylint: disable=too-many-instance-attributes
             _required_string(self.net, "pad net")
         if not isinstance(self.function, str):
             raise ProjectFormatError("pad function must be a string")
+        if (self.schematic_x is None) != (self.schematic_y is None):
+            raise ProjectFormatError("pad schematic position must contain x and y")
+        if self.schematic_x is not None and not all(
+            isinstance(value, (int, float))
+            for value in (self.schematic_x, self.schematic_y)
+        ):
+            raise ProjectFormatError("pad schematic coordinates must be numbers")
+        if not isinstance(self.schematic_glued, bool):
+            raise ProjectFormatError("pad schematic glued flag must be boolean")
         if (self.device_id is None) != (self.number is None):
             raise ProjectFormatError("device pad requires device_id and number")
         if self.device_id is not None:
@@ -286,6 +298,9 @@ class Pad:  # pylint: disable=too-many-instance-attributes
             "shape": self.shape,
             "rotation": self.rotation,
             "function": self.function,
+            "schematic_x": self.schematic_x,
+            "schematic_y": self.schematic_y,
+            "schematic_glued": self.schematic_glued,
         }
 
     @classmethod
@@ -307,6 +322,9 @@ class Pad:  # pylint: disable=too-many-instance-attributes
             shape=data.get("shape", "rect"),
             rotation=data.get("rotation", 0.0),
             function=data.get("function", ""),
+            schematic_x=data.get("schematic_x"),
+            schematic_y=data.get("schematic_y"),
+            schematic_glued=data.get("schematic_glued", False),
         )
 
 
@@ -411,6 +429,7 @@ class Device:  # pylint: disable=too-many-instance-attributes
     schematic_x: float | None = None
     schematic_y: float | None = None
     schematic_rotation: float = 0.0
+    schematic_glued: bool = False
     object_type: str = ""
     description: str = ""
     note: str = ""
@@ -436,6 +455,8 @@ class Device:  # pylint: disable=too-many-instance-attributes
             raise ProjectFormatError("schematic position must be numeric")
         if not isinstance(self.schematic_rotation, (int, float)):
             raise ProjectFormatError("schematic rotation must be numeric")
+        if not isinstance(self.schematic_glued, bool):
+            raise ProjectFormatError("schematic glued flag must be boolean")
         if not isinstance(self.object_type, str):
             raise ProjectFormatError("device object type must be a string")
         if not isinstance(self.description, str):
@@ -476,6 +497,7 @@ class Device:  # pylint: disable=too-many-instance-attributes
             "schematic_x": self.schematic_x,
             "schematic_y": self.schematic_y,
             "schematic_rotation": self.schematic_rotation,
+            "schematic_glued": self.schematic_glued,
             "object_type": self.object_type,
             "description": self.description,
             "note": self.note,
@@ -523,6 +545,7 @@ class Device:  # pylint: disable=too-many-instance-attributes
             schematic_x=data.get("schematic_x"),
             schematic_y=data.get("schematic_y"),
             schematic_rotation=data.get("schematic_rotation", 0.0),
+            schematic_glued=data.get("schematic_glued", False),
             object_type=data.get("object_type", ""),
             description=data.get("description", ""),
             note=data.get("note", ""),

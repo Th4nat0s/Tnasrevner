@@ -238,6 +238,7 @@ def test_kicad_device_and_generated_pads_round_trip(tmp_path: Path) -> None:
         "device-id",
         45,
         "10 kΩ",
+        schematic_glued=True,
         object_type="Resistor",
     )
     project = ProjectDocument(
@@ -270,6 +271,7 @@ def test_kicad_device_and_generated_pads_round_trip(tmp_path: Path) -> None:
     assert loaded.pads[0].device_id == "device-id"
     assert loaded.pads[0].rotation == 45
     assert loaded.devices[0].value == "10 kΩ"
+    assert loaded.devices[0].schematic_glued is True
 
 
 def test_component_pin_identity_function_and_net_round_trip() -> None:

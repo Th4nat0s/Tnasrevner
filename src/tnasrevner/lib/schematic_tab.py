@@ -114,6 +114,8 @@ from ..project import (
 # pylint: disable=unused-import
 
 from .app_support import _footprint_family, _reference_sort_key
+from .schematic_layout import SchematicOptimizationWorker
+from .schematic_router import OrthogonalRouter
 
 
 class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
@@ -126,8 +128,25 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
     _SCHEMDRAW_UNIT_TO_SVG = 36.0
     _NET_LINE_WIDTH = 5.0
     _SELECTED_NET_LINE_WIDTH = 7.0
+    _POWER_NETS = {
+        "gnd": "GND",
+        "v5": "V5",
+        "5v": "V5",
+        "v3.3": "V3.3",
+        "3v3": "V3.3",
+        "3.3v": "V3.3",
+        "v12": "V12",
+        "12v": "V12",
+        "vbat": "VBAT",
+        "vbatt": "VBAT",
+    }
 
     layout_changed = Signal(str, float, float)
+    layout_started = Signal(str)
+    layout_finished = Signal(str)
+    layout_optimized = Signal()
+    optimization_progress = Signal(int)
+    optimization_finished = Signal()
     terminal_selected = Signal(object)
     terminal_hovered = Signal(object)
     terminal_net_edit_requested = Signal(object)
@@ -144,17 +163,22 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
         self._logical_height = 1100
         self._auto_centers: dict[str, QPointF] = {}
         self._device_centers: dict[str, QPointF] = {}
+        self._pad_centers: dict[str, QPointF] = {}
         self._drag_device_id: str | None = None
+        self._drag_pad_id: str | None = None
         self._drag_offset = QPointF()
         self._terminal_hits: list[tuple[QPointF, tuple[str, str, str | None]]] = []
         self._selected_net: str | None = None
         self._connection_preview_origin: QPointF | None = None
         self._connection_preview_cursor: QPointF | None = None
+        self._optimization_thread: QThread | None = None
+        self._optimization_worker: SchematicOptimizationWorker | None = None
         self._pan_position: QPoint | None = None
         self._schemdraw_cache: dict[
             tuple[str, tuple[str, ...]],
             tuple[QSvgRenderer, QRectF, tuple[QPointF, ...]],
         ] = {}
+        self._route_cache: dict[tuple, list[QPointF]] = {}
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.resize(self._logical_width, self._logical_height)
@@ -163,6 +187,8 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
     def set_project(self, project: ProjectDocument | None) -> None:
         """Replace the displayed project and repaint the schematic."""
         self._project = project
+        self._route_cache.clear()
+        self._pad_centers.clear()
         self._project_dirty = True
         if not self.isVisible():
             return
@@ -293,7 +319,7 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
             bounds = item if bounds is None else bounds.united(item)
         independent_pads = [pad for pad in self._project.pads if not pad.device_id]
         for index, _pad in enumerate(independent_pads):
-            point = self._independent_pad_center(index, len(independent_pads))
+            point = self._independent_pad_center(index, len(independent_pads), _pad)
             item = QRectF(point.x() - 30, point.y() - 30, 60, 60)
             bounds = item if bounds is None else bounds.united(item)
         if bounds is None:
@@ -301,14 +327,262 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
             return QRectF(center.x() - 240, center.y() - 160, 480, 320)
         return bounds.adjusted(-80, -80, 80, 80)
 
-    def _independent_pad_center(self, index: int, count: int) -> QPointF:
-        """Return compact position for one independent schematic terminal."""
+    def _independent_pad_center(
+        self, index: int, count: int, pad: Pad | None = None
+    ) -> QPointF:
+        """Return persisted or perimeter position for one independent pad.
+
+        Args:
+            index: Pad index in automatic layout.
+            count: Number of independent pads.
+            pad: Pad whose persisted schematic position should be restored.
+
+        Returns:
+            Schematic center for the pad.
+        """
+        if pad is not None:
+            if pad.schematic_x is not None:
+                return QPointF(pad.schematic_x, pad.schematic_y)
+            cached = self._pad_centers.get(pad.pad_id)
+            if cached is not None:
+                return cached
         bounds = self._content_bounds_without_pads()
-        columns = max(1, min(6, count))
+        if pad is not None:
+            width = max(1600.0, bounds.width())
+            height = max(1200.0, bounds.height())
+            center = bounds.center()
+            left = center.x() - width / 2
+            top = center.y() - height / 2
+            margin = 220.0
+            distances = (
+                (pad.y, "top"),
+                (1.0 - pad.x, "right"),
+                (1.0 - pad.y, "bottom"),
+                (pad.x, "left"),
+            )
+            side = min(distances, key=lambda item: (item[0], item[1]))[1]
+            if side == "top":
+                return QPointF(left + pad.x * width, top - margin)
+            if side == "right":
+                return QPointF(left + width + margin, top + pad.y * height)
+            if side == "bottom":
+                return QPointF(left + pad.x * width, top + height + margin)
+            return QPointF(left - margin, top + pad.y * height)
+        columns = max(1, min(8, count))
         return QPointF(
-            bounds.center().x() + (index % columns - (columns - 1) / 2) * 150,
-            bounds.bottom() + 120 + (index // columns) * 70,
+            bounds.center().x() + (index % columns - (columns - 1) / 2) * 180,
+            bounds.bottom() + 180 + (index // columns) * 100,
         )
+
+    def _pad_render_geometry(
+        self,
+        index: int,
+        count: int,
+        pad: Pad,
+        device_net_points: dict[str, list[tuple[QPointF, QPointF]]],
+        pad_only_centers: dict[str, QPointF] | None = None,
+    ) -> tuple[QPointF, QPointF]:
+        """Place one pad near its exact connected pin when available.
+
+        Args:
+            index: Pad index in automatic layout.
+            count: Number of independent pads.
+            pad: Pad being rendered.
+            device_net_points: Rendered component terminals grouped by net.
+            pad_only_centers: Compact centers for nets containing only pads.
+
+        Returns:
+            Pad center and outward routing direction.
+        """
+        group_key = self._net_group_key(pad.net) if pad.net else None
+        terminals = device_net_points.get(group_key, []) if group_key else []
+        if terminals:
+            if pad.schematic_x is not None:
+                center = QPointF(pad.schematic_x, pad.schematic_y)
+                endpoint, _terminal_outward = min(
+                    terminals,
+                    key=lambda item: QLineF(center, item[0]).length(),
+                )
+                delta = endpoint - center
+                if abs(delta.x()) >= abs(delta.y()):
+                    outward = QPointF(1 if delta.x() >= 0 else -1, 0)
+                else:
+                    outward = QPointF(0, 1 if delta.y() >= 0 else -1)
+                return center, outward
+            peers = sorted(
+                (
+                    item
+                    for item in self._project.pads
+                    if item.device_id is None
+                    and item.net
+                    and self._net_group_key(item.net) == group_key
+                ),
+                key=lambda item: item.pad_id,
+            )
+            peer_index = next(
+                (
+                    peer_index
+                    for peer_index, peer in enumerate(peers)
+                    if peer.pad_id == pad.pad_id
+                ),
+                0,
+            )
+            endpoint, terminal_outward = terminals[peer_index % len(terminals)]
+            layer = peer_index // len(terminals)
+            normal = QPointF(-terminal_outward.y(), terminal_outward.x())
+            lateral_slot = (
+                0 if layer == 0 else ((layer + 1) // 2) * (-1 if layer % 2 else 1)
+            )
+            center = (
+                endpoint
+                + terminal_outward * (110.0 + abs(lateral_slot) * 60.0)
+                + normal * lateral_slot * 70.0
+            )
+            return center, -terminal_outward
+        compact_center = (pad_only_centers or {}).get(pad.pad_id)
+        center = (
+            compact_center
+            if compact_center is not None
+            else self._independent_pad_center(index, count, pad)
+        )
+        target = self._content_bounds_without_pads().center()
+        delta = target - center
+        if abs(delta.x()) >= abs(delta.y()):
+            outward = QPointF(1 if delta.x() >= 0 else -1, 0)
+        else:
+            outward = QPointF(0, 1 if delta.y() >= 0 else -1)
+        return center, outward
+
+    def _pad_only_net_centers(
+        self,
+        device_net_points: dict[str, list[tuple[QPointF, QPointF]]],
+    ) -> dict[str, QPointF]:
+        """Compact automatic pads whose net has no component terminal.
+
+        Args:
+            device_net_points: Rendered component terminals grouped by net.
+
+        Returns:
+            Automatic pad centers indexed by pad ID.
+        """
+        if self._project is None:
+            return {}
+        grouped: dict[str, list[Pad]] = {}
+        for pad in self._project.pads:
+            if (
+                pad.device_id is None
+                and pad.net
+                and pad.schematic_x is None
+                and not device_net_points.get(self._net_group_key(pad.net))
+            ):
+                grouped.setdefault(self._net_group_key(pad.net), []).append(pad)
+        grouped = {
+            group_key: pads for group_key, pads in grouped.items() if len(pads) >= 2
+        }
+        if not grouped:
+            return {}
+
+        bounds = self._content_bounds_without_pads()
+        side_groups: dict[str, list[tuple[float, str, list[Pad]]]] = {
+            "top": [],
+            "right": [],
+            "bottom": [],
+            "left": [],
+        }
+        for group_key, pads in grouped.items():
+            average_x = sum(pad.x for pad in pads) / len(pads)
+            average_y = sum(pad.y for pad in pads) / len(pads)
+            side = min(
+                (
+                    (average_y, "top"),
+                    (1.0 - average_x, "right"),
+                    (1.0 - average_y, "bottom"),
+                    (average_x, "left"),
+                ),
+                key=lambda item: (item[0], item[1]),
+            )[1]
+            tangent = (
+                bounds.left() + average_x * bounds.width()
+                if side in {"top", "bottom"}
+                else bounds.top() + average_y * bounds.height()
+            )
+            side_groups[side].append((tangent, group_key, pads))
+
+        centers: dict[str, QPointF] = {}
+        spacing = 90.0
+        group_gap = 120.0
+        margin = 170.0
+        for side, groups in side_groups.items():
+            cursor = -math.inf
+            for desired, _group_key, pads in sorted(groups):
+                horizontal = side in {"top", "bottom"}
+                if horizontal:
+                    pads.sort(
+                        key=lambda item: (
+                            item.x,
+                            item.name.casefold(),
+                            item.pad_id,
+                        )
+                    )
+                else:
+                    pads.sort(
+                        key=lambda item: (
+                            item.y,
+                            item.name.casefold(),
+                            item.pad_id,
+                        )
+                    )
+                half_span = (len(pads) - 1) * spacing / 2.0
+                tangent = max(desired, cursor + group_gap + half_span)
+                cursor = tangent + half_span
+                for pad_index, pad in enumerate(pads):
+                    offset = (pad_index - (len(pads) - 1) / 2.0) * spacing
+                    if side == "top":
+                        centers[pad.pad_id] = QPointF(
+                            tangent + offset, bounds.top() - margin
+                        )
+                    elif side == "bottom":
+                        centers[pad.pad_id] = QPointF(
+                            tangent + offset, bounds.bottom() + margin
+                        )
+                    elif side == "left":
+                        centers[pad.pad_id] = QPointF(
+                            bounds.left() - margin, tangent + offset
+                        )
+                    else:
+                        centers[pad.pad_id] = QPointF(
+                            bounds.right() + margin, tangent + offset
+                        )
+        return centers
+
+    @staticmethod
+    def _minimum_spanning_pairs(points: list[QPointF]) -> list[tuple[int, int]]:
+        """Connect net terminals with deterministic Manhattan minimum tree.
+
+        Args:
+            points: Terminal stub positions.
+
+        Returns:
+            Index pairs defining a short connected tree.
+        """
+        if len(points) < 2:
+            return []
+        visited = {0}
+        pairs: list[tuple[int, int]] = []
+        while len(visited) < len(points):
+            candidates = []
+            for left in sorted(visited):
+                for right, _point in enumerate(points):
+                    if right in visited:
+                        continue
+                    distance = abs(points[left].x() - points[right].x()) + abs(
+                        points[left].y() - points[right].y()
+                    )
+                    candidates.append((distance, left, right))
+            _distance, left, right = min(candidates)
+            pairs.append((left, right))
+            visited.add(right)
+        return pairs
 
     def _content_bounds_without_pads(self) -> QRectF:
         """Return bounds around devices only, with a centered empty fallback."""
@@ -405,7 +679,7 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
         by_net: dict[str, list[str]] = {}
         for device in devices:
             for pin in device.pins:
-                if pin.net_id:
+                if pin.net_id and self._power_net_label(pin.net_id) is None:
                     by_net.setdefault(pin.net_id, []).append(device.device_id)
         edges: set[tuple[str, str]] = set()
         for members in by_net.values():
@@ -414,6 +688,114 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
                 for right in unique[index + 1 :]:
                     edges.add((left, right))
         return edges
+
+    @classmethod
+    def _layout_connections(
+        cls, devices: list[Device]
+    ) -> list[tuple[str, int, str, int]]:
+        """Build deterministic pin-to-pin connections grouped by NET.
+
+        Args:
+            devices: Components whose pins should be inspected.
+
+        Returns:
+            Pairwise device and pin indexes for every shared NET.
+        """
+        by_net: dict[str, list[tuple[str, int]]] = {}
+        for device in devices:
+            for index, pin in enumerate(device.pins):
+                if pin.net_id and cls._power_net_label(pin.net_id) is None:
+                    by_net.setdefault(pin.net_id, []).append((device.device_id, index))
+        connections: list[tuple[str, int, str, int]] = []
+        for members in by_net.values():
+            unique = sorted(set(members))
+            if len(unique) < 2:
+                continue
+            origin = unique[0]
+            connections.extend(
+                (origin[0], origin[1], target[0], target[1]) for target in unique[1:]
+            )
+        return connections
+
+    def optimize_layout(self) -> None:
+        """Start layout optimization in a worker thread with progress signals."""
+        if (
+            self._project is None
+            or len(self._project.devices) < 2
+            or self._optimization_thread is not None
+        ):
+            return
+        positions = {
+            device.device_id: self._center_for_device(device, index)
+            for index, device in enumerate(self._project.devices)
+        }
+        rotations = {
+            device.device_id: device.schematic_rotation
+            for device in self._project.devices
+        }
+        worker = SchematicOptimizationWorker(
+            self._project.devices,
+            positions,
+            rotations,
+            self._layout_edges(self._project.devices),
+            self._layout_connections(self._project.devices),
+            self._WORLD_SIZE,
+            self._symbol_size,
+        )
+        worker.progress.connect(self.optimization_progress)
+        worker.completed.connect(self._apply_optimized_layout)
+        worker.cancelled.connect(self._optimization_cancelled)
+        worker.finished.connect(self._optimization_thread_finished)
+        self._optimization_thread = worker
+        self._optimization_worker = worker
+        worker.start()
+
+    @Slot(object, object)
+    def _apply_optimized_layout(self, positions: object, rotations: object) -> None:
+        """Apply worker results on the GUI thread and repaint the schematic."""
+        if not isinstance(positions, dict) or not isinstance(rotations, dict):
+            return
+        if self._project is None:
+            return
+        self._project.devices = [
+            replace(
+                device,
+                schematic_x=positions[device.device_id].x(),
+                schematic_y=positions[device.device_id].y(),
+                schematic_rotation=rotations[device.device_id],
+            )
+            for device in self._project.devices
+        ]
+        self._project.pads = [
+            (
+                replace(pad, schematic_x=None, schematic_y=None)
+                if pad.device_id is None and not pad.schematic_glued
+                else pad
+            )
+            for pad in self._project.pads
+        ]
+        self._device_centers = positions
+        self._auto_centers = {}
+        self._pad_centers.clear()
+        self.update()
+        self.layout_optimized.emit()
+        self.optimization_finished.emit()
+
+    @Slot()
+    def _optimization_thread_finished(self) -> None:
+        """Release worker references after the optimization thread exits."""
+        self._optimization_thread = None
+        self._optimization_worker = None
+
+    @Slot()
+    def _optimization_cancelled(self) -> None:
+        """Notify the UI that optimization stopped without applying results."""
+        self.optimization_finished.emit()
+
+    def cancel_optimization(self) -> None:
+        """Request cooperative cancellation of the active layout worker."""
+        if self._optimization_worker is not None:
+            self._optimization_worker.requestInterruption()
 
     @classmethod
     def _symbol_size(cls, device: Device) -> tuple[float, float]:
@@ -428,18 +810,21 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
         if cls._symbol_kind(device) == "transistor":
             return 150.0, 130.0
         if cls._symbol_kind(device) in {"resistor", "capacitor"}:
-            return 110.0, 80.0
+            return 110.0, 28.0
         return 150.0, 120.0
 
     @classmethod
     def _device_bounds(cls, device: Device, center: QPointF) -> QRectF:
         """Return a padded collision rectangle for one component."""
         width, height = cls._symbol_size(device)
+        if round(device.schematic_rotation / 90.0) % 2:
+            width, height = height, width
+        padding = 4.0 if cls._symbol_kind(device) in {"resistor", "capacitor"} else 12.0
         return QRectF(
-            center.x() - width / 2 - 12,
-            center.y() - height / 2 - 12,
-            width + 24,
-            height + 24,
+            center.x() - width / 2 - padding,
+            center.y() - height / 2 - padding,
+            width + padding * 2,
+            height + padding * 2,
         )
 
     @staticmethod
@@ -461,6 +846,18 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
                 point
             ):
                 return device_id
+        return None
+
+    def _pad_at(self, point: QPointF) -> str | None:
+        """Return independent schematic pad under a logical point."""
+        if self._project is None:
+            return None
+        for pad in self._project.pads:
+            if pad.device_id:
+                continue
+            center = self._pad_centers.get(pad.pad_id)
+            if center is not None and QLineF(point, center).length() <= 32:
+                return pad.pad_id
         return None
 
     def _terminal_at(
@@ -494,6 +891,12 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
             self.update()
             return
         terminal_hit = self._terminal_at(point)
+        pad_id = self._pad_at(point)
+        if terminal_hit is None and pad_id is not None:
+            terminal_hit = (
+                ("pad", pad_id, None),
+                self._pad_centers[pad_id],
+            )
         if (
             event.button() == Qt.MouseButton.RightButton
             and event.modifiers() & Qt.KeyboardModifier.ShiftModifier
@@ -516,7 +919,30 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
             event.button() == Qt.MouseButton.LeftButton
             and event.modifiers() == Qt.KeyboardModifier.NoModifier
         ):
+            if pad_id is not None:
+                pad = next(
+                    (item for item in self._project.pads if item.pad_id == pad_id),
+                    None,
+                )
+                if pad is not None and not pad.schematic_glued:
+                    self._drag_pad_id = pad_id
+                    self._drag_offset = point - self._pad_centers[pad_id]
+                    self.layout_started.emit(f"pad:{pad_id}")
+                event.accept()
+                return
             if terminal_hit is not None:
+                if terminal_hit[0] == "pad":
+                    pad_id = terminal_hit[1]
+                    pad = next(
+                        (item for item in self._project.pads if item.pad_id == pad_id),
+                        None,
+                    )
+                    if pad is not None and not pad.schematic_glued:
+                        self._drag_pad_id = pad_id
+                        self._drag_offset = point - self._pad_centers[pad_id]
+                        self.layout_started.emit(f"pad:{pad_id}")
+                    event.accept()
+                    return
                 terminal, _terminal_point = terminal_hit
                 self.terminal_selected.emit(terminal)
                 event.accept()
@@ -534,8 +960,16 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
             self.setCursor(QCursor(Qt.CursorShape.ClosedHandCursor))
             event.accept()
             return
+        device = next(
+            (item for item in self._project.devices if item.device_id == device_id),
+            None,
+        )
+        if device is None or device.schematic_glued:
+            event.accept()
+            return
         self._drag_device_id = device_id
         self._drag_offset = point - self._device_centers[device_id]
+        self.layout_started.emit(device_id)
         event.accept()
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
@@ -551,6 +985,27 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
             delta = current - self._pan_position
             self._pan_position = current
             self.pan_requested.emit(delta.x(), delta.y())
+            event.accept()
+            return
+        if self._drag_pad_id is not None and self._project is not None:
+            point = event.position() / self._zoom - self._drag_offset
+            point.setX(max(32.0, min(self._logical_width - 32.0, point.x())))
+            point.setY(max(32.0, min(self._logical_height - 32.0, point.y())))
+            self._pad_centers[self._drag_pad_id] = point
+            self._project.pads = [
+                (
+                    replace(
+                        pad,
+                        schematic_x=point.x(),
+                        schematic_y=point.y(),
+                    )
+                    if pad.pad_id == self._drag_pad_id
+                    else pad
+                )
+                for pad in self._project.pads
+            ]
+            self.update()
+            self.layout_changed.emit(f"pad:{self._drag_pad_id}", point.x(), point.y())
             event.accept()
             return
         if self._drag_device_id is None or self._project is None:
@@ -607,9 +1062,16 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
         """Finish component dragging."""
+        dragged_device_id = self._drag_device_id
+        dragged_pad_id = self._drag_pad_id
         self._drag_device_id = None
+        self._drag_pad_id = None
         self._pan_position = None
         self.unsetCursor()
+        if dragged_device_id is not None:
+            self.layout_finished.emit(dragged_device_id)
+        if dragged_pad_id is not None:
+            self.layout_finished.emit(f"pad:{dragged_pad_id}")
         super().mouseReleaseEvent(event)
 
     @staticmethod
@@ -635,6 +1097,276 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
         if "resistor" in family or "resistor" in name or reference.startswith("r"):
             return "resistor"
         return "uc"
+
+    @classmethod
+    def _power_net_label(cls, name: str) -> str | None:
+        """Return canonical power label for a case-insensitive net name.
+
+        Args:
+            name: Electrical net name.
+
+        Returns:
+            Canonical power label, or ``None`` for an ordinary net.
+        """
+        return cls._POWER_NETS.get(name.strip().casefold())
+
+    @classmethod
+    def _net_group_key(cls, name: str) -> str:
+        """Return display grouping key, joining aliases of power nets.
+
+        Args:
+            name: Electrical net name.
+
+        Returns:
+            Stable display grouping key.
+        """
+        power_label = cls._power_net_label(name)
+        if power_label is not None:
+            return f"power:{power_label.casefold()}"
+        return f"net:{name}"
+
+    @classmethod
+    def _net_display_name(cls, group_key: str) -> str:
+        """Return user-facing name for a rendered net group.
+
+        Args:
+            group_key: Internal display grouping key.
+
+        Returns:
+            User-facing net or power label.
+        """
+        prefix, name = group_key.split(":", 1)
+        if prefix == "power":
+            return cls._POWER_NETS.get(name, name.upper())
+        return name
+
+    @classmethod
+    def _draw_power_symbol(
+        cls,
+        painter: QPainter,
+        stub: QPointF,
+        outward: QPointF,
+        label: str,
+    ) -> None:
+        """Draw compact global-power symbol at one net terminal.
+
+        Args:
+            painter: Schematic painter.
+            stub: End of the terminal wire stub.
+            outward: Unit vector pointing away from the component.
+            label: Canonical power label.
+
+        Returns:
+            None.
+        """
+        normal = QPointF(-outward.y(), outward.x())
+        tip = stub + outward * 18
+        if label == "GND":
+            for offset, width in ((0.0, 28.0), (7.0, 19.0), (14.0, 10.0)):
+                center = tip + outward * offset
+                painter.drawLine(
+                    center - normal * (width / 2),
+                    center + normal * (width / 2),
+                )
+        else:
+            painter.drawLine(stub, tip)
+            painter.drawText(
+                QRectF(
+                    tip.x() - 48,
+                    tip.y() - 12,
+                    96,
+                    24,
+                ),
+                Qt.AlignmentFlag.AlignCenter,
+                label,
+            )
+
+    @classmethod
+    def _net_pen(cls, selected: bool) -> QPen:
+        """Build screen-width pen used for electrical net wires.
+
+        Args:
+            selected: Whether net is currently selected.
+
+        Returns:
+            Cosmetic pen that remains visible at overview zoom.
+        """
+        pen = QPen(
+            QColor("#66c2ff") if selected else QColor("#e4b363"),
+            cls._SELECTED_NET_LINE_WIDTH if selected else cls._NET_LINE_WIDTH,
+        )
+        pen.setCosmetic(True)
+        return pen
+
+    @staticmethod
+    def _fast_net_route(start: QPointF, end: QPointF) -> list[QPointF]:
+        """Return cheap two-segment route used during interactive movement.
+
+        Args:
+            start: Route origin.
+            end: Route destination.
+
+        Returns:
+            Orthogonal polyline without obstacle search.
+        """
+        corner = QPointF(end.x(), start.y())
+        return [start, corner, end]
+
+    @staticmethod
+    def _parallel_segments_conflict(
+        first: tuple[QPointF, QPointF],
+        second: tuple[QPointF, QPointF],
+        clearance: float,
+    ) -> bool:
+        """Return whether parallel segments visually touch or overlap.
+
+        Args:
+            first: Candidate orthogonal segment.
+            second: Previously displayed orthogonal segment.
+            clearance: Required centerline spacing in logical units.
+
+        Returns:
+            True when projections overlap and centerlines are too close.
+        """
+        first_start, first_end = first
+        second_start, second_end = second
+        if first_start.x() == first_end.x() and second_start.x() == second_end.x():
+            overlap = min(
+                max(first_start.y(), first_end.y()),
+                max(second_start.y(), second_end.y()),
+            ) - max(
+                min(first_start.y(), first_end.y()),
+                min(second_start.y(), second_end.y()),
+            )
+            return overlap > 0.0 and abs(first_start.x() - second_start.x()) < clearance
+        if first_start.y() == first_end.y() and second_start.y() == second_end.y():
+            overlap = min(
+                max(first_start.x(), first_end.x()),
+                max(second_start.x(), second_end.x()),
+            ) - max(
+                min(first_start.x(), first_end.x()),
+                min(second_start.x(), second_end.x()),
+            )
+            return overlap > 0.0 and abs(first_start.y() - second_start.y()) < clearance
+        return False
+
+    @classmethod
+    def _display_lane_path(
+        cls,
+        path: list[QPointF],
+        occupied: tuple[tuple[QPointF, QPointF], ...],
+        clearance: float,
+    ) -> list[QPointF]:
+        """Offset collinear wire sections into non-touching display lanes.
+
+        Args:
+            path: Stable logical route.
+            occupied: Segments already displayed for other nets.
+            clearance: Required centerline spacing in logical units.
+
+        Returns:
+            Orthogonal display path; original terminal endpoints stay fixed.
+        """
+        if len(path) < 2 or not occupied:
+            return path
+        result = [path[0]]
+        for start, end in zip(path, path[1:]):
+            shifted_start = QPointF(start)
+            shifted_end = QPointF(end)
+            segment = (shifted_start, shifted_end)
+            if any(
+                cls._parallel_segments_conflict(segment, other, clearance)
+                for other in occupied
+            ):
+                vertical = start.x() == end.x()
+                for lane in range(1, 9):
+                    found = False
+                    for direction in (1.0, -1.0):
+                        offset = lane * clearance * direction
+                        if vertical:
+                            candidate = (
+                                QPointF(start.x() + offset, start.y()),
+                                QPointF(end.x() + offset, end.y()),
+                            )
+                        else:
+                            candidate = (
+                                QPointF(start.x(), start.y() + offset),
+                                QPointF(end.x(), end.y() + offset),
+                            )
+                        if not any(
+                            cls._parallel_segments_conflict(candidate, other, clearance)
+                            for other in occupied
+                        ):
+                            shifted_start, shifted_end = candidate
+                            found = True
+                            break
+                    if found:
+                        break
+            current = result[-1]
+            if current != shifted_start:
+                if (
+                    current.x() != shifted_start.x()
+                    and current.y() != shifted_start.y()
+                ):
+                    result.append(QPointF(shifted_start.x(), current.y()))
+                result.append(shifted_start)
+            result.append(shifted_end)
+        if result[-1] != path[-1]:
+            current = result[-1]
+            target = path[-1]
+            if current.x() != target.x() and current.y() != target.y():
+                result.append(QPointF(target.x(), current.y()))
+            result.append(target)
+        return OrthogonalRouter.simplify(result)
+
+    @staticmethod
+    def _route_label_point(path: list[QPointF]) -> QPointF:
+        """Return midpoint of longest route segment for a readable NET label.
+
+        Args:
+            path: Displayed orthogonal route.
+
+        Returns:
+            Midpoint of longest segment, or first point for a degenerate path.
+        """
+        if len(path) < 2:
+            return path[0]
+        start, end = max(
+            zip(path, path[1:]),
+            key=lambda segment: QLineF(segment[0], segment[1]).length(),
+        )
+        return QPointF((start.x() + end.x()) / 2, (start.y() + end.y()) / 2)
+
+    @staticmethod
+    def _route_cache_key(
+        start: QPointF,
+        end: QPointF,
+        obstacles: tuple[QRectF, ...],
+        existing: tuple[tuple[QPointF, QPointF], ...],
+    ) -> tuple:
+        """Build route key from schematic geometry, excluding viewport state.
+
+        Args:
+            start: Route origin.
+            end: Route destination.
+            obstacles: Component bounds.
+            existing: Previously routed segments.
+
+        Returns:
+            Immutable cache key.
+        """
+        return (
+            (start.x(), start.y()),
+            (end.x(), end.y()),
+            tuple(
+                (rect.left(), rect.top(), rect.width(), rect.height())
+                for rect in obstacles
+            ),
+            tuple(
+                ((left.x(), left.y()), (right.x(), right.y()))
+                for left, right in existing
+            ),
+        )
 
     @staticmethod
     def _schemdraw_symbol(kind: str, pins: list[ComponentPin]):
@@ -701,12 +1433,12 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
         svg = drawing.get_imagedata("svg").replace(b"black", b"#e7edf5")
         renderer = QSvgRenderer(QByteArray(svg))
         viewbox = renderer.viewBoxF()
-        center_anchor = element.anchors.get("center")
+        element_bbox = element.get_bbox()
+        center_anchor = element.absanchors.get("center")
         if center_anchor is None:
-            bbox = element.get_bbox()
             center_anchor = (
-                (bbox.xmin + bbox.xmax) / 2,
-                (bbox.ymin + bbox.ymax) / 2,
+                (element_bbox.xmin + element_bbox.xmax) / 2,
+                (element_bbox.ymin + element_bbox.ymax) / 2,
             )
 
         def svg_coordinates(anchor) -> QPointF:
@@ -734,7 +1466,7 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
                 + (svg_point.y() - viewbox.top()) / viewbox.height() * target.height(),
             )
 
-        endpoints = tuple(map_anchor(element.anchors[name]) for name in anchor_names)
+        endpoints = tuple(map_anchor(element.absanchors[name]) for name in anchor_names)
         self._schemdraw_cache[cache_key] = renderer, target, endpoints
         renderer.render(painter, target)
         return list(endpoints)
@@ -761,10 +1493,29 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
         endpoints = [transform.map(endpoint) for endpoint in endpoints]
         painter.restore()
         painter.setPen(QColor("#f2f6fa"))
-        painter.drawText(int(center.x() - 70), int(center.y() - 48), device.reference)
+        compact_passive = kind in {"resistor", "capacitor"}
+        if compact_passive:
+            painter.drawText(
+                QRectF(center.x() - 55, center.y() - 42, 110, 18),
+                Qt.AlignmentFlag.AlignCenter,
+                device.reference,
+            )
+        else:
+            painter.drawText(
+                int(center.x() - 70), int(center.y() - 48), device.reference
+            )
         if device.value:
             painter.setPen(QColor("#aeb7c4"))
-            painter.drawText(int(center.x() - 70), int(center.y() + 58), device.value)
+            if compact_passive:
+                painter.drawText(
+                    QRectF(center.x() - 55, center.y() + 24, 110, 18),
+                    Qt.AlignmentFlag.AlignCenter,
+                    device.value,
+                )
+            else:
+                painter.drawText(
+                    int(center.x() - 70), int(center.y() + 58), device.value
+                )
         for index, pin in enumerate(pins):
             endpoint = endpoints[min(index, len(endpoints) - 1)]
             self._terminal_hits.append(
@@ -781,13 +1532,14 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
             else:
                 reference, function = self._pin_annotation(device, pin)
             if abs(delta_x) >= abs(delta_y):
+                horizontal_gap = 3.0 if compact_passive else 8.0
                 if delta_x < 0:
-                    text_x = endpoint.x() - 150
+                    text_x = endpoint.x() - 142 - horizontal_gap
                     alignment = Qt.AlignmentFlag.AlignRight
                 else:
-                    text_x = endpoint.x() + 8
+                    text_x = endpoint.x() + horizontal_gap
                     alignment = Qt.AlignmentFlag.AlignLeft
-                text_y = endpoint.y() - 17
+                text_y = endpoint.y() - (15 if compact_passive else 17)
                 painter.drawText(QRectF(text_x, text_y, 142, 18), alignment, reference)
                 if function:
                     painter.drawText(
@@ -795,7 +1547,10 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
                     )
             else:
                 text_x = endpoint.x() - 75
-                text_y = endpoint.y() - (36 if delta_y < 0 else -8)
+                if compact_passive:
+                    text_y = endpoint.y() - (21 if delta_y < 0 else -3)
+                else:
+                    text_y = endpoint.y() - (36 if delta_y < 0 else -8)
                 painter.drawText(
                     QRectF(text_x, text_y, 150, 18),
                     Qt.AlignmentFlag.AlignCenter,
@@ -812,7 +1567,9 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
                     outward = QPointF(-1 if delta_x < 0 else 1, 0)
                 else:
                     outward = QPointF(0, -1 if delta_y < 0 else 1)
-                net_points.setdefault(pin.net_id, []).append((endpoint, outward))
+                net_points.setdefault(self._net_group_key(pin.net_id), []).append(
+                    (endpoint, outward)
+                )
 
     def paintEvent(self, event) -> None:  # noqa: N802
         """Draw real component symbols, terminals, and net wires."""
@@ -838,9 +1595,15 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
         )
         pads = sorted(self._project.pads, key=lambda pad: pad.name)
         self._terminal_hits = []
+        self._pad_centers = {}
         net_names = sorted(
-            {pin.net_id for device in devices for pin in device.pins if pin.net_id}
-            | {pad.net for pad in pads if pad.net}
+            {
+                self._net_group_key(pin.net_id)
+                for device in devices
+                for pin in device.pins
+                if pin.net_id
+            }
+            | {self._net_group_key(pad.net) for pad in pads if pad.net}
         )
         if not devices and not pads:
             painter.setPen(QColor("#aeb7c4"))
@@ -862,9 +1625,20 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
                 center,
                 net_points,
             )
+        device_net_points = {
+            group_key: list(points) for group_key, points in net_points.items()
+        }
+        pad_only_centers = self._pad_only_net_centers(device_net_points)
         independent_pads = [pad for pad in pads if not pad.device_id]
         for index, pad in enumerate(independent_pads):
-            pad_point = self._independent_pad_center(index, len(independent_pads))
+            pad_point, pad_outward = self._pad_render_geometry(
+                index,
+                len(independent_pads),
+                pad,
+                device_net_points,
+                pad_only_centers,
+            )
+            self._pad_centers[pad.pad_id] = pad_point
             painter.save()
             painter.translate(pad_point)
             self._draw_schemdraw_symbol(
@@ -877,23 +1651,25 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
             painter.drawText(int(pad_point.x() + 12), int(pad_point.y() - 16), pad.name)
             self._terminal_hits.append((pad_point, ("pad", pad.pad_id, None)))
             if pad.net:
-                net_points.setdefault(pad.net, []).append((pad_point, QPointF(1, 0)))
+                net_points.setdefault(self._net_group_key(pad.net), []).append(
+                    (pad_point, pad_outward)
+                )
         painter.setPen(QPen(QColor("#e4b363"), 2))
         painter.setBrush(QColor("#e4b363"))
-        for name in net_names:
-            selected = name == self._selected_net
-            painter.setPen(
-                QPen(
-                    QColor("#66c2ff") if selected else QColor("#e4b363"),
-                    (
-                        self._SELECTED_NET_LINE_WIDTH
-                        if selected
-                        else self._NET_LINE_WIDTH
-                    ),
-                )
+        obstacles = tuple(
+            self._device_bounds(device, self._device_centers[device.device_id])
+            for device in devices
+        )
+        routed_segments: list[tuple[QPointF, QPointF]] = []
+        displayed_segments: list[tuple[QPointF, QPointF]] = []
+        for group_key in net_names:
+            name = self._net_display_name(group_key)
+            selected = self._selected_net is not None and group_key == (
+                self._net_group_key(self._selected_net)
             )
+            painter.setPen(self._net_pen(selected))
             painter.setBrush(QColor("#66c2ff") if selected else QColor("#e4b363"))
-            points = net_points.get(name, [])
+            points = net_points.get(group_key, [])
             if not points:
                 continue
             stubs = []
@@ -901,21 +1677,62 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
                 stub = point + outward * 26
                 painter.drawLine(point, stub)
                 stubs.append(stub)
-            if len(stubs) == 2:
-                middle_x = (stubs[0].x() + stubs[1].x()) / 2
-                painter.drawLine(stubs[0], QPointF(middle_x, stubs[0].y()))
-                painter.drawLine(
-                    QPointF(middle_x, stubs[0].y()),
-                    QPointF(middle_x, stubs[1].y()),
-                )
-                painter.drawLine(QPointF(middle_x, stubs[1].y()), stubs[1])
-                painter.drawEllipse(QPointF(middle_x, stubs[0].y()), 3, 3)
-                painter.drawText(int(middle_x + 7), int(stubs[0].y() - 6), name)
-            else:
+            if group_key.startswith("power:"):
                 for stub, (_point, outward) in zip(stubs, points, strict=True):
-                    text_x = stub.x() + (7 if outward.x() >= 0 else -48)
-                    text_y = stub.y() + (16 if outward.y() > 0 else -6)
-                    painter.drawText(int(text_x), int(text_y), name)
+                    self._draw_power_symbol(painter, stub, outward, name)
+                continue
+            routes = []
+            pairs = self._minimum_spanning_pairs(stubs)
+            degrees = [0] * len(stubs)
+            other_net_segments = tuple(routed_segments)
+            occupied_display = tuple(displayed_segments)
+            current_net_segments: list[tuple[QPointF, QPointF]] = []
+            current_display_segments: list[tuple[QPointF, QPointF]] = []
+            for origin_index, target_index in pairs:
+                degrees[origin_index] += 1
+                degrees[target_index] += 1
+                origin = stubs[origin_index]
+                target = stubs[target_index]
+                if self._drag_device_id is not None or self._drag_pad_id is not None:
+                    path = self._fast_net_route(origin, target)
+                else:
+                    cache_key = self._route_cache_key(
+                        origin, target, obstacles, other_net_segments
+                    )
+                    path = self._route_cache.get(cache_key)
+                    if path is None:
+                        path = OrthogonalRouter.route(
+                            origin, target, obstacles, other_net_segments
+                        )
+                        if len(self._route_cache) >= 2048:
+                            self._route_cache.clear()
+                        self._route_cache[cache_key] = path
+                display_path = self._display_lane_path(
+                    path,
+                    occupied_display,
+                    (self._NET_LINE_WIDTH + 2.0) / self._zoom,
+                )
+                routes.append(display_path)
+                for start, end in zip(display_path, display_path[1:]):
+                    painter.drawLine(start, end)
+                    current_display_segments.append((start, end))
+                current_net_segments.extend(zip(path, path[1:]))
+            routed_segments.extend(current_net_segments)
+            displayed_segments.extend(current_display_segments)
+            for index, degree in enumerate(degrees):
+                if degree > 1:
+                    painter.drawEllipse(stubs[index], 3, 3)
+            if routes:
+                label_point = self._route_label_point(routes[0])
+                painter.drawText(
+                    int(label_point.x() + 7), int(label_point.y() - 6), name
+                )
+            else:
+                stub = stubs[0]
+                outward = points[0][1]
+                text_x = stub.x() + (7 if outward.x() >= 0 else -48)
+                text_y = stub.y() + (16 if outward.y() > 0 else -6)
+                painter.drawText(int(text_x), int(text_y), name)
 
         if (
             self._connection_preview_origin is not None
@@ -943,6 +1760,11 @@ class SchematicView(QScrollArea):
 
     zoom_changed = Signal(float)
     layout_changed = Signal(str, float, float)
+    layout_started = Signal(str)
+    layout_finished = Signal(str)
+    layout_optimized = Signal()
+    optimization_progress = Signal(int)
+    optimization_finished = Signal()
     terminal_selected = Signal(object)
     terminal_hovered = Signal(object)
     terminal_net_edit_requested = Signal(object)
@@ -954,6 +1776,11 @@ class SchematicView(QScrollArea):
         self._zoom = 1.0
         self._canvas = SchematicCanvas()
         self._canvas.layout_changed.connect(self.layout_changed)
+        self._canvas.layout_started.connect(self.layout_started)
+        self._canvas.layout_finished.connect(self.layout_finished)
+        self._canvas.layout_optimized.connect(self.layout_optimized)
+        self._canvas.optimization_progress.connect(self.optimization_progress)
+        self._canvas.optimization_finished.connect(self.optimization_finished)
         self._canvas.terminal_selected.connect(self.terminal_selected)
         self._canvas.terminal_hovered.connect(self.terminal_hovered)
         self._canvas.terminal_net_edit_requested.connect(
@@ -977,6 +1804,14 @@ class SchematicView(QScrollArea):
     def set_project(self, project: ProjectDocument | None) -> None:
         """Set the project rendered by the schematic canvas."""
         self._canvas.set_project(project)
+
+    def optimize_layout(self) -> None:
+        """Run the explicit schematic layout optimization pass."""
+        self._canvas.optimize_layout()
+
+    def cancel_optimization(self) -> None:
+        """Request cancellation of the active schematic optimization."""
+        self._canvas.cancel_optimization()
 
     def fit_overview(self) -> None:
         """Fit and center the complete schematic sheet."""

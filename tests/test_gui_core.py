@@ -9,12 +9,13 @@
 import os
 from dataclasses import replace
 from pathlib import Path
+from time import monotonic
 from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtCore import QPoint, QPointF, QSettings, Qt
+from PySide6.QtCore import QLineF, QPoint, QPointF, QRectF, QSettings, Qt
 from PySide6.QtGui import QColor, QImage, QPainter, QPixmap, QValidator, QWheelEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
@@ -34,6 +35,8 @@ from tnasrevner.gui import (
     SchematicView,
 )
 from tnasrevner.kicad import CacheResult, FootprintReference, parse_footprint
+from tnasrevner.lib.schematic_layout import SchematicLayoutOptimizer
+from tnasrevner.lib.schematic_router import OrthogonalRouter
 from tnasrevner.project import (
     ComponentPin,
     Device,
@@ -812,6 +815,361 @@ def test_schematic_renders_all_symbol_families_with_schemdraw(
     assert canvas._zoom == SchematicCanvas.MAX_ZOOM
 
 
+def test_schemdraw_two_terminal_anchors_touch_rendered_symbol(
+    app: QApplication,
+) -> None:
+    """Two-terminal anchors remain aligned with the rendered resistor leads."""
+    del app
+    canvas = SchematicCanvas()
+    image = QImage(400, 400, QImage.Format.Format_ARGB32)
+    background = QColor("#20242b")
+    image.fill(background)
+    painter = QPainter(image)
+    painter.translate(200, 200)
+    endpoints = canvas._draw_schemdraw_symbol(
+        painter,
+        "resistor",
+        [ComponentPin("1", "1"), ComponentPin("2", "2")],
+    )
+    painter.end()
+
+    for endpoint in endpoints:
+        x = round(200 + endpoint.x())
+        assert any(
+            image.pixelColor(candidate, 200) != background
+            for candidate in range(x - 2, x + 3)
+        )
+
+
+def test_schemdraw_ic_anchors_touch_rendered_pins(app: QApplication) -> None:
+    """Multi-pin IC anchors use same SVG coordinate frame as white leads."""
+    del app
+    canvas = SchematicCanvas()
+    image = QImage(400, 400, QImage.Format.Format_ARGB32)
+    background = QColor("#20242b")
+    image.fill(background)
+    painter = QPainter(image)
+    painter.translate(200, 200)
+    endpoints = canvas._draw_schemdraw_symbol(
+        painter,
+        "uc",
+        [ComponentPin(str(index), str(index)) for index in range(1, 9)],
+    )
+    painter.end()
+
+    for endpoint in endpoints:
+        x = round(200 + endpoint.x())
+        y = round(200 + endpoint.y())
+        assert any(
+            image.pixelColor(candidate_x, candidate_y) != background
+            for candidate_x in range(x - 2, x + 3)
+            for candidate_y in range(y - 2, y + 3)
+        )
+
+
+def test_schematic_net_wire_stays_visible_at_overview_zoom(
+    app: QApplication,
+) -> None:
+    """Overview zoom keeps a connected net above sub-pixel width."""
+    del app
+    first = Device(
+        "R1",
+        "top",
+        0.0,
+        0.0,
+        "Resistor",
+        "R",
+        "assets/kicad/r1.kicad_mod",
+        "revision",
+        device_id="r1",
+        pins=[
+            ComponentPin("1", "1", net_id="NT1"),
+            ComponentPin("2", "2"),
+        ],
+        schematic_x=5000.0,
+        schematic_y=5000.0,
+    )
+    second = replace(
+        first,
+        reference="R2",
+        device_id="r2",
+        pins=[
+            ComponentPin("1", "1", net_id="NT1"),
+            ComponentPin("2", "2"),
+        ],
+        schematic_x=7000.0,
+        schematic_y=5000.0,
+    )
+    canvas = SchematicCanvas()
+    canvas._project = ProjectDocument("Project", "Board", devices=[first, second])
+    canvas.resize(1000, 700)
+    canvas.set_zoom(SchematicCanvas.MIN_ZOOM)
+    image = QImage(1000, 700, QImage.Format.Format_ARGB32)
+    image.fill(QColor("#20242b"))
+    painter = QPainter(image)
+    canvas.render(painter, QPoint(0, 0))
+    painter.end()
+
+    assert canvas._net_pen(False).isCosmetic()
+
+
+def test_schematic_interactive_paint_has_100x_regression_budget(
+    app: QApplication,
+) -> None:
+    """Interactive DakeFPV paint must stay below 100x the 10 ms baseline."""
+    del app
+    project = ProjectStore(Path("Sample_Img/DakeFVP2.revp")).load()
+    canvas = SchematicCanvas()
+    canvas._project = project
+    canvas.resize(1600, 1000)
+    canvas._drag_device_id = project.devices[0].device_id
+    image = QImage(1600, 1000, QImage.Format.Format_ARGB32)
+    painter = QPainter(image)
+    started = monotonic()
+    canvas.render(painter, QPoint(0, 0))
+    elapsed = monotonic() - started
+    painter.end()
+
+    assert elapsed < 1.0, f"interactive schematic paint too slow: {elapsed:.3f}s"
+
+
+def test_schematic_optimizer_has_sparse_dake_performance_budget(
+    app: QApplication,
+) -> None:
+    """Sparse DakeFPV optimization must remain bounded below three seconds."""
+    del app
+    project = ProjectStore(Path("Sample_Img/DakeFVP2.revp")).load()
+    canvas = SchematicCanvas()
+    canvas._project = project
+    canvas._auto_centers = canvas._layout_devices()
+    positions = {
+        device.device_id: canvas._center_for_device(device, index)
+        for index, device in enumerate(project.devices)
+    }
+    rotations = {
+        device.device_id: device.schematic_rotation for device in project.devices
+    }
+    started = monotonic()
+
+    SchematicLayoutOptimizer.optimize(
+        project.devices,
+        positions,
+        rotations,
+        canvas._layout_edges(project.devices),
+        canvas._layout_connections(project.devices),
+        canvas._WORLD_SIZE,
+        canvas._symbol_size,
+    )
+    elapsed = monotonic() - started
+
+    assert elapsed < 3.0, f"schematic optimization too slow: {elapsed:.3f}s"
+    bounds = [
+        SchematicLayoutOptimizer._candidate_bounds(
+            device,
+            positions[device.device_id],
+            rotations,
+            canvas._symbol_size,
+        )
+        for device in project.devices
+    ]
+    assert not any(
+        left.intersects(right)
+        for index, left in enumerate(bounds)
+        for right in bounds[index + 1 :]
+    )
+
+
+def test_schematic_power_net_aliases_share_global_symbol() -> None:
+    """Power aliases group case-insensitively for schematic rendering."""
+    assert SchematicCanvas._power_net_label("gNd") == "GND"
+    assert SchematicCanvas._power_net_label("VBATT") == "VBAT"
+    assert SchematicCanvas._net_group_key("vbat") == (
+        SchematicCanvas._net_group_key("vbatt")
+    )
+    assert (
+        SchematicCanvas._net_display_name(SchematicCanvas._net_group_key("v3.3"))
+        == "V3.3"
+    )
+
+
+def test_schematic_multiterminal_net_uses_short_spanning_tree() -> None:
+    """Multi-terminal routing avoids a long star from the first terminal."""
+    points = [
+        QPointF(0, 0),
+        QPointF(1000, 0),
+        QPointF(1000, 100),
+        QPointF(1000, 200),
+    ]
+    pairs = SchematicCanvas._minimum_spanning_pairs(points)
+    tree_length = sum(
+        abs(points[left].x() - points[right].x())
+        + abs(points[left].y() - points[right].y())
+        for left, right in pairs
+    )
+    star_length = sum(
+        abs(points[0].x() - point.x()) + abs(points[0].y() - point.y())
+        for point in points[1:]
+    )
+
+    assert len(pairs) == len(points) - 1
+    assert tree_length < star_length
+
+
+def test_schematic_router_keeps_every_segment_orthogonal() -> None:
+    """Off-grid terminal adapters never create diagonal wire segments."""
+    path = OrthogonalRouter.route(
+        QPointF(13, 17),
+        QPointF(191, 143),
+        (QRectF(80, 40, 50, 80),),
+    )
+
+    assert all(
+        start.x() == end.x() or start.y() == end.y()
+        for start, end in zip(path, path[1:])
+    )
+
+
+def test_schematic_router_simplifies_clear_connection_to_one_corner() -> None:
+    """Clear off-grid terminals use one short L instead of grid detours."""
+    path = OrthogonalRouter.route(QPointF(380, 184), QPointF(58, 180))
+
+    assert path == [QPointF(380, 184), QPointF(380, 180), QPointF(58, 180)]
+
+
+def test_schematic_router_prefers_non_overlapping_l_route() -> None:
+    """Direct routing chooses a longer first leg instead of sharing a trunk."""
+    existing = ((QPointF(100, 0), QPointF(100, 100)),)
+
+    path = OrthogonalRouter.route(
+        QPointF(100, -10),
+        QPointF(200, 50),
+        existing=existing,
+    )
+
+    assert path == [QPointF(100, -10), QPointF(200, -10), QPointF(200, 50)]
+
+
+def test_schematic_net_label_uses_longest_route_segment() -> None:
+    """NET text stays away from a crowded L-route bend."""
+    point = SchematicCanvas._route_label_point(
+        [QPointF(100, -10), QPointF(200, -10), QPointF(200, 50)]
+    )
+
+    assert point == QPointF(150, -10)
+
+
+def test_schematic_display_lanes_do_not_touch_at_one_to_one() -> None:
+    """Parallel nets keep visible stroke clearance without logical rerouting."""
+    occupied = ((QPointF(100, 0), QPointF(100, 100)),)
+    display_path = SchematicCanvas._display_lane_path(
+        [QPointF(100, 0), QPointF(100, 100)],
+        occupied,
+        SchematicCanvas._NET_LINE_WIDTH + 2.0,
+    )
+    segments = tuple(zip(display_path, display_path[1:]))
+
+    assert display_path[0] == QPointF(100, 0)
+    assert display_path[-1] == QPointF(100, 100)
+    assert all(start.x() == end.x() or start.y() == end.y() for start, end in segments)
+    assert not any(
+        SchematicCanvas._parallel_segments_conflict(
+            segment,
+            occupied[0],
+            SchematicCanvas._NET_LINE_WIDTH + 2.0,
+        )
+        for segment in segments
+    )
+
+
+def test_independent_pad_auto_layout_uses_board_perimeter(
+    app: QApplication,
+) -> None:
+    """Unplaced independent pads spread around schematic by board edge."""
+    del app
+    canvas = SchematicCanvas()
+    top = Pad("TOP", "top", 0.5, 0.01, "top-pad")
+    bottom = Pad("BOTTOM", "top", 0.5, 0.95, "bottom-pad")
+    left = Pad("LEFT", "top", 0.01, 0.5, "left-pad")
+    right = Pad("RIGHT", "top", 0.95, 0.5, "right-pad")
+    canvas._project = ProjectDocument(
+        "Project", "Board", pads=[top, bottom, left, right]
+    )
+    points = {
+        pad.name: canvas._independent_pad_center(index, 4, pad)
+        for index, pad in enumerate((top, bottom, left, right))
+    }
+
+    assert points["TOP"].y() < points["BOTTOM"].y()
+    assert points["LEFT"].x() < points["RIGHT"].x()
+    assert len({(point.x(), point.y()) for point in points.values()}) == 4
+
+
+def test_connected_independent_pad_stays_outside_large_ic(
+    app: QApplication,
+) -> None:
+    """Automatic pad placement never puts a terminal inside an IC body."""
+    del app
+    device = Device(
+        "IC1",
+        "top",
+        0.5,
+        0.5,
+        "Package_QFP",
+        "QFP_64",
+        "assets/kicad/ic1.kicad_mod",
+        "revision",
+        device_id="ic1",
+        pins=[
+            ComponentPin(str(index), str(index), net_id="SIG" if index == 1 else None)
+            for index in range(1, 65)
+        ],
+        schematic_x=10_000.0,
+        schematic_y=10_000.0,
+    )
+    pad = Pad("P1", "top", 0.5, 0.5, "pad", net="SIG")
+    canvas = SchematicCanvas()
+    canvas._project = ProjectDocument("Project", "Board", devices=[device], pads=[pad])
+    point = canvas._independent_pad_center(0, 1, pad)
+
+    assert not canvas._device_bounds(device, QPointF(10_000, 10_000)).contains(point)
+
+
+def test_connected_pad_is_placed_at_exact_pin_exit(
+    app: QApplication,
+) -> None:
+    """Automatic pad placement follows connected pin endpoint and direction."""
+    del app
+    pad = Pad("P52", "top", 0.5, 0.5, "pad-52", net="NT1")
+    canvas = SchematicCanvas()
+    canvas._project = ProjectDocument("Project", "Board", pads=[pad])
+    center, outward = canvas._pad_render_geometry(
+        0,
+        1,
+        pad,
+        {"net:NT1": [(QPointF(100, 200), QPointF(0, 1))]},
+    )
+
+    assert center == QPointF(100, 310)
+    assert outward == QPointF(0, -1)
+
+
+def test_pad_only_net_is_compacted_before_routing(app: QApplication) -> None:
+    """Automatic pads sharing a pad-only net cannot create a giant wire."""
+    del app
+    pads = [
+        Pad("P12", "top", 0.1, 0.1, "pad-12", net="LED"),
+        Pad("P19", "top", 0.1, 0.9, "pad-19", net="LED"),
+        Pad("P20", "top", 0.9, 0.5, "pad-20"),
+    ]
+    canvas = SchematicCanvas()
+    canvas._project = ProjectDocument("Project", "Board", pads=pads)
+
+    centers = canvas._pad_only_net_centers({})
+
+    assert set(centers) == {"pad-12", "pad-19"}
+    assert QLineF(centers["pad-12"], centers["pad-19"]).length() == 90.0
+
+
 def test_schematic_fit_keeps_zoom_state_for_next_zoom(app: QApplication) -> None:
     """Zoom after FIT uses the canvas zoom instead of a stale viewport value."""
     view = SchematicView()
@@ -829,6 +1187,368 @@ def test_schematic_fit_keeps_zoom_state_for_next_zoom(app: QApplication) -> None
     assert view._zoom == pytest.approx(fitted_zoom * 1.2)
     assert view._canvas._zoom == view._zoom
     view.close()
+
+
+def test_schematic_optimizer_preserves_glued_devices(app: QApplication) -> None:
+    """Optimization moves free devices but preserves glued geometry."""
+    canvas = SchematicCanvas()
+    glued = Device(
+        "R1",
+        "top",
+        0.5,
+        0.5,
+        "Resistor_SMD",
+        "R_0603",
+        "assets/r1",
+        "a" * 40,
+        device_id="glued",
+        pins=[ComponentPin("1", "1"), ComponentPin("2", "2")],
+        schematic_x=9000,
+        schematic_y=9000,
+        schematic_rotation=90,
+        schematic_glued=True,
+    )
+    free = replace(
+        glued,
+        device_id="free",
+        reference="R2",
+        schematic_glued=False,
+    )
+    canvas.set_project(ProjectDocument("Project", "Board", devices=[glued, free]))
+    canvas.show()
+    app.processEvents()
+    canvas.optimize_layout()
+    for _attempt in range(200):
+        app.processEvents()
+        if canvas._optimization_thread is None:
+            break
+        QTest.qWait(5)
+
+    result = {device.device_id: device for device in canvas._project.devices}
+    assert (result["glued"].schematic_x, result["glued"].schematic_y) == (9000, 9000)
+    assert result["glued"].schematic_rotation == 90
+    assert result["free"].schematic_glued is False
+    assert result["free"].schematic_rotation % 90 == 0
+
+
+def test_schematic_optimizer_recompacts_only_free_independent_pads(
+    app: QApplication,
+) -> None:
+    """Final optimization translates free PADs but preserves glued PADs."""
+    del app
+    free = Pad(
+        "P1",
+        "top",
+        0.1,
+        0.1,
+        "free-pad",
+        schematic_x=2000.0,
+        schematic_y=3000.0,
+    )
+    glued = replace(
+        free,
+        name="P2",
+        pad_id="glued-pad",
+        schematic_glued=True,
+    )
+    canvas = SchematicCanvas()
+    canvas._project = ProjectDocument("Project", "Board", pads=[free, glued])
+
+    canvas._apply_optimized_layout({}, {})
+
+    result = {pad.pad_id: pad for pad in canvas._project.pads}
+    assert result["free-pad"].schematic_x is None
+    assert result["free-pad"].schematic_y is None
+    assert result["glued-pad"].schematic_x == 2000.0
+    assert result["glued-pad"].schematic_y == 3000.0
+
+
+def test_schematic_spring_pass_shortens_visible_links() -> None:
+    """Spring refinement pulls a long visible connection toward target length."""
+    first = Device(
+        "R1",
+        "top",
+        0.1,
+        0.1,
+        "Resistor",
+        "R",
+        "assets/r1",
+        "revision",
+        device_id="r1",
+        pins=[ComponentPin("1", "1", net_id="SIG")],
+    )
+    second = replace(first, reference="R2", device_id="r2")
+    positions = {"r1": QPointF(1000, 1000), "r2": QPointF(9000, 1000)}
+    rotations = {"r1": 0.0, "r2": 0.0}
+    before = QLineF(positions["r1"], positions["r2"]).length()
+
+    SchematicLayoutOptimizer._spring_relax(
+        [first, second],
+        positions,
+        rotations,
+        {("r1", "r2")},
+        20_000.0,
+        SchematicCanvas._symbol_size,
+        lambda: False,
+    )
+
+    after = QLineF(positions["r1"], positions["r2"]).length()
+    assert after < before / 2
+
+
+def test_schematic_spring_packs_connected_passives_without_overlap() -> None:
+    """Connected resistors and capacitors settle at compact safe spacing."""
+    resistor = Device(
+        "R1",
+        "top",
+        0.1,
+        0.1,
+        "Resistor",
+        "R",
+        "assets/r1",
+        "revision",
+        device_id="r1",
+        pins=[ComponentPin("1", "1", net_id="SIG")],
+    )
+    capacitor = replace(resistor, reference="C1", device_id="c1")
+    positions = {"r1": QPointF(1000, 1000), "c1": QPointF(3000, 1000)}
+    rotations = {"r1": 0.0, "c1": 0.0}
+
+    SchematicLayoutOptimizer._spring_relax(
+        [resistor, capacitor],
+        positions,
+        rotations,
+        {("r1", "c1")},
+        20_000.0,
+        SchematicCanvas._symbol_size,
+        lambda: False,
+    )
+
+    distance = QLineF(positions["r1"], positions["c1"]).length()
+    assert distance <= 180.0
+    assert not SchematicCanvas._device_bounds(resistor, positions["r1"]).intersects(
+        SchematicCanvas._device_bounds(capacitor, positions["c1"])
+    )
+
+
+def test_schematic_spring_packs_parallel_passive_branches() -> None:
+    """Passive branches sharing identical neighbors form a compact stack."""
+    resistor = Device(
+        "R1",
+        "top",
+        0.1,
+        0.1,
+        "Resistor",
+        "R",
+        "assets/r1",
+        "revision",
+        device_id="r1",
+        pins=[ComponentPin("1", "1"), ComponentPin("2", "2")],
+    )
+    capacitor = replace(resistor, reference="C1", device_id="c1")
+    left_ic = replace(
+        resistor,
+        reference="IC1",
+        device_id="ic1",
+        schematic_glued=True,
+    )
+    right_ic = replace(
+        left_ic,
+        reference="IC2",
+        device_id="ic2",
+    )
+    devices = [left_ic, right_ic, resistor, capacitor]
+    positions = {
+        "ic1": QPointF(1000, 2000),
+        "ic2": QPointF(3000, 2000),
+        "r1": QPointF(2000, 1000),
+        "c1": QPointF(2000, 3000),
+    }
+    rotations = {device.device_id: 0.0 for device in devices}
+    edges = {
+        ("ic1", "r1"),
+        ("ic2", "r1"),
+        ("ic1", "c1"),
+        ("ic2", "c1"),
+    }
+
+    SchematicLayoutOptimizer._spring_relax(
+        devices,
+        positions,
+        rotations,
+        edges,
+        20_000.0,
+        SchematicCanvas._symbol_size,
+        lambda: False,
+    )
+
+    distance = QLineF(positions["r1"], positions["c1"]).length()
+    assert distance <= 120.0
+    assert not SchematicCanvas._device_bounds(resistor, positions["r1"]).intersects(
+        SchematicCanvas._device_bounds(capacitor, positions["c1"])
+    )
+
+
+def test_schematic_optimizer_aligns_right_passive_pin_to_ic() -> None:
+    """Right-facing passive terminal wins alignment and forms a straight wire."""
+    resistor = Device(
+        "R3",
+        "top",
+        0.1,
+        0.1,
+        "Resistor",
+        "R",
+        "assets/r3",
+        "revision",
+        device_id="r3",
+        pins=[ComponentPin("1", "1"), ComponentPin("2", "2")],
+    )
+    left_ic = Device(
+        "IC1",
+        "top",
+        0.1,
+        0.1,
+        "Package_QFP",
+        "IC",
+        "assets/ic1",
+        "revision",
+        device_id="ic1",
+        pins=[ComponentPin(str(index), str(index)) for index in range(1, 9)],
+        schematic_glued=True,
+    )
+    right_ic = replace(left_ic, reference="IC5", device_id="ic5")
+    devices = [left_ic, right_ic, resistor]
+    positions = {
+        "ic1": QPointF(1000, 1800),
+        "ic5": QPointF(3000, 2000),
+        "r3": QPointF(2000, 1500),
+    }
+    rotations = {device.device_id: 0.0 for device in devices}
+
+    SchematicLayoutOptimizer._align_passive_terminals(
+        devices,
+        positions,
+        rotations,
+        [("ic1", 0, "r3", 0), ("ic5", 0, "r3", 1)],
+        20_000.0,
+        SchematicCanvas._symbol_size,
+    )
+
+    passive_pin = SchematicLayoutOptimizer._terminal_point(
+        resistor,
+        1,
+        positions,
+        rotations,
+        SchematicCanvas._symbol_size,
+    )
+    ic_pin = SchematicLayoutOptimizer._terminal_point(
+        right_ic,
+        0,
+        positions,
+        rotations,
+        SchematicCanvas._symbol_size,
+    )
+    assert passive_pin.y() == ic_pin.y()
+    assert SchematicLayoutOptimizer._candidate_rotations(right_ic, 0.0) == (0.0,)
+
+
+def test_schematic_final_translation_compacts_without_overlap() -> None:
+    """Final translation pass reduces span without rotation or intersection."""
+    first = Device(
+        "R1",
+        "top",
+        0.1,
+        0.1,
+        "Resistor",
+        "R",
+        "assets/r1",
+        "revision",
+        device_id="r1",
+        pins=[ComponentPin("1", "1"), ComponentPin("2", "2")],
+    )
+    second = replace(first, reference="C1", device_id="c1")
+    third = replace(first, reference="R2", device_id="r2")
+    devices = [first, second, third]
+    positions = {
+        "r1": QPointF(2000, 2000),
+        "c1": QPointF(6000, 2000),
+        "r2": QPointF(10_000, 2000),
+    }
+    rotations = {"r1": 0.0, "c1": 90.0, "r2": 180.0}
+    original_rotations = dict(rotations)
+    before = max(point.x() for point in positions.values()) - min(
+        point.x() for point in positions.values()
+    )
+
+    SchematicLayoutOptimizer._compact_translations(
+        devices,
+        positions,
+        rotations,
+        set(),
+        20_000.0,
+        SchematicCanvas._symbol_size,
+        lambda: False,
+    )
+
+    after = max(point.x() for point in positions.values()) - min(
+        point.x() for point in positions.values()
+    )
+    bounds = [
+        SchematicCanvas._device_bounds(device, positions[device.device_id])
+        for device in devices
+    ]
+    assert after < before / 2
+    assert rotations == original_rotations
+    assert not any(
+        left.intersects(right)
+        for index, left in enumerate(bounds)
+        for right in bounds[index + 1 :]
+    )
+
+
+def test_schematic_optimizer_button_is_schematic_only(window: MainWindow) -> None:
+    """The expensive optimizer control is hidden outside Schematic."""
+    window.show()
+    QApplication.processEvents()
+    schematic_index = window._tabs.indexOf(window._schematic_view)
+    window._tabs.setCurrentIndex(0)
+    assert not window._optimize_schematic_button.isVisible()
+    window._tabs.setCurrentIndex(schematic_index)
+    assert window._optimize_schematic_button.isVisible()
+
+
+def test_schematic_drag_records_one_history_state_on_release(
+    window: MainWindow, tmp_path: Path
+) -> None:
+    """Intermediate schematic drag positions do not create undo entries."""
+    window.store = ProjectStore(tmp_path / "drag.revp")
+    device = Device(
+        "R1",
+        "top",
+        0.5,
+        0.5,
+        "Resistor_SMD",
+        "R_0603",
+        "assets/r1",
+        "a" * 40,
+        device_id="dragged",
+        schematic_x=9000,
+        schematic_y=9000,
+    )
+    window.project = ProjectDocument("Project", "Board", devices=[device])
+    window._reset_history()
+    initial_length = len(window._history)
+
+    window._schematic_layout_started("dragged")
+    for position in (9100, 9200, 9300):
+        window.project.devices[0] = replace(
+            window.project.devices[0], schematic_x=position
+        )
+        window._schematic_layout_changed("dragged", position, 9000)
+    assert len(window._history) == initial_length
+
+    window._schematic_layout_finished("dragged")
+    assert len(window._history) == initial_length + 1
 
 
 def test_recent_footprints_persist_newest_five(

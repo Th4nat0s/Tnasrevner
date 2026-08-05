@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Added explicit schematic layout optimization with persistent Glue/Unglue
+  constraints, 90-degree rotation search, cable-obstacle avoidance, and
+  peripheral placement for unconnected components; optimization runs in a
+  worker with live progress feedback.
 - Connect mode now shows persistent Shift/Escape guidance and a live temporary
   preview from the first selected pad or pin in board and schematic views.
 - Added `REVP0001` magic headers to new `.revp` archives, with validation and

@@ -734,8 +734,14 @@ class ImageImportMixin:
             return QPixmap()
         return pixmap
 
-    def _update_title(self) -> None:
-        self._record_history()
+    def _update_title(self, record_history: bool = True) -> None:
+        """Refresh title and BOM, optionally recording a history snapshot.
+
+        Args:
+            record_history: Whether this UI refresh represents a completed edit.
+        """
+        if record_history:
+            self._record_history()
         if hasattr(self, "_bom_table"):
             self._refresh_bom_table()
         name = self.project.project_name if self.project else "No project"
