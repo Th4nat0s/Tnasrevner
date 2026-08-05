@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Connect mode now shows persistent Shift/Escape guidance and a live temporary
+  preview from the first selected pad or pin in board and schematic views.
 - Added `REVP0001` magic headers to new `.revp` archives, with validation and
   backward-compatible loading of legacy raw-ZIP projects.
 - Refined image editing and toolbar UX: one Image action for Top/Bottom selection,

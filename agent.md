@@ -19,6 +19,9 @@
 - The minimum accepted quality score is 8/10. No new or modified code may reduce
   the project quality score below 8/10.
 - Prefer small, explicit, testable functions and clear domain models.
+- No Python module may exceed 1,200 lines, including production code, tests,
+  scripts, and helpers. Split modules by cohesive responsibility before they
+  reach this limit; UI tabs must live in dedicated modules.
 - Keep the domain and application layers independent from PySide6 and other UI
   implementation details.
 - Avoid duplicated logic, hidden global state, unexplained constants, and broad
