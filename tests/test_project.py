@@ -5,6 +5,7 @@
 
 import json
 from pathlib import Path
+from zipfile import ZIP_DEFLATED, ZipFile
 
 import pytest
 
@@ -14,6 +15,7 @@ from tnasrevner.project import (
     DisplaySettings,
     ImageAsset,
     Net,
+    PROJECT_ARCHIVE_HEADER,
     Pad,
     ProjectDocument,
     ProjectFormatError,
@@ -52,6 +54,49 @@ def test_revp_archive_round_trip_includes_image_bytes(tmp_path: Path) -> None:
 
     assert loaded.to_dict() == project.to_dict()
     assert loaded_store.read_asset("assets/top.png") == b"picture-bytes"
+
+
+def test_revp_archive_starts_with_signed_header(tmp_path: Path) -> None:
+    """Saved archives begin with the fixed current-format REVP header."""
+    archive_path = tmp_path / "signed.revp"
+    ProjectStore(archive_path).save(ProjectDocument("Project", "Board"))
+
+    assert archive_path.read_bytes()[: len(PROJECT_ARCHIVE_HEADER)] == (
+        PROJECT_ARCHIVE_HEADER
+    )
+
+
+def test_legacy_raw_zip_revp_remains_readable(tmp_path: Path) -> None:
+    """Existing raw ZIP projects remain readable during header migration."""
+    archive_path = tmp_path / "legacy.revp"
+    project = ProjectDocument("Project", "Board")
+    with ZipFile(archive_path, "w", compression=ZIP_DEFLATED) as archive:
+        archive.writestr(
+            "project.json", json.dumps(project.to_dict(), sort_keys=True) + "\n"
+        )
+
+    assert ProjectStore(archive_path).load().to_dict() == project.to_dict()
+
+
+@pytest.mark.parametrize(
+    ("prefix", "message"),
+    (
+        (b"", "truncated"),
+        (b"REVP", "truncated"),
+        (b"NOPE0001", "missing"),
+        (b"REVP00A1", "malformed"),
+        (b"REVP0002", "unsupported"),
+    ),
+)
+def test_revp_header_errors_are_actionable(
+    tmp_path: Path, prefix: bytes, message: str
+) -> None:
+    """Malformed, truncated, and unsupported headers raise format errors."""
+    archive_path = tmp_path / "invalid.revp"
+    archive_path.write_bytes(prefix)
+
+    with pytest.raises(ProjectFormatError, match=message):
+        ProjectStore(archive_path).load()
 
 
 def test_revp_archive_keeps_original_and_working_image(tmp_path: Path) -> None:

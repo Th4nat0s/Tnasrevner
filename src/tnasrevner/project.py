@@ -10,7 +10,8 @@ from collections.abc import Callable
 import json
 import math
 from pathlib import Path, PurePosixPath
-from typing import Any
+import shutil
+from typing import Any, BinaryIO
 from uuid import uuid4
 from zipfile import ZIP_DEFLATED, ZIP_STORED, BadZipFile, ZipFile
 
@@ -19,6 +20,11 @@ from .kicad import KiCadFormatError, parse_footprint
 CURRENT_FORMAT_VERSION = 1
 PROJECT_FILENAME = "project.json"
 PROJECT_ARCHIVE_SUFFIX = ".revp"
+PROJECT_ARCHIVE_MAGIC = b"REVP"
+PROJECT_ARCHIVE_HEADER = PROJECT_ARCHIVE_MAGIC + f"{CURRENT_FORMAT_VERSION:04d}".encode(
+    "ascii"
+)
+_ARCHIVE_HEADER_SIZE = len(PROJECT_ARCHIVE_HEADER)
 _SIDES = frozenset({"top", "bottom"})
 _DISPLAY_MODES = frozenset(
     {
@@ -37,6 +43,35 @@ _PAD_SHAPES = frozenset({"rect", "circle", "oval", "roundrect", "trapezoid"})
 
 class ProjectFormatError(ValueError):
     """Raised when project data is missing, corrupt, or unsupported."""
+
+
+def _archive_payload_offset(stream: BinaryIO) -> int:
+    """Validate archive prefix and return ZIP payload offset.
+
+    Args:
+        stream: Open binary project stream positioned at its beginning.
+
+    Returns:
+        Byte offset where the ZIP payload starts; zero for legacy raw ZIP files.
+
+    Raises:
+        ProjectFormatError: If prefix is missing, malformed, or unsupported.
+    """
+    prefix = stream.read(_ARCHIVE_HEADER_SIZE)
+    if prefix.startswith(b"PK"):
+        stream.seek(0)
+        return 0
+    if len(prefix) != _ARCHIVE_HEADER_SIZE:
+        raise ProjectFormatError("invalid or truncated REVP archive header")
+    if prefix[: len(PROJECT_ARCHIVE_MAGIC)] != PROJECT_ARCHIVE_MAGIC:
+        raise ProjectFormatError("missing REVP archive header")
+    version_bytes = prefix[len(PROJECT_ARCHIVE_MAGIC) :]
+    if not version_bytes.isdigit() or len(version_bytes) != 4:
+        raise ProjectFormatError("malformed REVP archive header version")
+    version = int(version_bytes)
+    if version != CURRENT_FORMAT_VERSION:
+        raise ProjectFormatError(f"unsupported REVP archive version: {version}")
+    return _ARCHIVE_HEADER_SIZE
 
 
 def _utc_now() -> str:
@@ -722,26 +757,41 @@ class ProjectStore:
         self.root.mkdir(parents=True, exist_ok=True)
         project.updated_at = _utc_now()
         if self.is_archive:
+            payload_temporary = self.project_file.with_suffix(".revp.zip.tmp")
             temporary = self.project_file.with_suffix(".revp.tmp")
             assets = sorted(self._assets.items())
             total = max(1, len(assets))
-            with ZipFile(temporary, "w", compression=ZIP_DEFLATED) as archive:
-                archive.writestr(
-                    PROJECT_FILENAME,
-                    json.dumps(project.to_dict(), indent=2, sort_keys=True) + "\n",
-                )
-                if progress is not None:
-                    progress("Writing project metadata", 0, total)
-                for index, (path, content) in enumerate(assets, start=1):
-                    compression = (
-                        ZIP_STORED
-                        if path.casefold().endswith((".png", ".jpg", ".jpeg", ".webp"))
-                        else ZIP_DEFLATED
+            try:
+                with ZipFile(
+                    payload_temporary, "w", compression=ZIP_DEFLATED
+                ) as archive:
+                    archive.writestr(
+                        PROJECT_FILENAME,
+                        json.dumps(project.to_dict(), indent=2, sort_keys=True) + "\n",
                     )
-                    archive.writestr(path, content, compress_type=compression)
                     if progress is not None:
-                        progress(f"Writing {path}", index, total)
-            temporary.replace(self.project_file)
+                        progress("Writing project metadata", 0, total)
+                    for index, (path, content) in enumerate(assets, start=1):
+                        compression = (
+                            ZIP_STORED
+                            if path.casefold().endswith(
+                                (".png", ".jpg", ".jpeg", ".webp")
+                            )
+                            else ZIP_DEFLATED
+                        )
+                        archive.writestr(path, content, compress_type=compression)
+                        if progress is not None:
+                            progress(f"Writing {path}", index, total)
+                with (
+                    payload_temporary.open("rb") as payload,
+                    temporary.open("wb") as signed_archive,
+                ):
+                    signed_archive.write(PROJECT_ARCHIVE_HEADER)
+                    shutil.copyfileobj(payload, signed_archive)
+                temporary.replace(self.project_file)
+            finally:
+                payload_temporary.unlink(missing_ok=True)
+                temporary.unlink(missing_ok=True)
             return
         temporary = self.project_file.with_suffix(".json.tmp")
         temporary.write_text(
@@ -827,13 +877,18 @@ class ProjectStore:
 
     def _load_archive(self) -> ProjectDocument:
         try:
-            with ZipFile(self.project_file) as archive:
-                data = json.loads(archive.read(PROJECT_FILENAME).decode("utf-8"))
-                self._assets = {
-                    name: archive.read(name)
-                    for name in archive.namelist()
-                    if name.startswith("assets/") and not name.endswith("/")
-                }
+            with self.project_file.open("rb") as source:
+                offset = _archive_payload_offset(source)
+                source.seek(offset)
+                with ZipFile(source) as archive:
+                    data = json.loads(archive.read(PROJECT_FILENAME).decode("utf-8"))
+                    self._assets = {
+                        name: archive.read(name)
+                        for name in archive.namelist()
+                        if name.startswith("assets/") and not name.endswith("/")
+                    }
+        except ProjectFormatError as error:
+            raise ProjectFormatError(f"cannot read project archive: {error}") from error
         except (
             BadZipFile,
             KeyError,

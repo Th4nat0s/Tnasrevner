@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added `REVP0001` magic headers to new `.revp` archives, with validation and
+  backward-compatible loading of legacy raw-ZIP projects.
 - Refined image editing and toolbar UX: one Image action for Top/Bottom selection,
   icon-only controls with hover help, visible crop kept/outside areas, Add Footprint,
   Add Pad, and a dedicated floppy-disk Save icon.

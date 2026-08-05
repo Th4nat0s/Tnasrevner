@@ -1,10 +1,26 @@
 # Project format
 
-Projects are single `.revp` ZIP files. Each archive contains `project.json` and
+Projects are single `.revp` files containing a signed ZIP payload. Each archive
+contains `project.json` and
 imported pictures under `assets/`. Metadata stores paths relative to the archive
 root, making one `.revp` file sufficient to move or copy a project.
 
 `format_version` is required. Current version is `1`.
+
+Every newly saved archive starts with this exact 8-byte ASCII header:
+
+```text
+REVP0001
+```
+
+The first four bytes are the fixed `REVP` signature. The last four bytes are the
+zero-padded decimal format version. The ZIP payload starts immediately after
+the header. The header is validated before the archive is parsed; malformed,
+truncated, and unsupported versions are rejected with `ProjectFormatError`.
+
+For migration compatibility, existing version-1 `.revp` files that are raw ZIP
+archives without a header remain readable. New saves always rewrite them using
+the signed format. Directory projects continue to use `project.json` directly.
 
 ```json
 {
