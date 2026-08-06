@@ -50,6 +50,7 @@ from PySide6.QtGui import (
     QColor,
     QCloseEvent,
     QCursor,
+    QFont,
     QIcon,
     QPainter,
     QPen,
@@ -215,6 +216,9 @@ class BoardControlsMixin:
             "Measure Tool",
             self._toggle_ruler,
         )
+        ruler_button.setIcon(QIcon())
+        ruler_button.setText("📐")
+        ruler_button.setFont(QFont(".AppleSystemUIFont", 20))
         ruler_button.setCheckable(True)
         self._ruler_button = ruler_button
         show_pads_button = QPushButton(panel)

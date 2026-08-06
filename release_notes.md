@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Replaced the generic Measure Tool icon with a visible ruler glyph (`📐`).
 - Added explicit schematic layout optimization with persistent Glue/Unglue
   constraints, 90-degree rotation search, cable-obstacle avoidance, and
   peripheral placement for unconnected components; optimization runs in a

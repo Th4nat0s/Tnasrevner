@@ -680,6 +680,12 @@ def test_tools_palette_buttons_have_icons_and_hover_help(window: MainWindow) -> 
     assert all(not button.icon().isNull() or button.text() for button in buttons)
     assert all(button.toolTip() for button in buttons)
     assert window._tools_dock.widget().findChild(QPushButton, "tool11").text() == "1:1"
+    ruler = window._tools_dock.widget().findChild(QPushButton, "toolRuler")
+    assert ruler is not None
+    assert ruler.text() == "📐"
+    assert ruler.accessibleName() == "Ruler"
+    assert ruler.toolTip() == "Measure Tool"
+    assert ruler.statusTip() == "Measure Tool"
 
 
 def test_kicad_cache_failure_cancels_pending_import(
