@@ -864,9 +864,21 @@ class PadActionsMixin:
             pad for pad in self.project.pads if pad.device_id != device_id
         ]
         self._cleanup_single_terminal_nets(affected_nets)
-        if self.store is not None:
+        still_used = any(
+            item.footprint_definition_id == device.footprint_definition_id
+            for item in self.project.devices
+            if item.device_id != device_id
+        )
+        if self.store is not None and not still_used:
             self.store.remove_asset(device.footprint_path)
-        self._device_footprint_cache.pop(device.footprint_path, None)
+            self.project.footprint_definitions = [
+                item
+                for item in self.project.footprint_definitions
+                if item.definition_id != device.footprint_definition_id
+            ]
+            self._device_footprint_cache.pop(
+                device.footprint_definition_id or device.footprint_path, None
+            )
         if self._selected_pad_id in removed_pad_ids:
             self._selected_pad_id = None
             self._selected_net = None

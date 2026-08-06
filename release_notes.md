@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added shared KiCad footprint definitions with SHA-256 identity, deduplicated
+  `.revp` assets, shared runtime parsing cache, and automatic v1 migration.
 - Replaced the generic Measure Tool icon with a visible ruler glyph (`📐`).
 - Added explicit schematic layout optimization with persistent Glue/Unglue
   constraints, 90-degree rotation search, cable-obstacle avoidance, and
@@ -9,8 +11,8 @@
   worker with live progress feedback.
 - Connect mode now shows persistent Shift/Escape guidance and a live temporary
   preview from the first selected pad or pin in board and schematic views.
-- Added `REVP0001` magic headers to new `.revp` archives, with validation and
-  backward-compatible loading of legacy raw-ZIP projects.
+- Added versioned `REVP0002` magic headers to new `.revp` archives, with
+  validation and backward-compatible loading of legacy raw-ZIP projects.
 - Refined image editing and toolbar UX: one Image action for Top/Bottom selection,
   icon-only controls with hover help, visible crop kept/outside areas, Add Footprint,
   Add Pad, and a dedicated floppy-disk Save icon.

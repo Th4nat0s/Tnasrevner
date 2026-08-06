@@ -592,6 +592,13 @@ class FootprintActionsMixin:
                 pixels_per_mm,
             )
             device_id = str(uuid4())
+            definition = self.store.register_footprint(
+                self.project,
+                pending.footprint.library,
+                pending.footprint.name,
+                pending.revision,
+                pending.content,
+            )
             device = Device(
                 pending.reference,
                 side,
@@ -599,10 +606,11 @@ class FootprintActionsMixin:
                 y,
                 pending.footprint.library,
                 pending.footprint.name,
-                f"assets/kicad/{device_id}.kicad_mod",
+                definition.path,
                 pending.revision,
                 device_id=device_id,
                 rotation=pending.rotation,
+                footprint_definition_id=definition.definition_id,
                 object_type=_footprint_family(pending.footprint.library),
                 pins=[
                     ComponentPin(
@@ -631,13 +639,12 @@ class FootprintActionsMixin:
             existing_names = {pad.name for pad in self.project.pads}
             if any(pad.name in existing_names for pad in generated):
                 raise ProjectFormatError("Generated device pad name already exists.")
-            self.store.write_asset(device.footprint_path, pending.content)
         except (KiCadFormatError, ProjectFormatError) as error:
             QMessageBox.warning(self, "Cannot place device", str(error))
             return
         self.project.devices.append(device)
         self.project.pads.extend(generated)
-        self._device_footprint_cache[device.footprint_path] = pending.footprint
+        self._device_footprint_cache[device.footprint_definition_id] = pending.footprint
         self._pending_device = replace(
             pending, reference=self._next_device_reference(pending.source)
         )

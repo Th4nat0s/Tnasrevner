@@ -552,7 +552,8 @@ class ImageImportMixin:
 
     def _footprint_for_device(self, device: Device) -> Footprint | None:
         """Decode and cache an embedded footprint used by a placed device."""
-        cached = self._device_footprint_cache.get(device.footprint_path)
+        cache_key = device.footprint_definition_id or device.footprint_path
+        cached = self._device_footprint_cache.get(cache_key)
         if cached is not None:
             return cached
         if self.store is None:
@@ -569,7 +570,7 @@ class ImageImportMixin:
                 error,
             )
             return None
-        self._device_footprint_cache[device.footprint_path] = footprint
+        self._device_footprint_cache[cache_key] = footprint
         return footprint
 
     def _rebuild_device_pads(self, side: str, pixmap: QPixmap) -> None:

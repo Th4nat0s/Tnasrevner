@@ -13,6 +13,7 @@ from tnasrevner.project import (
     ComponentPin,
     Device,
     DisplaySettings,
+    FootprintDefinition,
     ImageAsset,
     Net,
     PROJECT_ARCHIVE_HEADER,
@@ -85,7 +86,7 @@ def test_legacy_raw_zip_revp_remains_readable(tmp_path: Path) -> None:
         (b"REVP", "truncated"),
         (b"NOPE0001", "missing"),
         (b"REVP00A1", "malformed"),
-        (b"REVP0002", "unsupported"),
+        (b"REVP0003", "unsupported"),
     ),
 )
 def test_revp_header_errors_are_actionable(
@@ -266,12 +267,132 @@ def test_kicad_device_and_generated_pads_round_trip(tmp_path: Path) -> None:
     store.save(project)
     loaded = ProjectStore(tmp_path / "board.revp").load()
 
-    assert loaded.devices == [device]
+    assert loaded.devices[0].reference == device.reference
+    assert loaded.devices[0].footprint_library == device.footprint_library
+    assert loaded.devices[0].footprint_definition_id is not None
     assert loaded.pads[0].name == "R1.1"
     assert loaded.pads[0].device_id == "device-id"
     assert loaded.pads[0].rotation == 45
     assert loaded.devices[0].value == "10 kΩ"
     assert loaded.devices[0].schematic_glued is True
+
+
+def test_shared_footprint_definition_deduplicates_legacy_devices(
+    tmp_path: Path,
+) -> None:
+    """Legacy devices with identical source bytes migrate to one definition."""
+    first = Device(
+        "R1",
+        "top",
+        0.2,
+        0.2,
+        "Resistor_SMD",
+        "R_0603",
+        "assets/kicad/r1.kicad_mod",
+        "a" * 40,
+        device_id="r1",
+    )
+    second = Device(
+        "R2",
+        "top",
+        0.7,
+        0.7,
+        "Resistor_SMD",
+        "R_0603",
+        "assets/kicad/r2.kicad_mod",
+        "a" * 40,
+        device_id="r2",
+    )
+    project = ProjectDocument("Project", "Board", devices=[first, second])
+    store = ProjectStore(tmp_path / "shared.revp")
+    store.write_asset(first.footprint_path, FOOTPRINT)
+    store.write_asset(second.footprint_path, FOOTPRINT)
+    store.save(project)
+
+    loaded = ProjectStore(tmp_path / "shared.revp").load()
+
+    assert len(loaded.footprint_definitions) == 1
+    assert len({device.footprint_path for device in loaded.devices}) == 1
+    assert (
+        loaded.devices[0].footprint_definition_id
+        == loaded.devices[1].footprint_definition_id
+    )
+
+    store = ProjectStore(tmp_path / "shared.revp")
+    loaded = store.load()
+    store.save(loaded)
+    with ZipFile(tmp_path / "shared.revp") as archive:
+        footprint_entries = [
+            name
+            for name in archive.namelist()
+            if name.startswith("assets/kicad/") and name.endswith(".kicad_mod")
+        ]
+    assert len(footprint_entries) == 1
+
+
+def test_footprint_definition_identity_includes_source_metadata() -> None:
+    """Different library metadata cannot silently share a source identity."""
+    first = FootprintDefinition.identity("LibraryA", "R_0603", FOOTPRINT)
+    second = FootprintDefinition.identity("LibraryB", "R_0603", FOOTPRINT)
+
+    assert first != second
+
+
+def test_reassigning_footprint_changes_one_device_only() -> None:
+    """A definition association is independent for each component instance."""
+    first = FootprintDefinition(
+        "fp-one",
+        "Resistor_SMD",
+        "R_0603",
+        "assets/kicad/one.kicad_mod",
+        "a" * 40,
+        FootprintDefinition.hash_content(FOOTPRINT),
+    )
+    second = FootprintDefinition(
+        "fp-two",
+        "Resistor_SMD",
+        "R_1206",
+        "assets/kicad/two.kicad_mod",
+        "b" * 40,
+        FootprintDefinition.hash_content(FOOTPRINT),
+    )
+    first_device = Device(
+        "R1",
+        "top",
+        0.2,
+        0.2,
+        "Resistor_SMD",
+        "R_0603",
+        first.path,
+        first.source_revision,
+        device_id="r1",
+        footprint_definition_id=first.definition_id,
+    )
+    second_device = Device(
+        "R2",
+        "top",
+        0.7,
+        0.7,
+        "Resistor_SMD",
+        "R_0603",
+        first.path,
+        first.source_revision,
+        device_id="r2",
+        footprint_definition_id=first.definition_id,
+    )
+    project = ProjectDocument(
+        "Project",
+        "Board",
+        devices=[first_device, second_device],
+        footprint_definitions=[first, second],
+    )
+
+    project.reassign_device_footprint("r1", "fp-two")
+
+    assert project.devices[0].footprint_definition_id == "fp-two"
+    assert project.devices[0].reference == "R1"
+    assert project.devices[1].footprint_definition_id == "fp-one"
+    assert project.devices[1].x == 0.7
 
 
 def test_component_pin_identity_function_and_net_round_trip() -> None:
@@ -420,4 +541,4 @@ def test_written_json_is_valid_and_readable(tmp_path: Path) -> None:
     store.save(ProjectDocument("Project", "Board"))
 
     data = json.loads(store.project_file.read_text(encoding="utf-8"))
-    assert data["format_version"] == 1
+    assert data["format_version"] == 2
