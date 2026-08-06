@@ -113,6 +113,17 @@ def test_main_window_has_application_icon(window: MainWindow) -> None:
     assert not window.windowIcon().isNull()
 
 
+def test_measure_tool_uses_ruler_glyph(window: MainWindow) -> None:
+    """Measure Tool keeps its identity while showing a ruler glyph."""
+    button = window._tools_dock.widget().findChild(QPushButton, "toolRuler")
+
+    assert button is not None
+    assert button.text() == "📐"
+    assert button.accessibleName() == "Ruler"
+    assert button.toolTip() == "Measure Tool"
+    assert button.statusTip() == "Measure Tool"
+
+
 def test_project_dialog_remembers_existing_directory(
     window: MainWindow, tmp_path: Path
 ) -> None:
@@ -574,7 +585,9 @@ def test_tools_palette_buttons_have_icons_and_hover_help(window: MainWindow) -> 
     """Every tool action exposes an icon and mouse-over description."""
     buttons = window._tools_dock.widget().findChildren(QPushButton)
     assert buttons
-    assert all(not button.icon().isNull() for button in buttons)
+    assert all(
+        not button.icon().isNull() or button.text() == "📐" for button in buttons
+    )
     assert all(button.toolTip() for button in buttons)
 
 

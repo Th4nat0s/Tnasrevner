@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Replaced the generic Measure Tool icon with a visible ruler glyph (`📐`).
 - Refined image editing and toolbar UX: one Image action for Top/Bottom selection,
   icon-only controls with hover help, visible crop kept/outside areas, Add Footprint,
   Add Pad, and a dedicated floppy-disk Save icon.

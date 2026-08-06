@@ -49,6 +49,7 @@ from PySide6.QtGui import (
     QColor,
     QCloseEvent,
     QCursor,
+    QFont,
     QIcon,
     QPainter,
     QPen,
@@ -695,7 +696,9 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
                 self._calibration_start = None
                 self._calibration_end = None
                 if QLineF(start, end).length() >= 2:
-                    angle = math.degrees(math.atan2(end.y() - start.y(), end.x() - start.x()))
+                    angle = math.degrees(
+                        math.atan2(end.y() - start.y(), end.x() - start.x())
+                    )
                     self._set_angle(self._angle - angle)
                 self._set_edit_mode("calibration")
                 return True
@@ -3604,6 +3607,9 @@ class MainWindow(
             "Measure Tool",
             self._toggle_ruler,
         )
+        ruler_button.setIcon(QIcon())
+        ruler_button.setText("📐")
+        ruler_button.setFont(QFont(".AppleSystemUIFont", 20))
         ruler_button.setCheckable(True)
         self._ruler_button = ruler_button
         show_pads_button = QPushButton(panel)
