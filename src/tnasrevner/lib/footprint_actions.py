@@ -359,9 +359,10 @@ class FootprintActionsMixin:
     def _reference_prefix(self, source: FootprintReference) -> str:
         """Choose a remembered or conventional reference prefix."""
         family = _footprint_family_key(source.library)
-        if family not in {"resistor", "capacitor"}:
-            return "IC"
-        default_prefix = _DEFAULT_REFERENCE_PREFIXES.get(family)
+        default_prefix = _DEFAULT_REFERENCE_PREFIXES.get(family, "IC")
+        remembered = self._settings.value(f"{_REFERENCE_PREFIX_KEY}/{family}")
+        if isinstance(remembered, str) and re.fullmatch(r"[A-Za-z]+", remembered):
+            return remembered
         if self.project:
             for device in reversed(self.project.devices):
                 if _footprint_family_key(device.footprint_library) != family:
@@ -369,9 +370,6 @@ class FootprintActionsMixin:
                 match = _NUMBERED_DEVICE_REFERENCE.fullmatch(device.reference)
                 if match:
                     return match.group(1)
-        remembered = self._settings.value(f"{_REFERENCE_PREFIX_KEY}/{family}")
-        if isinstance(remembered, str) and re.fullmatch(r"[A-Za-z]+", remembered):
-            return remembered
         return default_prefix
 
     def _next_device_reference(self, source: FootprintReference) -> str:

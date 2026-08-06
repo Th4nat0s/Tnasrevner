@@ -1650,6 +1650,37 @@ def test_unknown_device_reference_uses_ic_prefix(
     assert window._next_device_reference(source) == "IC2"
 
 
+def test_conventional_diode_crystal_and_transistor_references(
+    window: MainWindow, tmp_path: Path
+) -> None:
+    """Use conventional prefixes and skip references already in the project."""
+    window.project = ProjectDocument(
+        "Project",
+        "Board",
+        devices=[
+            Device(
+                "D1",
+                "top",
+                0.5,
+                0.5,
+                "Diode_SMD",
+                "D_0603",
+                "assets/kicad/d1.kicad_mod",
+                "a" * 40,
+            )
+        ],
+    )
+    diode = FootprintReference("Diode_SMD", "D_0603", tmp_path / "d.kicad_mod")
+    crystal = FootprintReference("Crystal_SMD", "Crystal", tmp_path / "y.kicad_mod")
+    transistor = FootprintReference(
+        "Transistor_SMD", "SOT-23", tmp_path / "q.kicad_mod"
+    )
+
+    assert window._next_device_reference(diode) == "D2"
+    assert window._next_device_reference(crystal) == "Y1"
+    assert window._next_device_reference(transistor) == "Q1"
+
+
 def test_add_device_requires_saved_measurement_for_legacy_image(
     window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

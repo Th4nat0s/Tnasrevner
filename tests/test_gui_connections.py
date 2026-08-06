@@ -657,6 +657,10 @@ def test_bom_value_and_object_dropdown_are_editable(
         lambda *_args, **_kwargs: ("Sensor", True),
     )
     combo = window._bom_table.cellWidget(0, 1)
+    assert combo.findText("Transistor") >= 0
+    combo.setCurrentText("Transistor")
+    QApplication.processEvents()
+    assert window.project.devices[0].object_type == "Transistor"
     combo.setCurrentText("NEW")
     QApplication.processEvents()
     assert window.project.devices[0].object_type == "Sensor"

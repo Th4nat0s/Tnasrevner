@@ -166,7 +166,8 @@ class BomTabMixin:
             {
                 device.object_type or _footprint_family(device.footprint_library)
                 for device in devices
-            },
+            }
+            | {"Transistor"},
             key=str.casefold,
         )
         self._bom_table.blockSignals(True)
