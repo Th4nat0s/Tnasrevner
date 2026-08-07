@@ -111,6 +111,7 @@ from ..project import (
     ProjectDocument,
     ProjectFormatError,
     ProjectStore,
+    swap_two_pin_assignments,
 )
 
 # pylint: disable=unused-import
@@ -298,8 +299,6 @@ class PadActionsMixin:
 
     def _select_pad(self, side: str, x: float, y: float) -> None:
         """Toggle same-net connections without changing the current view."""
-        if self._connection_mode:
-            return
         view_state = self._active_views()[0].view_state()
         pad = self._pad_at(side, x, y)
         if pad and pad.pad_id == self._selected_pad_id:
@@ -327,9 +326,8 @@ class PadActionsMixin:
         pad = self._pad_at(side, x, y)
         if pad is None:
             return
-        was_empty = not self._pending_connection_terminals
         self._append_connection_terminal(self._pad_terminal(pad))
-        if was_empty and self._pending_connection_terminals:
+        if self._pending_connection_terminals:
             view = self._views.get(side) or self._side_views.get(side)
             if view is not None:
                 view.set_connection_preview_origin(x, y)
@@ -542,6 +540,9 @@ class PadActionsMixin:
         else:
             delete_action = menu.addAction("Delete device")
             rotate_action = menu.addAction("Rotate 45°")
+            swap_action = None
+            if self._device_supports_pin_swap(device):
+                swap_action = menu.addAction("Swap pins")
             component_action = menu.addAction("Set Component…")
             value_action = menu.addAction("Set Value…")
             description_action = menu.addAction("Edit description…")
@@ -552,6 +553,10 @@ class PadActionsMixin:
             rotate_action.triggered.connect(
                 lambda: self._rotate_device(device.device_id)
             )
+            if swap_action is not None:
+                swap_action.triggered.connect(
+                    lambda: self._swap_device_pins(device.device_id)
+                )
             value_action.triggered.connect(
                 lambda: self._edit_device_value(device.device_id)
             )
@@ -591,6 +596,50 @@ class PadActionsMixin:
             device.device_id if device else None,
         )
         menu.popup(QCursor.pos())
+
+    def _device_supports_pin_swap(self, device: Device) -> bool:
+        """Return whether a device source contains exactly two physical pads."""
+        footprint = self._footprint_for_device(device)
+        return footprint is not None and len(footprint.pads) == 2
+
+    def _swap_device_pins(self, device_id: str) -> None:
+        """Rotate a two-pin device and exchange its electrical assignments."""
+        if not self.project:
+            return
+        device = next(
+            (item for item in self.project.devices if item.device_id == device_id),
+            None,
+        )
+        if device is None or not self._device_supports_pin_swap(device):
+            return
+        pads = [pad for pad in self.project.pads if pad.device_id == device_id]
+        try:
+            updated_device, updated_pads = swap_two_pin_assignments(device, pads)
+        except ValueError:
+            LOGGER.warning("Cannot swap incomplete two-pin device=%s", device_id)
+            return
+        current_tab = self._tabs.currentIndex()
+        views = self._active_views()
+        view_state = views[0].view_state() if views else None
+        pad_by_id = {pad.pad_id: pad for pad in updated_pads}
+        self.project.devices = [
+            updated_device if item.device_id == device_id else item
+            for item in self.project.devices
+        ]
+        self.project.pads = [
+            pad_by_id.get(item.pad_id, item) for item in self.project.pads
+        ]
+        self._rebuild_device_pads(device.side, self._base_pixmap_for_asset(device.side))
+        self._dirty = True
+        self._refresh_views()
+        self._schematic_view.set_project(self.project)
+        self._tabs.setCurrentIndex(current_tab)
+        if view_state is not None:
+            self._apply_active_view_state(view_state)
+        self._update_title()
+        LOGGER.info(
+            "Swapped two-pin device id=%s reference=%s", device_id, device.reference
+        )
 
     def _rotate_device(self, device_id: str) -> None:
         """Rotate one placed footprint clockwise by 45 degrees."""

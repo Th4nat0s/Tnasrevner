@@ -6,6 +6,10 @@
   and restores the normal cursor when the mode ends.
 - Added shared KiCad footprint definitions with SHA-256 identity, deduplicated
   `.revp` assets, shared runtime parsing cache, and automatic v1 migration.
+- Added `Swap pins` for two-pin footprints in board and schematic context menus;
+  it rotates the placed device 180 degrees while exchanging terminal metadata.
+- Connection Mode now commits each Shift-click pair immediately, keeps a dashed
+  preview from the latest terminal, and stops preview creation on Shift release.
 - Replaced the generic Measure Tool icon with a visible ruler glyph (`📐`).
 - Added explicit schematic layout optimization with persistent Glue/Unglue
   constraints, 90-degree rotation search, cable-obstacle avoidance, and

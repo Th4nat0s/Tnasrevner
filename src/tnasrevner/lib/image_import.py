@@ -412,13 +412,21 @@ class ImageImportMixin:
         """Refresh all views from one composed pixmap per board side."""
         images = {side: self._pixmap_for_asset(side) for side in ("top", "bottom")}
         for side, view in self._views.items():
-            view.set_trace_selection(self._selected_net, self._selected_pad_id)
+            view.set_trace_selection(
+                self._selected_net,
+                self._selected_pad_id,
+                self._connection_trace_pairs,
+            )
             view.set_footprint_overlays(self._vector_footprints_for_side(side))
             view.set_pad_labels(self._vector_labels_for_side(side))
             view.set_pixmap(images[side])
         self._refresh_overlay(images)
         for side, view in self._side_views.items():
-            view.set_trace_selection(self._selected_net, self._selected_pad_id)
+            view.set_trace_selection(
+                self._selected_net,
+                self._selected_pad_id,
+                self._connection_trace_pairs,
+            )
             view.set_footprint_overlays(self._vector_footprints_for_side(side))
             view.set_pad_labels(self._vector_labels_for_side(side))
             view.set_pixmap(images[side])
@@ -426,7 +434,9 @@ class ImageImportMixin:
             self._vector_labels_for_side("bottom")
         )
         self._overlay_view.set_trace_selection(
-            self._selected_net, self._selected_pad_id
+            self._selected_net,
+            self._selected_pad_id,
+            self._connection_trace_pairs,
         )
         self._overlay_view.set_footprint_overlays(())
         self._overlay_view.set_pad_labels(overlay_labels)

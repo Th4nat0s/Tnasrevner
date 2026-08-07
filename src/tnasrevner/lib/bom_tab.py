@@ -433,6 +433,9 @@ class BomTabMixin:
         set_id_action = menu.addAction("Set Component…")
         glue_action = menu.addAction("Unglue" if device.schematic_glued else "Glue")
         rotate_action = menu.addAction("Rotate 90°")
+        swap_action = None
+        if self._device_supports_pin_swap(device):
+            swap_action = menu.addAction("Swap pins")
         action = menu.exec(QCursor.pos())
         if action == set_id_action:
             reference, accepted = QInputDialog.getText(
@@ -462,6 +465,8 @@ class BomTabMixin:
             self._dirty = True
             self._schematic_view.set_project(self.project)
             self._update_title()
+        elif swap_action is not None and action == swap_action:
+            self._swap_device_pins(device_id)
 
     def _set_schematic_glued(self, device_id: str, glued: bool) -> None:
         """Persist the fixed-position state of one schematic component.

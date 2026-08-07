@@ -21,6 +21,7 @@ from tnasrevner.project import (
     ProjectDocument,
     ProjectFormatError,
     ProjectStore,
+    swap_two_pin_assignments,
 )
 
 FOOTPRINT = b"""(footprint "R_0603"
@@ -38,6 +39,67 @@ def test_empty_project_round_trip(tmp_path: Path) -> None:
 
     assert loaded.to_dict() == project.to_dict()
     assert store.project_file.is_file()
+
+
+def test_swap_two_pin_assignments_rotates_and_exchanges_electrical_data() -> None:
+    """Two-pin swap exchanges pad and pin metadata while preserving identities."""
+    device = Device(
+        "R1",
+        "top",
+        0.5,
+        0.5,
+        "Resistor_SMD",
+        "R_0603",
+        "assets/kicad/r1.kicad_mod",
+        "a" * 40,
+        device_id="device-id",
+        rotation=45.0,
+        pins=[
+            ComponentPin("1", "pin-one", "A", "1", "NET_A"),
+            ComponentPin("2", "pin-two", "B", "2", "NET_B"),
+        ],
+    )
+    pads = [
+        Pad(
+            "R1.1",
+            "top",
+            0.1,
+            0.1,
+            pad_id="pad-one",
+            device_id="device-id",
+            number="1",
+            net="NET_A",
+            function="A",
+        ),
+        Pad(
+            "R1.2",
+            "top",
+            0.2,
+            0.1,
+            pad_id="pad-two",
+            device_id="device-id",
+            number="2",
+            net="NET_B",
+            function="B",
+        ),
+    ]
+
+    updated_device, updated_pads = swap_two_pin_assignments(device, pads)
+
+    assert updated_device.rotation == 225.0
+    assert [
+        (pin.number, pin.pin_id, pin.function, pin.net_id)
+        for pin in updated_device.pins
+    ] == [
+        ("1", "pin-two", "B", "NET_B"),
+        ("2", "pin-one", "A", "NET_A"),
+    ]
+    assert [
+        (pad.pad_id, pad.number, pad.net, pad.function) for pad in updated_pads
+    ] == [
+        ("pad-one", "1", "NET_B", "B"),
+        ("pad-two", "2", "NET_A", "A"),
+    ]
 
 
 def test_revp_archive_round_trip_includes_image_bytes(tmp_path: Path) -> None:

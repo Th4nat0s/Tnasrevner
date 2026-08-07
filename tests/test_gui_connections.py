@@ -293,7 +293,7 @@ def test_shift_selected_terminals_create_generic_net(window: MainWindow) -> None
 def test_connect_button_links_shift_selected_board_pads_on_release(
     window: MainWindow, tmp_path: Path
 ) -> None:
-    """Connect mode links every Shift-selected pad when Shift is released."""
+    """Shift-click creates rolling links and release stops the preview."""
     window.store = ProjectStore(tmp_path / "board.revp")
     window.project = ProjectDocument(
         "Project",
@@ -301,6 +301,7 @@ def test_connect_button_links_shift_selected_board_pads_on_release(
         pads=[
             Pad("P1", "top", 0.1, 0.1, "one", 0.1, 0.1),
             Pad("P2", "top", 0.5, 0.5, "two", 0.1, 0.1),
+            Pad("P3", "top", 0.8, 0.8, "three", 0.1, 0.1),
         ],
     )
     image = QImage(100, 100, QImage.Format.Format_RGB32)
@@ -348,14 +349,37 @@ def test_connect_button_links_shift_selected_board_pads_on_release(
         target,
     )
     QApplication.processEvents()
-    assert len(window._pending_connection_terminals) == 2
-    assert [pad.net for pad in window.project.pads] == [None, None]
+    assert len(window._pending_connection_terminals) == 1
+    assert [pad.net for pad in window.project.pads] == ["NT1", "NT1", None]
+    assert view._connection_trace_pairs == (
+        (
+            window.project.pads[0].pad_id,
+            window.project.pads[1].pad_id,
+        ),
+    )
+    assert view._connection_preview_origin == pytest.approx((0.55, 0.55), abs=0.02)
+    target_two = QPoint(
+        round(0.85 * (view._label.width() - 1)),
+        round(0.85 * (view._label.height() - 1)),
+    )
+    QTest.mouseClick(
+        view._label,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.ShiftModifier,
+        target_two,
+    )
+    QApplication.processEvents()
+    assert len(window._pending_connection_terminals) == 1
+    assert [pad.net for pad in window.project.pads] == ["NT1", "NT1", "NT1"]
+    assert len(view._connection_trace_pairs) == 2
     QTest.keyRelease(window, Qt.Key.Key_Shift)
     QApplication.processEvents()
-    assert [pad.net for pad in window.project.pads] == ["NT1", "NT1"]
+    assert [pad.net for pad in window.project.pads] == ["NT1", "NT1", "NT1"]
     assert window._selected_net == "NT1"
     assert window.statusBar().currentMessage() == prompt
     assert view._connection_preview_origin is None
+    assert window._connection_mode
+    assert view._connection_trace_pairs is None
     assert view.cursor().shape() == Qt.CursorShape.CrossCursor
     link_color = view._label.pixmap().toImage().pixelColor(35, 35)
     assert min(link_color.red(), link_color.green(), link_color.blue()) > 200
@@ -370,16 +394,42 @@ def test_connect_button_links_shift_selected_board_pads_on_release(
     assert [action.text() for action in window._pad_menu.actions()] == ["Disconnect"]
     window._pad_menu.actions()[0].trigger()
     QApplication.processEvents()
-    assert [pad.net for pad in window.project.pads] == [None, None]
-    assert window.project.nets == []
-    assert window._selected_net is None
+    assert [pad.net for pad in window.project.pads] == ["NT1", None, "NT1"]
+    assert len(window.project.nets) == 1
+    assert window.project.nets[0].name == "NT1"
+    assert window._selected_net == "NT1"
 
     QTest.keyClick(window, Qt.Key.Key_Escape)
 
-    assert [pad.net for pad in window.project.pads] == [None, None]
+    assert [pad.net for pad in window.project.pads] == ["NT1", None, "NT1"]
     assert not window._pending_connection_terminals
     assert not window._connection_mode
     assert view.cursor().shape() != Qt.CursorShape.CrossCursor
+
+
+def test_connection_mode_plain_pad_click_selects_existing_net(
+    window: MainWindow, tmp_path: Path
+) -> None:
+    """A plain click keeps normal same-net highlighting during Connection Mode."""
+    window.store = ProjectStore(tmp_path / "board.revp")
+    window.project = ProjectDocument(
+        "Project",
+        "Board",
+        pads=[Pad("P1", "top", 0.1, 0.1, "one", 0.1, 0.1, "GND")],
+        images=[ImageAsset("top", "assets/top.png", "top.png")],
+    )
+    image = QImage(100, 100, QImage.Format.Format_RGB32)
+    image.fill(0x202020)
+    window.store.write_asset(
+        "assets/top.png", window._pixmap_bytes(QPixmap.fromImage(image))
+    )
+    window._refresh_views()
+    window._set_connection_mode(True)
+
+    window._select_pad("top", 0.15, 0.15)
+
+    assert window._selected_net == "GND"
+    assert window._selected_pad_id == "one"
 
 
 def test_multi_terminal_connection_reuses_existing_net_and_advances_nt_names(

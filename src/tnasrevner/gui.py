@@ -178,6 +178,7 @@ class MainWindow(
         self._pending_board_view_sync_source: ImageView | None = None
         self._connection_mode = False
         self._pending_connection_terminals: list[tuple[str, str, str | None]] = []
+        self._connection_trace_pairs: tuple[tuple[str, str], ...] | None = None
         self._pending_pad: Pad | None = None
         self._pending_device: PendingDevice | None = None
         self._add_device_pending = False

@@ -348,6 +348,15 @@ class HistoryActionsMixin:
     def keyPressEvent(self, event) -> None:  # noqa: N802
         """Switch board view with `T`, `B`, or a double press."""
         key = event.key()
+        if (
+            self._connection_mode
+            and key == Qt.Key.Key_Shift
+            and not event.isAutoRepeat()
+        ):
+            self._connection_trace_pairs = ()
+            self._refresh_views_preserving_state()
+            event.accept()
+            return
         if key == Qt.Key.Key_Escape:
             if (
                 getattr(self, "_delete_button", None) is not None

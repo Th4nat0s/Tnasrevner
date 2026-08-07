@@ -168,6 +168,7 @@ class ImageView(
         self._footprint_overlays: tuple[tuple, ...] = ()
         self._connection_net: str | None = None
         self._connection_origin_id: str | None = None
+        self._connection_trace_pairs: tuple[tuple[str, str], ...] | None = None
         self._connection_preview_origin: tuple[float, float] | None = None
         self._connection_preview_cursor: tuple[float, float] | None = None
         self._label = QLabel(empty_text)
@@ -224,10 +225,17 @@ class ImageView(
         self._footprint_overlays = footprints
         self._render()
 
-    def set_trace_selection(self, net: str | None, origin_id: str | None) -> None:
+    def set_trace_selection(
+        self,
+        net: str | None,
+        origin_id: str | None,
+        trace_pairs: tuple[tuple[str, str], ...] | None = None,
+    ) -> None:
         """Store visible trace selection for hit testing."""
         self._connection_net = net
         self._connection_origin_id = origin_id
+        self._connection_trace_pairs = trace_pairs
+        self._render()
 
     def trace_at(self, x: float, y: float) -> tuple[str, str] | None:
         """Return trace endpoints near normalized image coordinates."""
@@ -565,6 +573,11 @@ class ImageView(
         if not self._connection_net or self._pad_at_point(point) is not None:
             return None
         pads = [pad for pad in self._pad_labels if pad.net == self._connection_net]
+        if self._connection_trace_pairs is not None:
+            visible_ids = {
+                pad_id for pair in self._connection_trace_pairs for pad_id in pair
+            }
+            pads = [pad for pad in pads if pad.pad_id in visible_ids]
         if len(pads) < 2:
             return None
         centers = {
@@ -581,6 +594,18 @@ class ImageView(
         )
         origin = centers[origin_id]
         tolerance = max(6.0, min(self._label.width(), self._label.height()) * 0.012)
+        if self._connection_trace_pairs is not None:
+            for first_id, second_id in self._connection_trace_pairs:
+                if first_id not in centers or second_id not in centers:
+                    continue
+                if (
+                    self._distance_to_segment(
+                        point, centers[first_id], centers[second_id]
+                    )
+                    <= tolerance
+                ):
+                    return first_id, second_id
+            return None
         for pad in pads:
             if pad.pad_id == origin_id:
                 continue
@@ -942,6 +967,11 @@ class ImageView(
             painter.drawLine(origin, cursor)
         if self._connection_net:
             connected = [pad for pad in pads if pad.net == self._connection_net]
+            if self._connection_trace_pairs is not None:
+                visible_ids = {
+                    pad_id for pair in self._connection_trace_pairs for pad_id in pair
+                }
+                connected = [pad for pad in connected if pad.pad_id in visible_ids]
             centers = {
                 pad.pad_id: QPointF(
                     (pad.x + pad.width / 2) * (pixmap.width() - 1),
@@ -958,14 +988,19 @@ class ImageView(
                 connection_pen = QPen(Qt.GlobalColor.white, self._CONNECTION_LINE_WIDTH)
                 connection_pen.setCosmetic(True)
                 painter.setPen(connection_pen)
-                if len(connected) == 1:
+                if self._connection_trace_pairs is not None:
+                    for first_id, second_id in self._connection_trace_pairs:
+                        if first_id in centers and second_id in centers:
+                            painter.drawLine(centers[first_id], centers[second_id])
+                elif len(connected) == 1:
                     center = centers[origin_id]
                     radius = max(8.0, min(pixmap.width(), pixmap.height()) * 0.008)
                     painter.drawEllipse(center, radius, radius)
                     painter.drawText(center + QPointF(10, -10), self._connection_net)
-                for pad_id, target in centers.items():
-                    if pad_id != origin_id:
-                        painter.drawLine(centers[origin_id], target)
+                elif self._connection_trace_pairs is None:
+                    for pad_id, target in centers.items():
+                        if pad_id != origin_id:
+                            painter.drawLine(centers[origin_id], target)
         painter.setOpacity(0.45)
         for pad in pads:
             width = max(2, round(pad.width * (pixmap.width() - 1)))

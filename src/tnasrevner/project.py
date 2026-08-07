@@ -635,6 +635,64 @@ class Device:  # pylint: disable=too-many-instance-attributes
         )
 
 
+def swap_two_pin_assignments(
+    device: Device, pads: list[Pad]
+) -> tuple[Device, list[Pad]]:
+    """Exchange electrical assignments for one two-pad device.
+
+    Args:
+        device: Device whose two physical terminals are being exchanged.
+        pads: Generated pads belonging to ``device``.
+
+    Returns:
+        Updated device rotated by 180 degrees and updated generated pads.
+
+    Raises:
+        ValueError: If exactly two generated pads and matching component pins
+            are not available.
+    """
+    if len(pads) != 2 or any(pad.number is None for pad in pads):
+        raise ValueError("two generated numbered pads required")
+    numbers = {pad.number for pad in pads}
+    pins = [pin for pin in device.pins if pin.number in numbers]
+    if len(pins) != 2 or {pin.number for pin in pins} != numbers:
+        raise ValueError("two matching component pins required")
+    first, second = pins
+    first_pad, second_pad = pads
+    updated_pins = [
+        (
+            replace(
+                pin,
+                pin_id=second.pin_id,
+                function=second.function,
+                net_id=second.net_id,
+            )
+            if pin.number == first.number
+            else (
+                replace(
+                    pin,
+                    pin_id=first.pin_id,
+                    function=first.function,
+                    net_id=first.net_id,
+                )
+                if pin.number == second.number
+                else pin
+            )
+        )
+        for pin in device.pins
+    ]
+    updated_pads = [
+        replace(first_pad, net=second_pad.net, function=second_pad.function),
+        replace(second_pad, net=first_pad.net, function=first_pad.function),
+    ]
+    updated_device = replace(
+        device,
+        rotation=(device.rotation + 180.0) % 360.0,
+        pins=updated_pins,
+    )
+    return updated_device, updated_pads
+
+
 @dataclass
 class DisplaySettings:
     """Display state restored when a project is reopened."""

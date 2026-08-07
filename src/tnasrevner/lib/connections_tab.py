@@ -585,9 +585,8 @@ class ConnectionsTabMixin:
         if terminal is None:
             return
         if self._connection_mode:
-            was_empty = not self._pending_connection_terminals
             self._append_connection_terminal(terminal)
-            if was_empty and self._pending_connection_terminals:
+            if self._pending_connection_terminals:
                 self._schematic_view.set_connection_preview_terminal(terminal)
             return
         if terminal == self._selected_schematic_terminal:
