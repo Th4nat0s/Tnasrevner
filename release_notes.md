@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add Pad mode now shows a crosshair cursor on both the PCB view and image label,
+  and restores the normal cursor when the mode ends.
 - Added shared KiCad footprint definitions with SHA-256 identity, deduplicated
   `.revp` assets, shared runtime parsing cache, and automatic v1 migration.
 - Replaced the generic Measure Tool icon with a visible ruler glyph (`📐`).

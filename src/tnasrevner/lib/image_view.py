@@ -613,6 +613,9 @@ class ImageView(
         """Enable or disable click-to-place mode for a pad."""
         if enabled:
             self.clear_device_placement()
+            cursor = QCursor(Qt.CursorShape.CrossCursor)
+            self.setCursor(cursor)
+            self._label.setCursor(cursor)
         self._pad_placement = enabled
         if not enabled:
             self._pad_start = None
@@ -620,6 +623,7 @@ class ImageView(
             self._click_position = None
             self._drag_position = None
             self.unsetCursor()
+            self._label.unsetCursor()
 
     def set_delete_mode(self, enabled: bool) -> None:
         """Enable continuous deletion clicks on this board view."""

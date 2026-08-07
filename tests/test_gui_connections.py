@@ -683,6 +683,8 @@ def test_pad_mouse_rectangle_keeps_continuous_placement_mode(
     monkeypatch.setattr(window, "_choose_image_side", lambda: "top")
 
     window.create_pad()
+    assert window._views["top"].cursor().shape() == Qt.CursorShape.CrossCursor
+    assert window._views["top"]._label.cursor().shape() == Qt.CursorShape.CrossCursor
     QTest.mousePress(
         window._views["top"]._label, Qt.MouseButton.LeftButton, pos=QPoint(10, 10)
     )
@@ -695,6 +697,10 @@ def test_pad_mouse_rectangle_keeps_continuous_placement_mode(
     assert window._views["top"]._pad_placement
     assert window._pending_pad is not None
     assert window._pending_pad.name == "P2"
+
+    QTest.keyClick(window, Qt.Key.Key_Escape)
+    assert window._views["top"].cursor().shape() != Qt.CursorShape.CrossCursor
+    assert window._views["top"]._label.cursor().shape() != Qt.CursorShape.CrossCursor
 
     window.create_pad()
     QTest.mousePress(
