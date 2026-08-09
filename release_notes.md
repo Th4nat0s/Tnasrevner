@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Photo rotation now rotates existing pads and footprints on the edited board side.
 - Added explicit `Save project as…` action with asset-preserving archive copy.
 - Renamed component context-menu action to `Edit Name…` with clearer name/reference
   dialog wording.

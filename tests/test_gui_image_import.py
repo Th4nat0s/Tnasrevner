@@ -226,6 +226,48 @@ def test_rotate_board_does_not_overwrite_original_image(
     assert window.project.images[0].transformations == ((90.0, (0.0, 0.0, 1.0, 1.0)),)
 
 
+def test_edit_image_rotation_rotates_existing_side_geometry(
+    window: MainWindow,
+) -> None:
+    """Photo quarter-turns rotate pads and footprints only on edited side."""
+    top_pad = Pad("P1", "top", 0.2, 0.3, "pad-id", 0.1, 0.2, rotation=15.0)
+    bottom_pad = Pad("P2", "bottom", 0.2, 0.3, "other-pad", 0.1, 0.2)
+    top_device = Device(
+        "R1",
+        "top",
+        0.2,
+        0.3,
+        "Resistor_SMD",
+        "R_0603",
+        "assets/kicad/r1.kicad_mod",
+        "a" * 40,
+    )
+    window.project = ProjectDocument(
+        "Project", "Board", pads=[top_pad, bottom_pad], devices=[top_device]
+    )
+
+    window._rotate_image_side_geometry("top", 90.0)
+
+    assert window.project.pads[0].x == pytest.approx(0.5)
+    assert window.project.pads[0].y == pytest.approx(0.2)
+    assert window.project.pads[0].width == pytest.approx(0.2)
+    assert window.project.pads[0].height == pytest.approx(0.1)
+    assert window.project.pads[0].rotation == pytest.approx(105.0)
+    assert window.project.devices[0].x == pytest.approx(0.7)
+    assert window.project.devices[0].y == pytest.approx(0.2)
+    assert window.project.devices[0].rotation == pytest.approx(90.0)
+    assert window.project.pads[1] == bottom_pad
+
+    window._rotate_image_side_geometry("top", -90.0)
+
+    assert window.project.pads[0].x == pytest.approx(top_pad.x)
+    assert window.project.pads[0].y == pytest.approx(top_pad.y)
+    assert window.project.pads[0].rotation == pytest.approx(top_pad.rotation)
+    assert window.project.devices[0].x == pytest.approx(top_device.x)
+    assert window.project.devices[0].y == pytest.approx(top_device.y)
+    assert window.project.devices[0].rotation == pytest.approx(top_device.rotation)
+
+
 def test_scaling_footprint_does_not_recrop_existing_image(
     app: QApplication,
 ) -> None:

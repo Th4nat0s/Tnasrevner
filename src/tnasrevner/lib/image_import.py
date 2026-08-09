@@ -314,6 +314,7 @@ class ImageImportMixin:
             if reset_transformations
             else asset.transformations + (transformation,)
         )
+        self._rotate_image_side_geometry(side, transformation[0])
         legacy_working_image = asset.original_path is not None and (
             asset.path != asset.original_path or not asset.transformations
         )
@@ -341,6 +342,74 @@ class ImageImportMixin:
         self._dirty = True
         self._refresh_views()
         self._update_title()
+
+    def _rotate_image_side_geometry(self, side: str, angle: float) -> None:
+        """Rotate existing board geometry for quarter-turn image edits."""
+        quarter_turns = round(angle / 90.0)
+        if quarter_turns == 0 or not math.isclose(
+            angle, quarter_turns * 90.0, abs_tol=1e-6
+        ):
+            return
+        direction = 1 if quarter_turns > 0 else -1
+        for _ in range(abs(quarter_turns)):
+            if direction > 0:
+                self.project.pads = [
+                    (
+                        replace(
+                            pad,
+                            x=1.0 - pad.y - pad.height,
+                            y=pad.x,
+                            width=pad.height,
+                            height=pad.width,
+                            rotation=(pad.rotation + 90.0) % 360.0,
+                        )
+                        if pad.side == side
+                        else pad
+                    )
+                    for pad in self.project.pads
+                ]
+                self.project.devices = [
+                    (
+                        replace(
+                            device,
+                            x=1.0 - device.y,
+                            y=device.x,
+                            rotation=(device.rotation + 90.0) % 360.0,
+                        )
+                        if device.side == side
+                        else device
+                    )
+                    for device in self.project.devices
+                ]
+            else:
+                self.project.pads = [
+                    (
+                        replace(
+                            pad,
+                            x=pad.y,
+                            y=1.0 - pad.x - pad.width,
+                            width=pad.height,
+                            height=pad.width,
+                            rotation=(pad.rotation - 90.0) % 360.0,
+                        )
+                        if pad.side == side
+                        else pad
+                    )
+                    for pad in self.project.pads
+                ]
+                self.project.devices = [
+                    (
+                        replace(
+                            device,
+                            x=device.y,
+                            y=1.0 - device.x,
+                            rotation=(device.rotation - 90.0) % 360.0,
+                        )
+                        if device.side == side
+                        else device
+                    )
+                    for device in self.project.devices
+                ]
 
     def _edit_imported_image(
         self,
