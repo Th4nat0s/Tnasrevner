@@ -543,7 +543,7 @@ class PadActionsMixin:
             swap_action = None
             if self._device_supports_pin_swap(device):
                 swap_action = menu.addAction("Swap pins")
-            component_action = menu.addAction("Set Component…")
+            component_action = menu.addAction("Edit Name…")
             value_action = menu.addAction("Set Value…")
             description_action = menu.addAction("Edit description…")
             datasheet_action = menu.addAction("Edit datasheet…")
@@ -846,8 +846,8 @@ class PadActionsMixin:
             return
         reference, accepted = QInputDialog.getText(
             self,
-            "Set component",
-            f"Component ID for {device.reference}:",
+            "Edit name",
+            f"Name/reference for {device.reference}:",
             text=device.reference,
         )
         if accepted:

@@ -633,7 +633,7 @@ def test_shift_click_device_edits_bom_value_and_deletes_whole_footprint(
     actions = {action.text(): action for action in window._pad_menu.actions()}
     assert {
         "Delete device",
-        "Set Component…",
+        "Edit Name…",
         "Set Value…",
         "Edit description…",
         "Edit datasheet…",
@@ -714,6 +714,73 @@ def test_bom_value_and_object_dropdown_are_editable(
     combo.setCurrentText("NEW")
     QApplication.processEvents()
     assert window.project.devices[0].object_type == "Sensor"
+
+
+def test_schematic_device_menu_edits_name_with_consistent_wording(
+    window: MainWindow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Schematic component menu uses the same name editor wording as board menu."""
+    device = Device(
+        "C1",
+        "top",
+        0.5,
+        0.5,
+        "Capacitor_SMD",
+        "C_0603",
+        "assets/kicad/c1.kicad_mod",
+        "a" * 40,
+        device_id="device-id",
+    )
+    window.project = ProjectDocument("Project", "Board", devices=[device])
+    captured: dict[str, object] = {}
+
+    class FakeAction:  # pylint: disable=too-few-public-methods
+        """Minimal menu action exposing text and identity."""
+
+        def __init__(self, label: str) -> None:
+            """Store action label."""
+            self._label = label
+
+        def text(self) -> str:
+            """Return action label."""
+            return self._label
+
+    class FakeMenu:
+        """Minimal non-modal menu for testing schematic action selection."""
+
+        def __init__(self, _parent) -> None:
+            """Initialize empty action list."""
+            self._actions = []
+
+        def addAction(self, label: str) -> FakeAction:  # pylint: disable=invalid-name
+            """Add and return one fake action."""
+            action = FakeAction(label)
+            self._actions.append(action)
+            return action
+
+        def actions(self) -> list[FakeAction]:
+            """Return fake menu actions."""
+            return self._actions
+
+        def exec(self, *_args) -> FakeAction:
+            """Return first action as if user selected it."""
+            captured["actions"] = [action.text() for action in self._actions]
+            return self._actions[0]
+
+    monkeypatch.setattr("tnasrevner.lib.bom_tab.QMenu", FakeMenu)
+    monkeypatch.setattr(
+        "tnasrevner.lib.bom_tab.QInputDialog.getText",
+        lambda _parent, title, prompt, **_kwargs: (
+            captured.update(title=title, prompt=prompt) or ("C7", True)
+        ),
+    )
+
+    window._show_schematic_device_menu(device.device_id)
+
+    assert captured["actions"][0] == "Edit Name…"
+    assert captured["title"] == "Edit name"
+    assert captured["prompt"] == "Name/reference for C1:"
+    assert window.project.devices[0].reference == "C7"
 
 
 def test_pad_mouse_rectangle_keeps_continuous_placement_mode(

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Renamed component context-menu action to `Edit Name…` with clearer name/reference
+  dialog wording.
 - Persisted schematic zoom and scroll state independently from board views;
   tab switches, save/reload, backups, undo/redo, and schematic optimization now
   preserve the visible viewport, with safe legacy fallback.

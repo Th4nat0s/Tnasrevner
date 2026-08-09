@@ -430,7 +430,7 @@ class BomTabMixin:
         if device is None:
             return
         menu = QMenu(self)
-        set_id_action = menu.addAction("Set Component…")
+        set_id_action = menu.addAction("Edit Name…")
         glue_action = menu.addAction("Unglue" if device.schematic_glued else "Glue")
         rotate_action = menu.addAction("Rotate 90°")
         swap_action = None
@@ -440,8 +440,8 @@ class BomTabMixin:
         if action == set_id_action:
             reference, accepted = QInputDialog.getText(
                 self,
-                "Set component",
-                f"Component ID for {device.reference}:",
+                "Edit name",
+                f"Name/reference for {device.reference}:",
                 text=device.reference,
             )
             if accepted:
