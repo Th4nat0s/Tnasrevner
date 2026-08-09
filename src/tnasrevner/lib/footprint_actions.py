@@ -658,14 +658,34 @@ class FootprintActionsMixin:
             len(generated),
             self._pending_device.reference,
         )
-        self._refresh_views()
+        if self._tabs.currentIndex() == 3:
+            self._refresh_views()
+            restore_deferred = True
+        else:
+            self._refresh_device_side(side)
+            restore_deferred = False
         self._tabs.setCurrentIndex(view_context[0])
-        self._apply_active_view_state(view_context[1])
+        if restore_deferred:
+            QTimer.singleShot(
+                0,
+                lambda context=view_context: self._restore_device_view_context(
+                    *context
+                ),
+            )
+        else:
+            self._apply_active_view_state(view_context[1])
         self.statusBar().showMessage(
             f"Place {self._pending_device.reference}: left click to place, "
             "right click rotates 45°, Esc ends the series."
         )
-        self._update_title()
+        self._update_title(refresh_bom=False)
+
+    def _restore_device_view_context(
+        self, tab_index: int, state: tuple[float, float, float]
+    ) -> None:
+        """Restore placement tab and view state after board refresh callbacks."""
+        self._tabs.setCurrentIndex(tab_index)
+        self._apply_active_view_state(state)
 
     def _clear_device_previews(self) -> None:
         for view in (*self._views.values(), *self._side_views.values()):

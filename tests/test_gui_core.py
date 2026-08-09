@@ -602,6 +602,8 @@ def test_add_device_keeps_current_single_side_view(
         )
     window._refresh_views()
     window._tabs.setCurrentIndex(1)
+    window._views["bottom"].apply_view_state((2.25, 0.8, 0.2))
+    before_placement = window._views["bottom"].view_state()
     source = FootprintReference("Capacitor_SMD", "C_0603", tmp_path / "C.kicad_mod")
     footprint = parse_footprint(FOOTPRINT, source.library)
 
@@ -615,10 +617,15 @@ def test_add_device_keeps_current_single_side_view(
     window._place_device("bottom", 0.5, 0.5)
 
     assert window._tabs.currentIndex() == 1
+    assert window._views["bottom"].view_state() == pytest.approx(before_placement)
     assert window.project.devices[0].side == "bottom"
     assert window._pending_device is not None
     assert window._pending_device.reference == "C2"
     assert window._views["bottom"]._device_placement
+    window._place_device("bottom", 0.6, 0.6)
+    QApplication.processEvents()
+    assert len(window.project.devices) == 2
+    assert window._views["bottom"].view_state() == pytest.approx(before_placement)
     window._cancel_device_placement()
 
 
