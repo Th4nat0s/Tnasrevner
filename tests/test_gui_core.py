@@ -407,6 +407,82 @@ def test_save_persists_display_mode_zoom_and_pan(
     assert window.project.display.zoom == 2.5
 
 
+def test_save_as_copies_assets_switches_store_and_preserves_source(
+    window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Save As copies project assets and makes later Save target new archive."""
+    source = tmp_path / "source.revp"
+    target = tmp_path / "renamed-project"
+    image = QImage(20, 20, QImage.Format.Format_RGB32)
+    image.fill(0xFFFFFF)
+    window.store = ProjectStore(source)
+    window.project = ProjectDocument(
+        "Project",
+        "Board",
+        images=[ImageAsset("top", "assets/top.png", "top.png")],
+        devices=[
+            Device(
+                "C1",
+                "top",
+                0.5,
+                0.5,
+                "Resistor_SMD",
+                "R_0603",
+                "assets/kicad/c1.kicad_mod",
+                "a" * 40,
+            )
+        ],
+    )
+    window.store.write_asset(
+        "assets/top.png", window._pixmap_bytes(QPixmap.fromImage(image))
+    )
+    window.store.write_asset("assets/kicad/c1.kicad_mod", FOOTPRINT)
+    window.store.save(window.project)
+    original = source.read_bytes()
+    monkeypatch.setattr(
+        "tnasrevner.lib.project_io.QFileDialog.getSaveFileName",
+        lambda *_args: (str(target), ""),
+    )
+
+    assert window.save_project_as()
+    target_path = target.with_suffix(".revp")
+    assert window.store.path == target_path
+    assert target_path.is_file()
+    assert source.read_bytes() == original
+    copied = ProjectStore(target_path)
+    saved = copied.load()
+    assert saved.project_name == "Project"
+    assert copied.read_asset("assets/top.png")
+    assert copied.read_asset("assets/kicad/c1.kicad_mod") == FOOTPRINT
+
+    window.project.devices[0] = replace(window.project.devices[0], value="10 nF")
+    window._dirty = True
+    assert window.save_project()
+    assert ProjectStore(target_path).load().devices[0].value == "10 nF"
+
+    window._dirty = True
+    monkeypatch.setattr(
+        "tnasrevner.lib.project_io.QFileDialog.getSaveFileName",
+        lambda *_args: ("", ""),
+    )
+    assert not window.save_project_as()
+    assert window.store.path == target_path
+    assert window._dirty
+
+
+def test_save_as_actions_are_exposed(window: MainWindow) -> None:
+    """File menu and toolbar expose explicit Save As controls."""
+    file_action = next(
+        action for action in window.menuBar().actions() if action.text() == "File"
+    )
+    file_menu = file_action.menu()
+    save_as = next(
+        action for action in file_menu.actions() if action.text() == "Save project as…"
+    )
+    assert save_as.shortcut().toString() == "Ctrl+Shift+S"
+    assert window.findChild(QPushButton, "toolSaveAs") is None
+
+
 def test_save_and_restore_bom_view(window: MainWindow, tmp_path: Path) -> None:
     """The BOM tab is a persisted project display mode."""
     window.store = ProjectStore(tmp_path / "board.revp")

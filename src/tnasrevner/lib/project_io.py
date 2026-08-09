@@ -285,22 +285,70 @@ class ProjectIOMixin:
             )
             return False
         if self._project_needs_save_as:
-            path, _ = QFileDialog.getSaveFileName(
-                self,
-                "Save project",
-                str(self._last_project_directory()),
-                "Tnasrevner project (*.revp)",
+            return self.save_project_as()
+        return self._save_to_store(self.store)
+
+    def save_project_as(self) -> bool:
+        """Save current project to a selected archive without changing source first."""
+        if not self.project or not self.store:
+            QMessageBox.information(
+                self, "No project", "Create or open a project first."
             )
-            if not path:
+            return False
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save project as",
+            str(self._last_project_directory()),
+            "Tnasrevner project (*.revp)",
+        )
+        if not path:
+            return False
+        project_path = Path(path)
+        if project_path.suffix.lower() != ".revp":
+            project_path = project_path.with_suffix(".revp")
+        if project_path != self.store.path and project_path.exists():
+            answer = QMessageBox.question(
+                self,
+                "Replace project?",
+                f"Replace existing project {project_path.name}?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
                 return False
-            project_path = Path(path)
-            if project_path.suffix.lower() != ".revp":
-                project_path = project_path.with_suffix(".revp")
-            new_store = ProjectStore(project_path)
-            self.store.copy_pending_assets_to(new_store)
-            self.store = new_store
-            self._project_needs_save_as = False
-            self._remember_project_directory(project_path)
+        new_store = ProjectStore(project_path)
+        try:
+            self._copy_project_assets(new_store)
+        except (OSError, ProjectFormatError) as error:
+            QMessageBox.critical(self, "Save As failed", str(error))
+            return False
+        if not self._save_to_store(new_store):
+            return False
+        self.store = new_store
+        self._project_needs_save_as = False
+        self._remember_project_directory(project_path)
+        return True
+
+    def _copy_project_assets(self, target: ProjectStore) -> None:
+        """Copy archive and on-disk assets referenced by current project."""
+        if not self.project or not self.store:
+            return
+        self.store.copy_pending_assets_to(target)
+        paths = {
+            path
+            for image in self.project.images
+            for path in (image.path, image.original_path)
+            if path
+        }
+        paths.update(
+            definition.path for definition in self.project.footprint_definitions
+        )
+        paths.update(device.footprint_path for device in self.project.devices)
+        for path in paths:
+            target.write_asset(path, self.store.read_asset(path))
+
+    def _save_to_store(self, store: ProjectStore) -> bool:
+        """Write current project to one store and update UI state on success."""
         self._capture_schematic_viewport()
         self.project.display.mode = (
             "top",
@@ -342,7 +390,7 @@ class ProjectIOMixin:
         try:
             report("Preparing save", 0, 1)
             self._write_history_backup()
-            self.store.save(self.project, progress=report)
+            store.save(self.project, progress=report)
         except (OSError, ProjectFormatError) as error:
             QMessageBox.critical(self, "Save failed", str(error))
             return False

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added explicit `Save project as…` action with asset-preserving archive copy.
 - Renamed component context-menu action to `Edit Name…` with clearer name/reference
   dialog wording.
 - Persisted schematic zoom and scroll state independently from board views;

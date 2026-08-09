@@ -319,6 +319,7 @@ class HistoryActionsMixin:
             ("New project", self.new_project, "Ctrl+N"),
             ("Open project", self.open_project, "Ctrl+O"),
             ("Save project", self.save_project, "Ctrl+S"),
+            ("Save project as…", self.save_project_as, "Ctrl+Shift+S"),
             ("Close project", self.close_project, "Ctrl+W"),
         ):
             action = QAction(label, self)
