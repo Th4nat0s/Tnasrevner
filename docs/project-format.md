@@ -47,7 +47,10 @@ the signed format. Directory projects continue to use `project.json` directly.
     "zoom": 1.0,
     "pan_x": 0.0,
     "pan_y": 0.0,
-    "synchronized": true
+    "synchronized": true,
+    "schematic_zoom": 1.25,
+    "schematic_pan_x": 120.0,
+    "schematic_pan_y": 240.0
   }
 }
 ```
@@ -60,6 +63,12 @@ rejected explicitly.
 Display mode `both` overlays the top image with the bottom image mirrored
 horizontally. This is a view preference only; source images remain unchanged.
 Display mode `bom` restores the bill-of-materials table.
+
+`schematic_zoom`, `schematic_pan_x`, and `schematic_pan_y` persist the
+schematic viewport independently from board view state. Older projects without
+these fields use one overview fit on first schematic activation, then save the
+new viewport fields. Schematic optimization changes component layout only and
+restores the viewport zoom and scroll positions after completion or cancel.
 
 Imported images store the normalized `calibration_line` and its exact
 `calibration_length_mm`. Physical scale is recalculated from those values and the

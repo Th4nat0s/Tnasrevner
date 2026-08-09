@@ -372,6 +372,8 @@ class BoardControlsMixin:
             or getattr(self, "_optimization_progress", None) is not None
         ):
             return
+        self._schematic_optimization_viewport = self._schematic_view.view_state()
+        self._capture_schematic_viewport()
         progress = QProgressDialog(
             "Optimizing schematic layout…",
             "Cancel",
@@ -398,9 +400,19 @@ class BoardControlsMixin:
         progress = getattr(self, "_optimization_progress", None)
         if progress is None:
             return
+        self._restore_schematic_optimization_viewport()
         progress.close()
         progress.deleteLater()
         self._optimization_progress = None
+
+    def _restore_schematic_optimization_viewport(self) -> None:
+        """Restore schematic viewport captured before optimization started."""
+        state = self._schematic_optimization_viewport
+        if state is None:
+            return
+        self._schematic_view.apply_view_state(state)
+        self._schematic_optimization_viewport = None
+        self._capture_schematic_viewport()
 
     def _rotate_board_90(self) -> None:
         """Rotate both board images and all placed geometry by 90 degrees."""

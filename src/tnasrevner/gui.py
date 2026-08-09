@@ -189,6 +189,7 @@ class MainWindow(
         self._pad_display_mode = "both"
         self._pad_refresh_pending = False
         self._pending_pad_view_state: tuple[float, float, float] | None = None
+        self._schematic_optimization_viewport: tuple[float, int, int] | None = None
         self._image_cache: dict[str, QPixmap] = {}
         self._device_footprint_cache: dict[str, Footprint] = {}
         self._settings = (
@@ -259,6 +260,9 @@ class MainWindow(
         self._schematic_view.layout_started.connect(self._schematic_layout_started)
         self._schematic_view.layout_finished.connect(self._schematic_layout_finished)
         self._schematic_view.layout_optimized.connect(self._schematic_layout_optimized)
+        self._schematic_view.optimization_finished.connect(
+            self._restore_schematic_optimization_viewport
+        )
         self._schematic_view.terminal_selected.connect(self._select_schematic_terminal)
         self._schematic_view.terminal_hovered.connect(
             self._show_schematic_terminal_hover
@@ -273,7 +277,8 @@ class MainWindow(
             self._show_schematic_device_menu
         )
         self._tabs.addTab(self._schematic_view, "Schematic")
-        self._tabs.currentChanged.connect(self._update_view_tools)
+        self._last_tab_index = self._tabs.currentIndex()
+        self._tabs.currentChanged.connect(self._handle_tab_changed)
         for view in (*self._views.values(), *self._side_views.values()):
             view.zoom_changed.connect(self._show_zoom_ratio)
             view.view_changed.connect(

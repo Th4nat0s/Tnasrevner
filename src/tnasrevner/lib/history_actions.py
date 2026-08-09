@@ -156,6 +156,7 @@ class HistoryActionsMixin:
         """Return the JSON project state for undo/redo."""
         if not self.project:
             return {}
+        self._capture_schematic_viewport()
         return {"project": self.project.to_dict()}
 
     @staticmethod

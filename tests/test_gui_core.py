@@ -435,6 +435,34 @@ def test_save_and_restore_schematic_view(window: MainWindow, tmp_path: Path) -> 
     assert window._tabs.currentIndex() == 7
 
 
+def test_schematic_viewport_survives_tab_switch_and_save(
+    window: MainWindow, tmp_path: Path
+) -> None:
+    """Schematic zoom and scroll persist when saving from another tab."""
+    window.store = ProjectStore(tmp_path / "board.revp")
+    window.project = ProjectDocument("Project", "Board")
+    window._tabs.setCurrentIndex(7)
+    QApplication.processEvents()
+    window._schematic_view.apply_view_state((1.75, 123, 456))
+
+    window._tabs.setCurrentIndex(0)
+    QApplication.processEvents()
+    assert window.project.display.schematic_zoom == pytest.approx(1.75)
+    assert window.project.display.schematic_pan_x == 123.0
+    assert window.project.display.schematic_pan_y == 456.0
+    assert window.save_project()
+
+    loaded = ProjectStore(tmp_path / "board.revp").load()
+    assert loaded.display.schematic_zoom == pytest.approx(1.75)
+    assert loaded.display.schematic_pan_x == 123.0
+    assert loaded.display.schematic_pan_y == 456.0
+
+    window._schematic_view.apply_view_state((1.0, 0, 0))
+    window._tabs.setCurrentIndex(7)
+    QApplication.processEvents()
+    assert window._schematic_view.view_state() == (1.75, 123, 456)
+
+
 def test_create_pad_from_tools_places_and_persists_marker(
     window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

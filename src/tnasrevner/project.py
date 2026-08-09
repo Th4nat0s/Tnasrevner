@@ -694,7 +694,7 @@ def swap_two_pin_assignments(
 
 
 @dataclass
-class DisplaySettings:
+class DisplaySettings:  # pylint: disable=too-many-instance-attributes
     """Display state restored when a project is reopened."""
 
     mode: str = "top"
@@ -702,6 +702,9 @@ class DisplaySettings:
     pan_x: float = 0.0
     pan_y: float = 0.0
     synchronized: bool = True
+    schematic_zoom: float | None = None
+    schematic_pan_x: float | None = None
+    schematic_pan_y: float | None = None
 
     def __post_init__(self) -> None:
         if self.mode not in _DISPLAY_MODES:
@@ -715,6 +718,22 @@ class DisplaySettings:
             raise ProjectFormatError("display zoom must be positive")
         if not isinstance(self.synchronized, bool):
             raise ProjectFormatError("display synchronized must be boolean")
+        schematic_values = (
+            self.schematic_zoom,
+            self.schematic_pan_x,
+            self.schematic_pan_y,
+        )
+        if any(value is not None for value in schematic_values) and any(
+            value is None for value in schematic_values
+        ):
+            raise ProjectFormatError("schematic viewport must be complete")
+        if self.schematic_zoom is not None and self.schematic_zoom <= 0:
+            raise ProjectFormatError("schematic zoom must be positive")
+        if not all(
+            value is None or isinstance(value, (int, float))
+            for value in schematic_values
+        ):
+            raise ProjectFormatError("schematic viewport must be numeric")
 
     def to_dict(self) -> dict[str, Any]:
         """Return JSON-compatible display data."""
@@ -724,6 +743,9 @@ class DisplaySettings:
             "pan_x": self.pan_x,
             "pan_y": self.pan_y,
             "synchronized": self.synchronized,
+            "schematic_zoom": self.schematic_zoom,
+            "schematic_pan_x": self.schematic_pan_x,
+            "schematic_pan_y": self.schematic_pan_y,
         }
 
     @classmethod
@@ -737,6 +759,9 @@ class DisplaySettings:
             pan_x=data.get("pan_x", 0.0),
             pan_y=data.get("pan_y", 0.0),
             synchronized=data.get("synchronized", True),
+            schematic_zoom=data.get("schematic_zoom"),
+            schematic_pan_x=data.get("schematic_pan_x"),
+            schematic_pan_y=data.get("schematic_pan_y"),
         )
 
 

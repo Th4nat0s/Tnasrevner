@@ -238,6 +238,36 @@ def test_project_with_both_images_and_display_round_trip(tmp_path: Path) -> None
     assert store.load().display == project.display
 
 
+def test_schematic_viewport_display_round_trip_and_legacy_default() -> None:
+    """Persist dedicated schematic viewport fields and accept legacy display data."""
+    display = DisplaySettings(
+        "schematic",
+        2.5,
+        12.0,
+        -4.0,
+        False,
+        1.75,
+        123.0,
+        456.0,
+    )
+
+    restored = DisplaySettings.from_dict(display.to_dict())
+    legacy = DisplaySettings.from_dict(
+        {
+            "mode": "top",
+            "zoom": 1.0,
+            "pan_x": 0.0,
+            "pan_y": 0.0,
+            "synchronized": True,
+        }
+    )
+
+    assert restored == display
+    assert legacy.schematic_zoom is None
+    assert legacy.schematic_pan_x is None
+    assert legacy.schematic_pan_y is None
+
+
 @pytest.mark.parametrize("path", ["/tmp/top.png", "../top.png", "assets\\top.png"])
 def test_absolute_or_escaping_asset_paths_are_rejected(path: str) -> None:
     with pytest.raises(ProjectFormatError):

@@ -207,8 +207,57 @@ class ProjectIOMixin:
         self._cancel_device_placement()
         self._refresh_views()
         if self._tabs.currentIndex() == _SCHEMATIC_TAB:
-            QTimer.singleShot(0, self._schematic_view.fit_overview)
+            QTimer.singleShot(0, self._restore_schematic_viewport)
         self._update_title()
+
+    def _capture_schematic_viewport(self) -> None:
+        """Persist the current schematic zoom and scroll positions in memory."""
+        if not self.project:
+            return
+        zoom, pan_x, pan_y = self._schematic_view.view_state()
+        display = self.project.display
+        state = (zoom, float(pan_x), float(pan_y))
+        previous = (
+            display.schematic_zoom,
+            display.schematic_pan_x,
+            display.schematic_pan_y,
+        )
+        if previous == state:
+            return
+        display.schematic_zoom, display.schematic_pan_x, display.schematic_pan_y = state
+        self._dirty = True
+        self._update_title(record_history=False)
+
+    def _schematic_viewport_state(self) -> tuple[float, int, int] | None:
+        """Return persisted schematic viewport or no-state legacy fallback."""
+        if not self.project:
+            return None
+        display = self.project.display
+        if display.schematic_zoom is None:
+            return None
+        return (
+            display.schematic_zoom,
+            round(display.schematic_pan_x or 0.0),
+            round(display.schematic_pan_y or 0.0),
+        )
+
+    def _restore_schematic_viewport(self) -> None:
+        """Restore saved schematic viewport, fitting only legacy projects."""
+        state = self._schematic_viewport_state()
+        if state is None:
+            self._schematic_view.fit_overview()
+            self._capture_schematic_viewport()
+            return
+        self._schematic_view.apply_view_state(state)
+
+    def _handle_tab_changed(self, index: int) -> None:
+        """Capture schematic viewport on tab changes and restore on entry."""
+        if self._last_tab_index == _SCHEMATIC_TAB:
+            self._capture_schematic_viewport()
+        self._last_tab_index = index
+        self._update_view_tools(index)
+        if index == _SCHEMATIC_TAB:
+            QTimer.singleShot(0, self._restore_schematic_viewport)
 
     def _last_project_directory(self) -> Path:
         """Return remembered project directory, falling back if it vanished."""
@@ -252,6 +301,7 @@ class ProjectIOMixin:
             self.store = new_store
             self._project_needs_save_as = False
             self._remember_project_directory(project_path)
+        self._capture_schematic_viewport()
         self.project.display.mode = (
             "top",
             "bottom",
@@ -262,9 +312,7 @@ class ProjectIOMixin:
             "bom",
             "schematic",
         )[self._tabs.currentIndex()]
-        if self._tabs.currentIndex() == _SCHEMATIC_TAB:
-            zoom, pan_x, pan_y = self._schematic_view.view_state()
-        elif self._tabs.currentIndex() >= _CONNECTIONS_TAB:
+        if self._tabs.currentIndex() >= _CONNECTIONS_TAB:
             zoom, pan_x, pan_y = (
                 self.project.display.zoom,
                 self.project.display.pan_x,
@@ -273,9 +321,10 @@ class ProjectIOMixin:
         else:
             display_view = self._active_views()[0]
             zoom, pan_x, pan_y = display_view.view_state()
-        self.project.display.zoom = zoom
-        self.project.display.pan_x = pan_x
-        self.project.display.pan_y = pan_y
+        if self._tabs.currentIndex() < _CONNECTIONS_TAB:
+            self.project.display.zoom = zoom
+            self.project.display.pan_x = pan_x
+            self.project.display.pan_y = pan_y
         progress = QProgressDialog("Saving project…", "", 0, 1, self)
         progress.setWindowTitle("Save project")
         progress.setCancelButton(None)
