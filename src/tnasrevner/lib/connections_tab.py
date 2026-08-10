@@ -788,6 +788,18 @@ class ConnectionsTabMixin:
         )
         if len(terminals) < 2:
             return None
+        trace_pad_ids = frozenset(
+            pad.pad_id
+            for pad in self.project.pads
+            if (
+                ("pad", pad.pad_id, None) in terminals
+                or (
+                    pad.device_id is not None
+                    and pad.number is not None
+                    and ("pin", pad.device_id, pad.number) in terminals
+                )
+            )
+        )
         view_state = self._capture_history_view_state()
         existing_nets = tuple(
             dict.fromkeys(
@@ -843,6 +855,7 @@ class ConnectionsTabMixin:
             for pad in self.project.pads
         ]
         self._selected_net = target_net
+        self._trace_highlight_ids = trace_pad_ids
         self._dirty = True
         self._refresh_views()
         self._restore_history_view_state(view_state)

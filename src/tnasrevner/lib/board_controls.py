@@ -480,6 +480,7 @@ class BoardControlsMixin:
         self._connection_mode = enabled
         if not enabled:
             self._pending_connection_terminals.clear()
+            self._trace_highlight_ids = None
         button = getattr(self, "_connect_button", None)
         if button is not None:
             button.blockSignals(True)
@@ -487,6 +488,13 @@ class BoardControlsMixin:
             button.blockSignals(False)
         for view in (*self._views.values(), *self._side_views.values()):
             view.set_connection_mode(enabled)
+            if not enabled:
+                view.set_trace_selection(
+                    self._selected_net,
+                    self._selected_pad_id,
+                    self._trace_highlight_ids,
+                )
+                view.refresh_trace_selection()
         self._schematic_view.set_connection_mode(enabled)
         if enabled:
             self._show_connection_prompt()

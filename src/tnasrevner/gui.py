@@ -183,6 +183,7 @@ class MainWindow(
         self._add_device_pending = False
         self._selected_net: str | None = None
         self._selected_pad_id: str | None = None
+        self._trace_highlight_ids: frozenset[str] | None = None
         self._selected_schematic_terminal: tuple[str, str, str | None] | None = None
         self._pads_visible = True
         self._pad_display_mode = "both"

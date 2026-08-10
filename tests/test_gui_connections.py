@@ -354,6 +354,7 @@ def test_connect_button_links_shift_selected_board_pads_on_release(
     QApplication.processEvents()
     assert [pad.net for pad in window.project.pads] == ["NT1", "NT1"]
     assert window._selected_net == "NT1"
+    assert window._trace_highlight_ids == frozenset({"one", "two"})
     assert window.statusBar().currentMessage() == prompt
     assert view._connection_preview_origin is None
     assert view.cursor().shape() == Qt.CursorShape.CrossCursor
@@ -424,6 +425,32 @@ def test_multi_terminal_connection_reuses_existing_net_and_advances_nt_names(
 
     window._connect_terminals((("pad", "five", None), ("pad", "six", None)))
     assert [pad.net for pad in window.project.pads[-2:]] == ["NT2", "NT2"]
+
+
+def test_connection_session_keeps_endpoint_filter_transient(
+    window: MainWindow,
+) -> None:
+    """A Shift connection highlights only terminals selected in that session."""
+    window.project = ProjectDocument(
+        "Project",
+        "Board",
+        pads=[
+            Pad("P1", "top", 0.1, 0.1, "one"),
+            Pad("P2", "top", 0.3, 0.1, "two"),
+            Pad("P3", "top", 0.5, 0.1, "three", net="NT1"),
+        ],
+    )
+
+    window._connect_terminals(
+        (("pad", "one", None), ("pad", "two", None))
+    )
+
+    assert window._selected_net == "NT2"
+    assert window._trace_highlight_ids == frozenset({"one", "two"})
+
+    window._selected_pad_id = None
+    window._select_pad("top", 0.55, 0.15)
+    assert window._trace_highlight_ids is None
 
 
 def test_info_exits_connection_mode(window: MainWindow) -> None:

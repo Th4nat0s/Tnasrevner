@@ -168,6 +168,7 @@ class ImageView(
         self._footprint_overlays: tuple[tuple, ...] = ()
         self._connection_net: str | None = None
         self._connection_origin_id: str | None = None
+        self._connection_highlight_ids: frozenset[str] | None = None
         self._connection_preview_origin: tuple[float, float] | None = None
         self._connection_preview_cursor: tuple[float, float] | None = None
         self._label = QLabel(empty_text)
@@ -224,10 +225,27 @@ class ImageView(
         self._footprint_overlays = footprints
         self._render()
 
-    def set_trace_selection(self, net: str | None, origin_id: str | None) -> None:
-        """Store visible trace selection for hit testing."""
+    def set_trace_selection(
+        self,
+        net: str | None,
+        origin_id: str | None,
+        highlight_ids: frozenset[str] | None = None,
+    ) -> None:
+        """Store visible trace selection and transient endpoint filtering.
+
+        Args:
+            net: Electrical net whose visible links should be drawn.
+            origin_id: Pad ID that started the selection.
+            highlight_ids: Optional pad IDs participating in visible links.
+                ``None`` highlights every visible pad on ``net``.
+        """
         self._connection_net = net
         self._connection_origin_id = origin_id
+        self._connection_highlight_ids = highlight_ids
+
+    def refresh_trace_selection(self) -> None:
+        """Repaint the image after transient trace-selection state changes."""
+        self._render()
 
     def trace_at(self, x: float, y: float) -> tuple[str, str] | None:
         """Return trace endpoints near normalized image coordinates."""
@@ -564,7 +582,15 @@ class ImageView(
         """Return origin/target pad IDs when point touches a visible trace."""
         if not self._connection_net or self._pad_at_point(point) is not None:
             return None
-        pads = [pad for pad in self._pad_labels if pad.net == self._connection_net]
+        pads = [
+            pad
+            for pad in self._pad_labels
+            if pad.net == self._connection_net
+            and (
+                self._connection_highlight_ids is None
+                or pad.pad_id in self._connection_highlight_ids
+            )
+        ]
         if len(pads) < 2:
             return None
         centers = {
@@ -922,6 +948,7 @@ class ImageView(
             return
         painter = QPainter(pixmap)
         pads = self._pad_labels
+        connected = []
         if (
             self._connection_preview_origin is not None
             and self._connection_preview_cursor is not None
@@ -941,7 +968,15 @@ class ImageView(
             painter.setPen(preview_pen)
             painter.drawLine(origin, cursor)
         if self._connection_net:
-            connected = [pad for pad in pads if pad.net == self._connection_net]
+            connected = [
+                pad
+                for pad in pads
+                if pad.net == self._connection_net
+                and (
+                    self._connection_highlight_ids is None
+                    or pad.pad_id in self._connection_highlight_ids
+                )
+            ]
             centers = {
                 pad.pad_id: QPointF(
                     (pad.x + pad.width / 2) * (pixmap.width() - 1),
@@ -983,14 +1018,16 @@ class ImageView(
                     else Qt.GlobalColor.red
                 )
             )
+            highlighted = pad in connected
+            origin = pad.pad_id == self._connection_origin_id and highlighted
             pad_pen = QPen(
-                (
-                    Qt.GlobalColor.white
-                    if pad.pad_id == self._connection_origin_id
-                    else Qt.GlobalColor.yellow
-                ),
-                2.0 if pad.pad_id == self._connection_origin_id else 1.0,
+                Qt.GlobalColor.white
+                if origin
+                else (QColor("#66c2ff") if highlighted else Qt.GlobalColor.yellow),
+                2.5 if origin else (2.0 if highlighted else 1.0),
             )
+            if highlighted:
+                painter.setBrush(QColor("#22d3ee"))
             pad_pen.setCosmetic(True)
             painter.setPen(pad_pen)
             painter.save()
