@@ -598,9 +598,9 @@ class PadActionsMixin:
         menu.popup(QCursor.pos())
 
     def _device_supports_pin_swap(self, device: Device) -> bool:
-        """Return whether a device source contains exactly two physical pads."""
+        """Return whether a device source contains exactly two electrical pads."""
         footprint = self._footprint_for_device(device)
-        return footprint is not None and len(footprint.pads) == 2
+        return footprint is not None and footprint.pad_count() == 2
 
     def _swap_device_pins(self, device_id: str) -> None:
         """Rotate a two-pin device and exchange its electrical assignments."""

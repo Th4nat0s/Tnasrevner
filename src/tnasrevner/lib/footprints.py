@@ -262,7 +262,7 @@ class FootprintPickerDialog(QDialog):  # pylint: disable=R0902,R0903
                 self._preview_cache[reference.identifier] = footprint
         except (OSError, KiCadFormatError):
             return None
-        return len(footprint.pads)
+        return footprint.pad_count()
 
     def _refresh_results(self, query: str = "") -> None:
         """Refresh search results and apply the optional exact pad filter."""

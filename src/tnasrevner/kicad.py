@@ -99,6 +99,10 @@ class Footprint:
         """Return the standard `library:name` identifier."""
         return f"{self.library}:{self.name}"
 
+    def pad_count(self) -> int:
+        """Return the number of distinct electrical pad numbers."""
+        return len({pad.number for pad in self.pads})
+
     def radius(self) -> float:
         """Return a safe local millimeter radius for drawing a preview."""
         distances = [
@@ -288,9 +292,9 @@ class KiCadFootprintCache:
         total = len(references)
         for index, reference in enumerate(references, start=1):
             try:
-                counts[reference.identifier] = len(
-                    parse_footprint(reference.path.read_bytes(), reference.library).pads
-                )
+                counts[reference.identifier] = parse_footprint(
+                    reference.path.read_bytes(), reference.library
+                ).pad_count()
             except (OSError, KiCadFormatError):
                 counts[reference.identifier] = -1
             if progress is not None:
@@ -461,7 +465,7 @@ def parse_footprint(content: bytes, library: str) -> Footprint:
     name = root[1].strip()
     if not name:
         raise KiCadFormatError("Footprint name is missing.")
-    pads = tuple(_parse_pad(node) for node in _children(root, "pad"))
+    pads = tuple(pad for node in _children(root, "pad") for pad in _parse_pad(node))
     named_pads = tuple(pad for pad in pads if pad.number)
     if not named_pads:
         raise KiCadFormatError("Footprint contains no named pads.")
@@ -680,11 +684,12 @@ def _numbers(node: list[Any] | None, count: int, label: str) -> tuple[float, ...
     return values
 
 
-def _parse_pad(node: list[Any]) -> FootprintPad:
+def _parse_pad(node: list[Any]) -> tuple[FootprintPad, ...]:
+    """Return physical shapes belonging to one KiCad electrical pad."""
     if len(node) < 4 or not all(isinstance(node[index], str) for index in range(1, 4)):
         raise KiCadFormatError("Footprint pad header is invalid.")
     shape = node[3]
-    if shape not in _SUPPORTED_PAD_SHAPES:
+    if shape not in _SUPPORTED_PAD_SHAPES and shape != "custom":
         raise KiCadFormatError(f"Unsupported KiCad pad shape: {shape}")
     position = _numbers(_child(node, "at"), 2, "pad position")
     size = _numbers(_child(node, "size"), 2, "pad size")
@@ -692,7 +697,70 @@ def _parse_pad(node: list[Any]) -> FootprintPad:
         raise KiCadFormatError("Footprint pad size must be positive.")
     at = _child(node, "at")
     rotation = _numbers(at, 3, "pad rotation")[2] if at and len(at) >= 4 else 0.0
-    return FootprintPad(node[1].strip(), *position, *size, shape, rotation)
+    if shape == "custom":
+        return _parse_custom_pad(
+            node,
+            node[1].strip(),
+            position,
+            size,
+            rotation,
+        )
+    return (FootprintPad(node[1].strip(), *position, *size, shape, rotation),)
+
+
+def _parse_custom_pad(
+    node: list[Any],
+    number: str,
+    position: tuple[float, float],
+    size: tuple[float, float],
+    rotation: float,
+) -> tuple[FootprintPad, ...]:
+    """Return custom pad anchor plus polygon primitives as physical shapes."""
+    options = _child(node, "options")
+    anchor = _child(options, "anchor") if options else None
+    anchor_shape = "circle" if anchor and anchor[1:] == ["circle"] else "rect"
+    shapes = [
+        FootprintPad(number, *position, *size, anchor_shape, rotation),
+    ]
+    primitives = _child(node, "primitives")
+    if primitives is not None:
+        for polygon in _children(primitives, "gr_poly"):
+            point_list = _child(polygon, "pts")
+            if point_list is None:
+                continue
+            points = [
+                _numbers(point, 2, "custom pad point")
+                for point in _children(point_list, "xy")
+            ]
+            if points:
+                shapes.append(_custom_polygon_pad(number, position, rotation, points))
+    return tuple(shapes)
+
+
+def _custom_polygon_pad(
+    number: str,
+    position: tuple[float, float],
+    rotation: float,
+    points: list[tuple[float, float]],
+) -> FootprintPad:
+    """Approximate one custom polygon primitive with its local bounding box."""
+    min_x = min(point[0] for point in points)
+    max_x = max(point[0] for point in points)
+    min_y = min(point[1] for point in points)
+    max_y = max(point[1] for point in points)
+    local_x = (min_x + max_x) / 2
+    local_y = (min_y + max_y) / 2
+    angle = math.radians(rotation)
+    cosine, sine = math.cos(angle), math.sin(angle)
+    return FootprintPad(
+        number,
+        position[0] + local_x * cosine - local_y * sine,
+        position[1] + local_x * sine + local_y * cosine,
+        max_x - min_x,
+        max_y - min_y,
+        "rect",
+        rotation,
+    )
 
 
 def _parse_graphics(root: list[Any]) -> Iterator[FootprintGraphic]:

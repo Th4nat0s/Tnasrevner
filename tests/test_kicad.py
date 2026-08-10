@@ -35,6 +35,18 @@ FOOTPRINT = b"""(footprint "R_0603_1608Metric"
   (pad "2" smd rect (at 0.8 0 15) (size 0.9 0.95)
     (layers "F.Cu" "F.Paste" "F.Mask")))
 """
+CUSTOM_PAD_FOOTPRINT = b"""(footprint "SOT-89-3"
+  (version 20260206) (generator test) (layer "F.Cu")
+  (pad "1" smd roundrect (at -1.95 -1.5) (size 1.3 0.9)
+    (layers "F.Cu" "F.Paste" "F.Mask"))
+  (pad "2" smd custom (at -1.8625 0) (size 1.475 0.9)
+    (layers "F.Cu" "F.Paste" "F.Mask")
+    (primitives
+      (gr_poly (pts (xy 0.7375 -0.8665) (xy 3.8625 -0.8665)
+        (xy 3.8625 0.8665) (xy 0.7375 0.8665))
+        (width 0) (fill yes))))
+  (pad "3" smd roundrect (at -1.95 1.5) (size 1.3 0.9)
+    (layers "F.Cu" "F.Paste" "F.Mask")))"""
 
 
 def _archive(content: bytes = FOOTPRINT, unsafe: bool = False) -> bytes:
@@ -75,7 +87,7 @@ def test_parse_kicad_footprint_geometry_and_named_pads() -> None:
         (b"not a footprint", "outside footprint"),
         (b'(module "legacy")', "KiCad 6+"),
         (
-            b'(footprint "bad" (pad "1" smd custom (at 0 0) (size 1 1)))',
+            b'(footprint "bad" (pad "1" smd unsupported (at 0 0) (size 1 1)))',
             "Unsupported",
         ),
         (b'(footprint "empty")', "no named pads"),
@@ -97,6 +109,44 @@ def test_place_footprint_rotates_without_bottom_mirroring() -> None:
     assert rotated[0].y < 0.5 < rotated[1].y
     assert bottom[0].x < 0.5 < bottom[1].x
     assert [pad.number for pad in rotated] == ["1", "2"]
+
+
+def test_parse_custom_polygon_pad_as_physical_bounding_geometry() -> None:
+    footprint = parse_footprint(CUSTOM_PAD_FOOTPRINT, "Package_TO_SOT_SMD")
+
+    assert [pad.number for pad in footprint.pads] == ["1", "2", "2", "3"]
+    assert footprint.pad_count() == 3
+    anchor, tab = footprint.pads[1:3]
+    assert anchor.shape == "rect"
+    assert anchor.x == pytest.approx(-1.8625)
+    assert anchor.width == pytest.approx(1.475)
+    assert anchor.height == pytest.approx(0.9)
+    assert tab.shape == "rect"
+    assert tab.x == pytest.approx(0.4375)
+    assert tab.width == pytest.approx(3.125)
+    assert tab.height == pytest.approx(1.733)
+
+    placed = place_footprint_pads(footprint, "top", 0.5, 0.5, 0, 100, 100, 10)
+    assert [pad.number for pad in placed] == ["1", "2", "3"]
+
+
+def test_custom_polygon_uses_pad_rotation_for_primitive_position() -> None:
+    footprint = parse_footprint(
+        b"""(footprint "rotated-custom"
+          (pad "1" smd custom (at 10 20 90) (size 1 1)
+            (options (anchor circle))
+            (primitives (gr_poly
+              (pts (xy 1 -1) (xy 3 -1) (xy 3 1) (xy 1 1))))))""",
+        "Test",
+    )
+
+    anchor, primitive = footprint.pads
+    assert anchor.shape == "circle"
+    assert primitive.x == pytest.approx(10)
+    assert primitive.y == pytest.approx(22)
+    assert primitive.width == pytest.approx(2)
+    assert primitive.height == pytest.approx(2)
+    assert primitive.rotation == pytest.approx(90)
 
 
 def test_repeated_kicad_pad_number_becomes_one_logical_pad() -> None:
@@ -137,6 +187,17 @@ def test_first_run_downloads_then_fresh_cache_is_reused(tmp_path: Path) -> None:
     assert downloads == 1
     assert cache.catalog()[0].identifier == "Resistor_SMD:R_0603_1608Metric"
     assert cache.load(cache.catalog()[0])[0].pads[0].number == "1"
+
+
+def test_pad_count_index_counts_split_shapes_as_one_electrical_pad(
+    tmp_path: Path,
+) -> None:
+    cache = _cache(tmp_path, _archive(CUSTOM_PAD_FOOTPRINT))
+    cache.ensure_ready(datetime(2026, 8, 3, tzinfo=timezone.utc))
+
+    counts = cache.ensure_pad_count_index()
+
+    assert counts[cache.catalog()[0].identifier] == 3
 
 
 def test_stale_cache_updates_after_thirty_days(tmp_path: Path) -> None:

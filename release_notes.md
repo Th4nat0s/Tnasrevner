@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added support for all physical shapes in KiCad custom polygon pads, including
+  SOT-89 center leads and tabs.
 - Photo rotation now rotates existing pads and footprints on the edited board side.
 - Added explicit `Save project as…` action with asset-preserving archive copy.
 - Renamed component context-menu action to `Edit Name…` with clearer name/reference
