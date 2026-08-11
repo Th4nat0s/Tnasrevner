@@ -1024,7 +1024,7 @@ class ImageView(
                 else pad in connected
             )
             origin = pad.pad_id == self._connection_origin_id and highlighted
-            painter.setOpacity(0.9 if highlighted else 0.45)
+            painter.setOpacity(1.0 if highlighted else 0.45)
             pad_pen = QPen(
                 Qt.GlobalColor.white
                 if origin
@@ -1034,7 +1034,7 @@ class ImageView(
                 2.5 if origin else (2.0 if highlighted else 1.0),
             )
             if highlighted:
-                painter.setBrush(QColor("#22c55e"))
+                painter.setBrush(QColor("#00ff00"))
             pad_pen.setCosmetic(True)
             painter.setPen(pad_pen)
             painter.save()

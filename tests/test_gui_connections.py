@@ -337,8 +337,9 @@ def test_connect_button_links_shift_selected_board_pads_on_release(
     QApplication.processEvents()
     assert view._connection_preview_origin == pytest.approx((0.15, 0.15), abs=0.02)
     pending_color = view._label.pixmap().toImage().pixelColor(15, 15)
-    assert pending_color.green() > pending_color.red()
-    assert pending_color.green() > pending_color.blue()
+    assert pending_color.green() > 200
+    assert pending_color.red() < 80
+    assert pending_color.blue() < 80
     QTest.mouseMove(
         view._label, QPoint(0.35 * view._label.width(), 0.35 * view._label.height())
     )
@@ -364,8 +365,9 @@ def test_connect_button_links_shift_selected_board_pads_on_release(
     link_color = view._label.pixmap().toImage().pixelColor(35, 35)
     assert min(link_color.red(), link_color.green(), link_color.blue()) > 200
     endpoint_color = view._label.pixmap().toImage().pixelColor(15, 15)
-    assert endpoint_color.green() > endpoint_color.red()
-    assert endpoint_color.green() > endpoint_color.blue()
+    assert endpoint_color.green() > 200
+    assert endpoint_color.red() < 80
+    assert endpoint_color.blue() < 80
 
     trace_point = QPoint(
         round(0.35 * (view._label.width() - 1)),
