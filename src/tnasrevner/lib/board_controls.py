@@ -488,13 +488,8 @@ class BoardControlsMixin:
             button.blockSignals(False)
         for view in (*self._views.values(), *self._side_views.values()):
             view.set_connection_mode(enabled)
-            if not enabled:
-                view.set_trace_selection(
-                    self._selected_net,
-                    self._selected_pad_id,
-                    self._trace_highlight_ids,
-                )
-                view.refresh_trace_selection()
+        if not enabled:
+            self._refresh_trace_selection_highlights()
         self._schematic_view.set_connection_mode(enabled)
         if enabled:
             self._show_connection_prompt()
@@ -529,7 +524,31 @@ class BoardControlsMixin:
         if terminal is None or terminal in self._pending_connection_terminals:
             return
         self._pending_connection_terminals.append(terminal)
+        self._trace_highlight_ids = frozenset(
+            pad.pad_id
+            for pad in self.project.pads
+            if (
+                ("pad", pad.pad_id, None) in self._pending_connection_terminals
+                or (
+                    pad.device_id is not None
+                    and pad.number is not None
+                    and ("pin", pad.device_id, pad.number)
+                    in self._pending_connection_terminals
+                )
+            )
+        )
+        self._refresh_trace_selection_highlights()
         self._show_connection_prompt()
+
+    def _refresh_trace_selection_highlights(self) -> None:
+        """Repaint board views after transient connection endpoint changes."""
+        for view in (*self._views.values(), *self._side_views.values()):
+            view.set_trace_selection(
+                self._selected_net,
+                self._selected_pad_id,
+                self._trace_highlight_ids,
+            )
+            view.refresh_trace_selection()
 
     def _finish_connection_selection(self) -> bool:
         """Create one net from all terminals selected before Shift release."""
