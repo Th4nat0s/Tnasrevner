@@ -339,7 +339,7 @@ class HistoryActionsMixin:
     def eventFilter(self, watched, event) -> bool:  # noqa: N802
         """Commit the current terminal group when Shift is released."""
         if (
-            self._connection_mode
+            getattr(self, "_connection_mode", False)
             and event.type() == QEvent.Type.KeyRelease
             and event.key() == Qt.Key.Key_Shift
         ):

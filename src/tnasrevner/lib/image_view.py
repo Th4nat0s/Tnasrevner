@@ -168,6 +168,7 @@ class ImageView(
         self._footprint_overlays: tuple[tuple, ...] = ()
         self._connection_net: str | None = None
         self._connection_origin_id: str | None = None
+        self._connection_trace_pairs: tuple[tuple[str, str], ...] | None = None
         self._connection_highlight_ids: frozenset[str] | None = None
         self._connection_preview_origin: tuple[float, float] | None = None
         self._connection_preview_cursor: tuple[float, float] | None = None
@@ -229,22 +230,14 @@ class ImageView(
         self,
         net: str | None,
         origin_id: str | None,
+        trace_pairs: tuple[tuple[str, str], ...] | None = None,
         highlight_ids: frozenset[str] | None = None,
     ) -> None:
-        """Store visible trace selection and transient endpoint filtering.
-
-        Args:
-            net: Electrical net whose visible links should be drawn.
-            origin_id: Pad ID that started the selection.
-            highlight_ids: Optional pad IDs participating in visible links.
-                ``None`` highlights every visible pad on ``net``.
-        """
+        """Store visible trace selection for hit testing."""
         self._connection_net = net
         self._connection_origin_id = origin_id
+        self._connection_trace_pairs = trace_pairs
         self._connection_highlight_ids = highlight_ids
-
-    def refresh_trace_selection(self) -> None:
-        """Repaint the image after transient trace-selection state changes."""
         self._render()
 
     def trace_at(self, x: float, y: float) -> tuple[str, str] | None:
@@ -582,15 +575,12 @@ class ImageView(
         """Return origin/target pad IDs when point touches a visible trace."""
         if not self._connection_net or self._pad_at_point(point) is not None:
             return None
-        pads = [
-            pad
-            for pad in self._pad_labels
-            if pad.net == self._connection_net
-            and (
-                self._connection_highlight_ids is None
-                or pad.pad_id in self._connection_highlight_ids
-            )
-        ]
+        pads = [pad for pad in self._pad_labels if pad.net == self._connection_net]
+        if self._connection_trace_pairs is not None:
+            visible_ids = {
+                pad_id for pair in self._connection_trace_pairs for pad_id in pair
+            }
+            pads = [pad for pad in pads if pad.pad_id in visible_ids]
         if len(pads) < 2:
             return None
         centers = {
@@ -607,6 +597,18 @@ class ImageView(
         )
         origin = centers[origin_id]
         tolerance = max(6.0, min(self._label.width(), self._label.height()) * 0.012)
+        if self._connection_trace_pairs is not None:
+            for first_id, second_id in self._connection_trace_pairs:
+                if first_id not in centers or second_id not in centers:
+                    continue
+                if (
+                    self._distance_to_segment(
+                        point, centers[first_id], centers[second_id]
+                    )
+                    <= tolerance
+                ):
+                    return first_id, second_id
+            return None
         for pad in pads:
             if pad.pad_id == origin_id:
                 continue
@@ -948,7 +950,6 @@ class ImageView(
             return
         painter = QPainter(pixmap)
         pads = self._pad_labels
-        connected = []
         if (
             self._connection_preview_origin is not None
             and self._connection_preview_cursor is not None
@@ -968,15 +969,12 @@ class ImageView(
             painter.setPen(preview_pen)
             painter.drawLine(origin, cursor)
         if self._connection_net:
-            connected = [
-                pad
-                for pad in pads
-                if pad.net == self._connection_net
-                and (
-                    self._connection_highlight_ids is None
-                    or pad.pad_id in self._connection_highlight_ids
-                )
-            ]
+            connected = [pad for pad in pads if pad.net == self._connection_net]
+            if self._connection_trace_pairs is not None:
+                visible_ids = {
+                    pad_id for pair in self._connection_trace_pairs for pad_id in pair
+                }
+                connected = [pad for pad in connected if pad.pad_id in visible_ids]
             centers = {
                 pad.pad_id: QPointF(
                     (pad.x + pad.width / 2) * (pixmap.width() - 1),
@@ -993,14 +991,19 @@ class ImageView(
                 connection_pen = QPen(Qt.GlobalColor.white, self._CONNECTION_LINE_WIDTH)
                 connection_pen.setCosmetic(True)
                 painter.setPen(connection_pen)
-                if len(connected) == 1:
+                if self._connection_trace_pairs is not None:
+                    for first_id, second_id in self._connection_trace_pairs:
+                        if first_id in centers and second_id in centers:
+                            painter.drawLine(centers[first_id], centers[second_id])
+                elif len(connected) == 1:
                     center = centers[origin_id]
                     radius = max(8.0, min(pixmap.width(), pixmap.height()) * 0.008)
                     painter.drawEllipse(center, radius, radius)
                     painter.drawText(center + QPointF(10, -10), self._connection_net)
-                for pad_id, target in centers.items():
-                    if pad_id != origin_id:
-                        painter.drawLine(centers[origin_id], target)
+                elif self._connection_trace_pairs is None:
+                    for pad_id, target in centers.items():
+                        if pad_id != origin_id:
+                            painter.drawLine(centers[origin_id], target)
         painter.setOpacity(0.45)
         for pad in pads:
             width = max(2, round(pad.width * (pixmap.width() - 1)))
@@ -1019,22 +1022,22 @@ class ImageView(
                 )
             )
             highlighted = (
-                pad.pad_id in self._connection_highlight_ids
-                if self._connection_highlight_ids is not None
-                else pad in connected
+                self._connection_highlight_ids is not None
+                and pad.pad_id in self._connection_highlight_ids
             )
-            origin = pad.pad_id == self._connection_origin_id and highlighted
             painter.setOpacity(1.0 if highlighted else 0.45)
-            pad_pen = QPen(
-                Qt.GlobalColor.white
-                if origin
-                else (
-                    QColor("#bbf7d0") if highlighted else Qt.GlobalColor.yellow
-                ),
-                2.5 if origin else (2.0 if highlighted else 1.0),
-            )
             if highlighted:
                 painter.setBrush(QColor("#00ff00"))
+            pad_pen = QPen(
+                (
+                    Qt.GlobalColor.white
+                    if pad.pad_id == self._connection_origin_id
+                    else (QColor("#bbf7d0") if highlighted else Qt.GlobalColor.yellow)
+                ),
+                2.5
+                if pad.pad_id == self._connection_origin_id
+                else (2.0 if highlighted else 1.0),
+            )
             pad_pen.setCosmetic(True)
             painter.setPen(pad_pen)
             painter.save()
