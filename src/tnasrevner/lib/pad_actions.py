@@ -304,9 +304,11 @@ class PadActionsMixin:
         if pad and pad.pad_id == self._selected_pad_id:
             self._selected_net = None
             self._selected_pad_id = None
+            self._trace_highlight_ids = None
         else:
             self._selected_net = pad.net if pad else None
             self._selected_pad_id = pad.pad_id if pad else None
+            self._trace_highlight_ids = None
         self._schematic_view.set_selected_net(self._selected_net)
         LOGGER.info(
             "Pad click side=%s point=(%.5f,%.5f) pad=%s net=%s selected=%s",
@@ -726,6 +728,7 @@ class PadActionsMixin:
         removed_nets = self._cleanup_single_terminal_nets({net})
         remaining = self._logical_net_terminals(net)
         self._selected_net = net if remaining and net not in removed_nets else None
+        self._trace_highlight_ids = None
         if self._selected_net is None:
             self._selected_pad_id = None
         self._dirty = True

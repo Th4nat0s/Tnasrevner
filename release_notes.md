@@ -2,23 +2,12 @@
 
 ## Unreleased
 
-- Added support for all physical shapes in KiCad custom polygon pads, including
-  SOT-89 center leads and tabs.
-- Photo rotation now rotates existing pads and footprints on the edited board side.
-- Added explicit `Save project as…` action with asset-preserving archive copy.
-- Renamed component context-menu action to `Edit Name…` with clearer name/reference
-  dialog wording.
-- Persisted schematic zoom and scroll state independently from board views;
-  tab switches, save/reload, backups, undo/redo, and schematic optimization now
-  preserve the visible viewport, with safe legacy fallback.
+- Highlight active connection board pads and schematic terminals in green, distinct
+  from the blue pads already assigned to a net.
 - Add Pad mode now shows a crosshair cursor on both the PCB view and image label,
   and restores the normal cursor when the mode ends.
 - Added shared KiCad footprint definitions with SHA-256 identity, deduplicated
   `.revp` assets, shared runtime parsing cache, and automatic v1 migration.
-- Added `Swap pins` for two-pin footprints in board and schematic context menus;
-  it rotates the placed device 180 degrees while exchanging terminal metadata.
-- Connection Mode now commits each Shift-click pair immediately, keeps a dashed
-  preview from the latest terminal, and stops preview creation on Shift release.
 - Replaced the generic Measure Tool icon with a visible ruler glyph (`📐`).
 - Added explicit schematic layout optimization with persistent Glue/Unglue
   constraints, 90-degree rotation search, cable-obstacle avoidance, and

@@ -314,7 +314,6 @@ class ImageImportMixin:
             if reset_transformations
             else asset.transformations + (transformation,)
         )
-        self._rotate_image_side_geometry(side, transformation[0])
         legacy_working_image = asset.original_path is not None and (
             asset.path != asset.original_path or not asset.transformations
         )
@@ -342,74 +341,6 @@ class ImageImportMixin:
         self._dirty = True
         self._refresh_views()
         self._update_title()
-
-    def _rotate_image_side_geometry(self, side: str, angle: float) -> None:
-        """Rotate existing board geometry for quarter-turn image edits."""
-        quarter_turns = round(angle / 90.0)
-        if quarter_turns == 0 or not math.isclose(
-            angle, quarter_turns * 90.0, abs_tol=1e-6
-        ):
-            return
-        direction = 1 if quarter_turns > 0 else -1
-        for _ in range(abs(quarter_turns)):
-            if direction > 0:
-                self.project.pads = [
-                    (
-                        replace(
-                            pad,
-                            x=1.0 - pad.y - pad.height,
-                            y=pad.x,
-                            width=pad.height,
-                            height=pad.width,
-                            rotation=(pad.rotation + 90.0) % 360.0,
-                        )
-                        if pad.side == side
-                        else pad
-                    )
-                    for pad in self.project.pads
-                ]
-                self.project.devices = [
-                    (
-                        replace(
-                            device,
-                            x=1.0 - device.y,
-                            y=device.x,
-                            rotation=(device.rotation + 90.0) % 360.0,
-                        )
-                        if device.side == side
-                        else device
-                    )
-                    for device in self.project.devices
-                ]
-            else:
-                self.project.pads = [
-                    (
-                        replace(
-                            pad,
-                            x=pad.y,
-                            y=1.0 - pad.x - pad.width,
-                            width=pad.height,
-                            height=pad.width,
-                            rotation=(pad.rotation - 90.0) % 360.0,
-                        )
-                        if pad.side == side
-                        else pad
-                    )
-                    for pad in self.project.pads
-                ]
-                self.project.devices = [
-                    (
-                        replace(
-                            device,
-                            x=device.y,
-                            y=1.0 - device.x,
-                            rotation=(device.rotation - 90.0) % 360.0,
-                        )
-                        if device.side == side
-                        else device
-                    )
-                    for device in self.project.devices
-                ]
 
     def _edit_imported_image(
         self,
@@ -484,7 +415,7 @@ class ImageImportMixin:
             view.set_trace_selection(
                 self._selected_net,
                 self._selected_pad_id,
-                self._connection_trace_pairs,
+                self._trace_highlight_ids,
             )
             view.set_footprint_overlays(self._vector_footprints_for_side(side))
             view.set_pad_labels(self._vector_labels_for_side(side))
@@ -494,7 +425,7 @@ class ImageImportMixin:
             view.set_trace_selection(
                 self._selected_net,
                 self._selected_pad_id,
-                self._connection_trace_pairs,
+                self._trace_highlight_ids,
             )
             view.set_footprint_overlays(self._vector_footprints_for_side(side))
             view.set_pad_labels(self._vector_labels_for_side(side))
@@ -505,7 +436,7 @@ class ImageImportMixin:
         self._overlay_view.set_trace_selection(
             self._selected_net,
             self._selected_pad_id,
-            self._connection_trace_pairs,
+            self._trace_highlight_ids,
         )
         self._overlay_view.set_footprint_overlays(())
         self._overlay_view.set_pad_labels(overlay_labels)
@@ -543,27 +474,6 @@ class ImageImportMixin:
         else:
             self._sync_board_views(self._views["top"])
         LOGGER.debug("View refresh completed")
-
-    def _refresh_device_side(self, side: str) -> None:
-        """Refresh only views affected by a newly placed device side."""
-        image = self._pixmap_for_asset(side)
-        footprints = self._vector_footprints_for_side(side)
-        labels = self._vector_labels_for_side(side)
-        views = (self._views[side], self._side_views[side])
-        for view in views:
-            view.set_trace_selection(
-                self._selected_net,
-                self._selected_pad_id,
-                self._connection_trace_pairs,
-            )
-            view.set_footprint_overlays(footprints)
-            view.set_pad_labels(labels)
-            view.set_pixmap(image)
-        self._refresh_nets_table()
-        self._refresh_bom_table()
-        self._schematic_view.set_project(self.project)
-        self._schematic_view.set_selected_net(self._selected_net)
-        LOGGER.debug("Refreshed device side=%s", side)
 
     def _vector_labels_for_side(self, side: str) -> tuple[Pad, ...]:
         """Return visible pad labels for vector rendering in one view."""
@@ -835,18 +745,15 @@ class ImageImportMixin:
             return QPixmap()
         return pixmap
 
-    def _update_title(
-        self, record_history: bool = True, refresh_bom: bool = True
-    ) -> None:
+    def _update_title(self, record_history: bool = True) -> None:
         """Refresh title and BOM, optionally recording a history snapshot.
 
         Args:
             record_history: Whether this UI refresh represents a completed edit.
-            refresh_bom: Whether to rebuild the BOM table.
         """
         if record_history:
             self._record_history()
-        if refresh_bom and hasattr(self, "_bom_table"):
+        if hasattr(self, "_bom_table"):
             self._refresh_bom_table()
         name = self.project.project_name if self.project else "No project"
         self.setWindowTitle(f"Tnasrevner — {name}{' *' if self._dirty else ''}")

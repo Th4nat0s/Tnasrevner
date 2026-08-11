@@ -372,8 +372,6 @@ class BoardControlsMixin:
             or getattr(self, "_optimization_progress", None) is not None
         ):
             return
-        self._schematic_optimization_viewport = self._schematic_view.view_state()
-        self._capture_schematic_viewport()
         progress = QProgressDialog(
             "Optimizing schematic layout…",
             "Cancel",
@@ -400,19 +398,9 @@ class BoardControlsMixin:
         progress = getattr(self, "_optimization_progress", None)
         if progress is None:
             return
-        self._restore_schematic_optimization_viewport()
         progress.close()
         progress.deleteLater()
         self._optimization_progress = None
-
-    def _restore_schematic_optimization_viewport(self) -> None:
-        """Restore schematic viewport captured before optimization started."""
-        state = self._schematic_optimization_viewport
-        if state is None:
-            return
-        self._schematic_view.apply_view_state(state)
-        self._schematic_optimization_viewport = None
-        self._capture_schematic_viewport()
 
     def _rotate_board_90(self) -> None:
         """Rotate both board images and all placed geometry by 90 degrees."""
@@ -492,7 +480,7 @@ class BoardControlsMixin:
         self._connection_mode = enabled
         if not enabled:
             self._pending_connection_terminals.clear()
-            self._connection_trace_pairs = None
+            self._trace_highlight_ids = None
         button = getattr(self, "_connect_button", None)
         if button is not None:
             button.blockSignals(True)
@@ -500,6 +488,8 @@ class BoardControlsMixin:
             button.blockSignals(False)
         for view in (*self._views.values(), *self._side_views.values()):
             view.set_connection_mode(enabled)
+        if not enabled:
+            self._refresh_trace_selection_highlights()
         self._schematic_view.set_connection_mode(enabled)
         if enabled:
             self._show_connection_prompt()
@@ -527,53 +517,55 @@ class BoardControlsMixin:
         self._set_connection_mode(True)
 
     def _append_connection_terminal(self, value: object) -> None:
-        """Commit a rolling terminal link and retain its new endpoint."""
+        """Add one unique pad/pin to current Shift-click selection."""
         if not self._connection_mode or not self.project:
             return
         terminal = self._validated_terminal(value)
         if terminal is None or terminal in self._pending_connection_terminals:
             return
-        if self._pending_connection_terminals:
-            previous = self._pending_connection_terminals[-1]
-            first_pad = self._connection_pad_id(previous)
-            second_pad = self._connection_pad_id(terminal)
-            if first_pad is not None and second_pad is not None:
-                pairs = self._connection_trace_pairs or ()
-                self._connection_trace_pairs = (*pairs, (first_pad, second_pad))
-            self._connect_terminals((previous, terminal))
-            self._pending_connection_terminals.clear()
         self._pending_connection_terminals.append(terminal)
+        self._trace_highlight_ids = frozenset(
+            pad.pad_id
+            for pad in self.project.pads
+            if (
+                ("pad", pad.pad_id, None) in self._pending_connection_terminals
+                or (
+                    pad.device_id is not None
+                    and pad.number is not None
+                    and ("pin", pad.device_id, pad.number)
+                    in self._pending_connection_terminals
+                )
+            )
+        )
+        self._refresh_trace_selection_highlights()
         self._show_connection_prompt()
 
+    def _refresh_trace_selection_highlights(self) -> None:
+        """Repaint board views after transient connection endpoint changes."""
+        for view in (*self._views.values(), *self._side_views.values()):
+            view.set_trace_selection(
+                self._selected_net,
+                self._selected_pad_id,
+                self._trace_highlight_ids,
+            )
+            view.refresh_trace_selection()
+
     def _finish_connection_selection(self) -> bool:
-        """Stop the current rolling link preview when Shift is released."""
+        """Create one net from all terminals selected before Shift release."""
         if not self._connection_mode:
             return False
+        terminals = tuple(self._pending_connection_terminals)
         self._pending_connection_terminals.clear()
-        self._connection_trace_pairs = None
         for view in (*self._views.values(), *self._side_views.values()):
             view.clear_connection_preview()
         self._schematic_view.clear_connection_preview()
-        self._refresh_views_preserving_state()
+        if len(terminals) >= 2:
+            target_net = self._connect_terminals(terminals)
+            if target_net is not None:
+                self._show_connection_prompt()
+                return True
         self._show_connection_prompt()
         return True
-
-    def _connection_pad_id(self, terminal: tuple[str, str, str | None]) -> str | None:
-        """Return generated board-pad ID for one logical connection terminal."""
-        if not self.project:
-            return None
-        kind, object_id, number = terminal
-        if kind == "pad":
-            return object_id
-        pad = next(
-            (
-                item
-                for item in self.project.pads
-                if item.device_id == object_id and item.number == number
-            ),
-            None,
-        )
-        return pad.pad_id if pad is not None else None
 
     def _show_info(self) -> None:
         """Show selected terminal info and exit any active connection mode."""
