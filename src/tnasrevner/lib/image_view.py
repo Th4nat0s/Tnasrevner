@@ -1029,12 +1029,12 @@ class ImageView(
                 Qt.GlobalColor.white
                 if origin
                 else (
-                    QColor("#f0abfc") if highlighted else Qt.GlobalColor.yellow
+                    QColor("#bbf7d0") if highlighted else Qt.GlobalColor.yellow
                 ),
                 2.5 if origin else (2.0 if highlighted else 1.0),
             )
             if highlighted:
-                painter.setBrush(QColor("#c026d3"))
+                painter.setBrush(QColor("#22c55e"))
             pad_pen.setCosmetic(True)
             painter.setPen(pad_pen)
             painter.save()

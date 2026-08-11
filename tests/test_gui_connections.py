@@ -361,8 +361,8 @@ def test_connect_button_links_shift_selected_board_pads_on_release(
     link_color = view._label.pixmap().toImage().pixelColor(35, 35)
     assert min(link_color.red(), link_color.green(), link_color.blue()) > 200
     endpoint_color = view._label.pixmap().toImage().pixelColor(15, 15)
-    assert endpoint_color.red() > 100
-    assert endpoint_color.blue() > endpoint_color.green()
+    assert endpoint_color.green() > endpoint_color.red()
+    assert endpoint_color.green() > endpoint_color.blue()
 
     trace_point = QPoint(
         round(0.35 * (view._label.width() - 1)),
