@@ -2,7 +2,8 @@
 
 ## Unreleased
 
-- Highlight connected board pads and schematic terminals while their links are visible.
+- Highlight connected board pads and schematic terminals with a distinct magenta
+  endpoint color while their links are visible.
 - Add Pad mode now shows a crosshair cursor on both the PCB view and image label,
   and restores the normal cursor when the mode ends.
 - Added shared KiCad footprint definitions with SHA-256 identity, deduplicated

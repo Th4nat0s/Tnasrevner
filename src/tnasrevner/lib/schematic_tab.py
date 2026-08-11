@@ -1522,7 +1522,7 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
                 (endpoint, ("pin", device.device_id, pin.number))
             )
             if self._selected_net and pin.net_id == self._selected_net:
-                painter.setPen(QPen(QColor("#22d3ee"), 4))
+                painter.setPen(QPen(QColor("#f0abfc"), 4))
                 painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.drawEllipse(endpoint, 12, 12)
             painter.setPen(QColor("#c5d2dd"))
@@ -1646,7 +1646,7 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
             painter.save()
             painter.translate(pad_point)
             if self._selected_net and pad.net == self._selected_net:
-                painter.setPen(QPen(QColor("#22d3ee"), 4))
+                painter.setPen(QPen(QColor("#f0abfc"), 4))
                 painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.drawEllipse(QPointF(0, 0), 12, 12)
             self._draw_schemdraw_symbol(
