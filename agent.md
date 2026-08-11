@@ -19,12 +19,24 @@
 - The minimum accepted quality score is 8/10. No new or modified code may reduce
   the project quality score below 8/10.
 - Prefer small, explicit, testable functions and clear domain models.
+- No Python module may exceed 1,200 lines, including production code, tests,
+  scripts, and helpers. Split modules by cohesive responsibility before they
+  reach this limit; UI tabs must live in dedicated modules.
 - Keep the domain and application layers independent from PySide6 and other UI
   implementation details.
 - Avoid duplicated logic, hidden global state, unexplained constants, and broad
   exception handling.
-- Public classes, functions, and non-obvious algorithms must be documented.
-- Type hints should be used throughout new Python code.
+- Every function and method in every `.py` file is mandatory documentation and
+  typing scope: production code, tests, scripts, helpers, private functions,
+  callbacks, and overrides are included without exception.
+- Every function and method must have complete type annotations for parameters
+  and return value, including `None` where applicable.
+- Every function and method must have a docstring describing its purpose,
+  every call parameter, the return value, and raised exceptions when relevant.
+- Parameter and return descriptions must stay accurate when the signature or
+  behavior changes; do not use vague placeholder docstrings.
+- Code that adds or modifies a function without this documentation and typing
+  is incomplete and must not be handed off.
 
 ## Regression protection
 

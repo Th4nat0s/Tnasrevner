@@ -1,30 +1,78 @@
 """Versioned, portable persistence model for minimal Tnasrevner projects."""
 
+# pylint: disable=duplicate-code
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
+from collections.abc import Callable
+import hashlib
 import json
 import math
 from pathlib import Path, PurePosixPath
-from typing import Any
+import shutil
+from typing import Any, BinaryIO
 from uuid import uuid4
-from zipfile import ZIP_DEFLATED, BadZipFile, ZipFile
+from zipfile import ZIP_DEFLATED, ZIP_STORED, BadZipFile, ZipFile
 
 from .kicad import KiCadFormatError, parse_footprint
 
-CURRENT_FORMAT_VERSION = 1
+CURRENT_FORMAT_VERSION = 2
 PROJECT_FILENAME = "project.json"
 PROJECT_ARCHIVE_SUFFIX = ".revp"
+PROJECT_ARCHIVE_MAGIC = b"REVP"
+PROJECT_ARCHIVE_HEADER = PROJECT_ARCHIVE_MAGIC + f"{CURRENT_FORMAT_VERSION:04d}".encode(
+    "ascii"
+)
+_ARCHIVE_HEADER_SIZE = len(PROJECT_ARCHIVE_HEADER)
 _SIDES = frozenset({"top", "bottom"})
 _DISPLAY_MODES = frozenset(
-    {"top", "bottom", "side_by_side", "both", "nets", "bom", "schematic"}
+    {
+        "top",
+        "bottom",
+        "side_by_side",
+        "both",
+        "nets",
+        "net_summary",
+        "bom",
+        "schematic",
+    }
 )
 _PAD_SHAPES = frozenset({"rect", "circle", "oval", "roundrect", "trapezoid"})
 
 
 class ProjectFormatError(ValueError):
     """Raised when project data is missing, corrupt, or unsupported."""
+
+
+def _archive_payload_offset(stream: BinaryIO) -> int:
+    """Validate archive prefix and return ZIP payload offset.
+
+    Args:
+        stream: Open binary project stream positioned at its beginning.
+
+    Returns:
+        Byte offset where the ZIP payload starts; zero for legacy raw ZIP files.
+
+    Raises:
+        ProjectFormatError: If prefix is missing, malformed, or unsupported.
+    """
+    prefix = stream.read(_ARCHIVE_HEADER_SIZE)
+    if prefix.startswith(b"PK"):
+        stream.seek(0)
+        return 0
+    if len(prefix) != _ARCHIVE_HEADER_SIZE:
+        raise ProjectFormatError("invalid or truncated REVP archive header")
+    if prefix[: len(PROJECT_ARCHIVE_MAGIC)] != PROJECT_ARCHIVE_MAGIC:
+        raise ProjectFormatError("missing REVP archive header")
+    version_bytes = prefix[len(PROJECT_ARCHIVE_MAGIC) :]
+    if not version_bytes.isdigit() or len(version_bytes) != 4:
+        raise ProjectFormatError("malformed REVP archive header version")
+    version = int(version_bytes)
+    if version not in {1, CURRENT_FORMAT_VERSION}:
+        raise ProjectFormatError(f"unsupported REVP archive version: {version}")
+    return _ARCHIVE_HEADER_SIZE
 
 
 def _utc_now() -> str:
@@ -47,8 +95,8 @@ def _relative_asset_path(value: Any) -> str:
 
 
 @dataclass(frozen=True)
-class ImageAsset:
-    """An imported image with original and lightweight working versions."""
+class ImageAsset:  # pylint: disable=too-many-instance-attributes
+    """An imported image with original source and replayable transformations."""
 
     side: str
     path: str
@@ -57,6 +105,7 @@ class ImageAsset:
     original_path: str | None = None
     calibration_line: tuple[float, float, float, float] | None = None
     calibration_length_mm: float | None = None
+    transformations: tuple[tuple[float, tuple[float, float, float, float]], ...] = ()
 
     def __post_init__(self) -> None:
         if self.side not in _SIDES:
@@ -87,6 +136,24 @@ class ImageAsset:
             raise ProjectFormatError(
                 "image calibration_length_mm requires calibration_line"
             )
+        for rotation, crop in self.transformations:
+            if not isinstance(rotation, (int, float)) or not math.isfinite(rotation):
+                raise ProjectFormatError("image rotation must be a finite number")
+            if len(crop) != 4 or not all(
+                isinstance(value, (int, float)) and math.isfinite(value)
+                for value in crop
+            ):
+                raise ProjectFormatError("image crop must have four numbers")
+            x, y, width, height = crop
+            if (  # pylint: disable=too-many-boolean-expressions
+                x < 0
+                or y < 0
+                or width <= 0
+                or height <= 0
+                or x + width > 1
+                or y + height > 1
+            ):
+                raise ProjectFormatError("image crop must fit between 0 and 1")
 
     def measured_pixels_per_mm(
         self, image_width: int, image_height: int
@@ -113,6 +180,10 @@ class ImageAsset:
             "original_path": self.original_path,
             "calibration_line": self.calibration_line,
             "calibration_length_mm": self.calibration_length_mm,
+            "transformations": [
+                {"rotation": rotation, "crop": crop}
+                for rotation, crop in self.transformations
+            ],
         }
 
     @classmethod
@@ -120,6 +191,19 @@ class ImageAsset:
         """Build an image asset from validated JSON-like data."""
         if not isinstance(data, dict):
             raise ProjectFormatError("image asset must be an object")
+        transformations = data.get("transformations", [])
+        if not isinstance(transformations, list):
+            raise ProjectFormatError("image transformations must be an array")
+        parsed_transformations = []
+        for transformation in transformations:
+            if not isinstance(transformation, dict):
+                raise ProjectFormatError("image transformation must be an object")
+            crop = transformation.get("crop")
+            if not isinstance(crop, (list, tuple)):
+                raise ProjectFormatError("image crop must be an array")
+            parsed_transformations.append(
+                (transformation.get("rotation", 0.0), tuple(crop))
+            )
         return cls(
             side=_required_string(data.get("side"), "image side"),
             path=_relative_asset_path(data.get("path")),
@@ -134,6 +218,7 @@ class ImageAsset:
                 else None
             ),
             calibration_length_mm=data.get("calibration_length_mm"),
+            transformations=tuple(parsed_transformations),
         )
 
 
@@ -154,6 +239,9 @@ class Pad:  # pylint: disable=too-many-instance-attributes
     shape: str = "rect"
     rotation: float = 0.0
     function: str = ""
+    schematic_x: float | None = None
+    schematic_y: float | None = None
+    schematic_glued: bool = False
 
     def __post_init__(self) -> None:
         _required_string(self.name, "pad name")
@@ -164,6 +252,15 @@ class Pad:  # pylint: disable=too-many-instance-attributes
             _required_string(self.net, "pad net")
         if not isinstance(self.function, str):
             raise ProjectFormatError("pad function must be a string")
+        if (self.schematic_x is None) != (self.schematic_y is None):
+            raise ProjectFormatError("pad schematic position must contain x and y")
+        if self.schematic_x is not None and not all(
+            isinstance(value, (int, float))
+            for value in (self.schematic_x, self.schematic_y)
+        ):
+            raise ProjectFormatError("pad schematic coordinates must be numbers")
+        if not isinstance(self.schematic_glued, bool):
+            raise ProjectFormatError("pad schematic glued flag must be boolean")
         if (self.device_id is None) != (self.number is None):
             raise ProjectFormatError("device pad requires device_id and number")
         if self.device_id is not None:
@@ -202,6 +299,9 @@ class Pad:  # pylint: disable=too-many-instance-attributes
             "shape": self.shape,
             "rotation": self.rotation,
             "function": self.function,
+            "schematic_x": self.schematic_x,
+            "schematic_y": self.schematic_y,
+            "schematic_glued": self.schematic_glued,
         }
 
     @classmethod
@@ -223,6 +323,9 @@ class Pad:  # pylint: disable=too-many-instance-attributes
             shape=data.get("shape", "rect"),
             rotation=data.get("rotation", 0.0),
             function=data.get("function", ""),
+            schematic_x=data.get("schematic_x"),
+            schematic_y=data.get("schematic_y"),
+            schematic_glued=data.get("schematic_glued", False),
         )
 
 
@@ -309,6 +412,80 @@ class ComponentPin:
 
 
 @dataclass(frozen=True)
+class FootprintDefinition:
+    """One reusable KiCad footprint source shared by component instances."""
+
+    definition_id: str
+    library: str
+    name: str
+    path: str
+    source_revision: str
+    content_hash: str
+
+    def __post_init__(self) -> None:
+        _required_string(self.definition_id, "footprint definition id")
+        _required_string(self.library, "footprint definition library")
+        _required_string(self.name, "footprint definition name")
+        _relative_asset_path(self.path)
+        _required_string(self.source_revision, "footprint definition source_revision")
+        if len(self.content_hash) != 64 or any(
+            character not in "0123456789abcdef" for character in self.content_hash
+        ):
+            raise ProjectFormatError(
+                "footprint definition content_hash must be SHA-256"
+            )
+
+    @staticmethod
+    def identity(library: str, name: str, content: bytes) -> str:
+        """Return a stable identity including metadata and source bytes."""
+        digest = hashlib.sha256()
+        digest.update(library.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(content)
+        return f"fp-{digest.hexdigest()}"
+
+    @staticmethod
+    def hash_content(content: bytes) -> str:
+        """Return the SHA-256 digest used to validate archived source bytes."""
+        return hashlib.sha256(content).hexdigest()
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return JSON-compatible definition data."""
+        return {
+            "definition_id": self.definition_id,
+            "library": self.library,
+            "name": self.name,
+            "path": self.path,
+            "source_revision": self.source_revision,
+            "content_hash": self.content_hash,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Any) -> "FootprintDefinition":
+        """Build a footprint definition from validated JSON-like data."""
+        if not isinstance(data, dict):
+            raise ProjectFormatError("footprint definition must be an object")
+        return cls(
+            definition_id=_required_string(
+                data.get("definition_id"), "footprint definition id"
+            ),
+            library=_required_string(
+                data.get("library"), "footprint definition library"
+            ),
+            name=_required_string(data.get("name"), "footprint definition name"),
+            path=_relative_asset_path(data.get("path")),
+            source_revision=_required_string(
+                data.get("source_revision"), "footprint definition source_revision"
+            ),
+            content_hash=_required_string(
+                data.get("content_hash"), "footprint definition content_hash"
+            ),
+        )
+
+
+@dataclass(frozen=True)
 class Device:  # pylint: disable=too-many-instance-attributes
     """A KiCad component/footprint instance placed on one board-side image."""
 
@@ -327,10 +504,12 @@ class Device:  # pylint: disable=too-many-instance-attributes
     schematic_x: float | None = None
     schematic_y: float | None = None
     schematic_rotation: float = 0.0
+    schematic_glued: bool = False
     object_type: str = ""
     description: str = ""
     note: str = ""
     datasheet: str = ""
+    footprint_definition_id: str | None = None
 
     def __post_init__(self) -> None:  # pylint: disable=too-many-branches
         _required_string(self.reference, "device reference")
@@ -352,6 +531,8 @@ class Device:  # pylint: disable=too-many-instance-attributes
             raise ProjectFormatError("schematic position must be numeric")
         if not isinstance(self.schematic_rotation, (int, float)):
             raise ProjectFormatError("schematic rotation must be numeric")
+        if not isinstance(self.schematic_glued, bool):
+            raise ProjectFormatError("schematic glued flag must be boolean")
         if not isinstance(self.object_type, str):
             raise ProjectFormatError("device object type must be a string")
         if not isinstance(self.description, str):
@@ -360,6 +541,10 @@ class Device:  # pylint: disable=too-many-instance-attributes
             raise ProjectFormatError("device note must be a string")
         if not isinstance(self.datasheet, str):
             raise ProjectFormatError("device datasheet must be a string")
+        if self.footprint_definition_id is not None and not isinstance(
+            self.footprint_definition_id, str
+        ):
+            raise ProjectFormatError("device footprint_definition_id must be a string")
         if not all(isinstance(pin, ComponentPin) for pin in self.pins):
             raise ProjectFormatError("device pins must be component pin objects")
         pin_numbers = [pin.number for pin in self.pins]
@@ -387,11 +572,13 @@ class Device:  # pylint: disable=too-many-instance-attributes
             "footprint_name": self.footprint_name,
             "footprint_path": self.footprint_path,
             "source_revision": self.source_revision,
+            "footprint_definition_id": self.footprint_definition_id,
             "value": self.value,
             "pins": [pin.to_dict() for pin in self.pins],
             "schematic_x": self.schematic_x,
             "schematic_y": self.schematic_y,
             "schematic_rotation": self.schematic_rotation,
+            "schematic_glued": self.schematic_glued,
             "object_type": self.object_type,
             "description": self.description,
             "note": self.note,
@@ -439,15 +626,75 @@ class Device:  # pylint: disable=too-many-instance-attributes
             schematic_x=data.get("schematic_x"),
             schematic_y=data.get("schematic_y"),
             schematic_rotation=data.get("schematic_rotation", 0.0),
+            schematic_glued=data.get("schematic_glued", False),
             object_type=data.get("object_type", ""),
             description=data.get("description", ""),
             note=data.get("note", ""),
             datasheet=data.get("datasheet", ""),
+            footprint_definition_id=data.get("footprint_definition_id"),
         )
 
 
+def swap_two_pin_assignments(
+    device: Device, pads: list[Pad]
+) -> tuple[Device, list[Pad]]:
+    """Exchange electrical assignments for one two-pad device.
+
+    Args:
+        device: Device whose two physical terminals are being exchanged.
+        pads: Generated pads belonging to ``device``.
+
+    Returns:
+        Updated device rotated by 180 degrees and updated generated pads.
+
+    Raises:
+        ValueError: If exactly two generated pads and matching component pins
+            are not available.
+    """
+    if len(pads) != 2 or any(pad.number is None for pad in pads):
+        raise ValueError("two generated numbered pads required")
+    numbers = {pad.number for pad in pads}
+    pins = [pin for pin in device.pins if pin.number in numbers]
+    if len(pins) != 2 or {pin.number for pin in pins} != numbers:
+        raise ValueError("two matching component pins required")
+    first, second = pins
+    first_pad, second_pad = pads
+    updated_pins = [
+        (
+            replace(
+                pin,
+                pin_id=second.pin_id,
+                function=second.function,
+                net_id=second.net_id,
+            )
+            if pin.number == first.number
+            else (
+                replace(
+                    pin,
+                    pin_id=first.pin_id,
+                    function=first.function,
+                    net_id=first.net_id,
+                )
+                if pin.number == second.number
+                else pin
+            )
+        )
+        for pin in device.pins
+    ]
+    updated_pads = [
+        replace(first_pad, net=second_pad.net, function=second_pad.function),
+        replace(second_pad, net=first_pad.net, function=first_pad.function),
+    ]
+    updated_device = replace(
+        device,
+        rotation=(device.rotation + 180.0) % 360.0,
+        pins=updated_pins,
+    )
+    return updated_device, updated_pads
+
+
 @dataclass
-class DisplaySettings:
+class DisplaySettings:  # pylint: disable=too-many-instance-attributes
     """Display state restored when a project is reopened."""
 
     mode: str = "top"
@@ -455,6 +702,9 @@ class DisplaySettings:
     pan_x: float = 0.0
     pan_y: float = 0.0
     synchronized: bool = True
+    schematic_zoom: float | None = None
+    schematic_pan_x: float | None = None
+    schematic_pan_y: float | None = None
 
     def __post_init__(self) -> None:
         if self.mode not in _DISPLAY_MODES:
@@ -468,6 +718,22 @@ class DisplaySettings:
             raise ProjectFormatError("display zoom must be positive")
         if not isinstance(self.synchronized, bool):
             raise ProjectFormatError("display synchronized must be boolean")
+        schematic_values = (
+            self.schematic_zoom,
+            self.schematic_pan_x,
+            self.schematic_pan_y,
+        )
+        if any(value is not None for value in schematic_values) and any(
+            value is None for value in schematic_values
+        ):
+            raise ProjectFormatError("schematic viewport must be complete")
+        if self.schematic_zoom is not None and self.schematic_zoom <= 0:
+            raise ProjectFormatError("schematic zoom must be positive")
+        if not all(
+            value is None or isinstance(value, (int, float))
+            for value in schematic_values
+        ):
+            raise ProjectFormatError("schematic viewport must be numeric")
 
     def to_dict(self) -> dict[str, Any]:
         """Return JSON-compatible display data."""
@@ -477,6 +743,9 @@ class DisplaySettings:
             "pan_x": self.pan_x,
             "pan_y": self.pan_y,
             "synchronized": self.synchronized,
+            "schematic_zoom": self.schematic_zoom,
+            "schematic_pan_x": self.schematic_pan_x,
+            "schematic_pan_y": self.schematic_pan_y,
         }
 
     @classmethod
@@ -490,6 +759,35 @@ class DisplaySettings:
             pan_x=data.get("pan_x", 0.0),
             pan_y=data.get("pan_y", 0.0),
             synchronized=data.get("synchronized", True),
+            schematic_zoom=data.get("schematic_zoom"),
+            schematic_pan_x=data.get("schematic_pan_x"),
+            schematic_pan_y=data.get("schematic_pan_y"),
+        )
+
+
+@dataclass(frozen=True)
+class Net:
+    """Stable electrical net identity with an editable display name."""
+
+    net_id: str = field(default_factory=lambda: str(uuid4()))
+    name: str = ""
+
+    def __post_init__(self) -> None:
+        _required_string(self.net_id, "net id")
+        _required_string(self.name, "net name")
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return JSON-compatible net data."""
+        return {"net_id": self.net_id, "name": self.name}
+
+    @classmethod
+    def from_dict(cls, data: Any) -> "Net":
+        """Build a net from validated JSON-like data."""
+        if not isinstance(data, dict):
+            raise ProjectFormatError("net must be an object")
+        return cls(
+            net_id=_required_string(data.get("net_id"), "net id"),
+            name=_required_string(data.get("name"), "net name"),
         )
 
 
@@ -505,6 +803,8 @@ class ProjectDocument:  # pylint: disable=too-many-instance-attributes
     images: list[ImageAsset] = field(default_factory=list)
     pads: list[Pad] = field(default_factory=list)
     devices: list[Device] = field(default_factory=list)
+    nets: list[Net] = field(default_factory=list)
+    footprint_definitions: list[FootprintDefinition] = field(default_factory=list)
     display: DisplaySettings = field(default_factory=DisplaySettings)
     format_version: int = CURRENT_FORMAT_VERSION
 
@@ -531,6 +831,17 @@ class ProjectDocument:  # pylint: disable=too-many-instance-attributes
         device_ids = [device.device_id for device in self.devices]
         if len(set(device_ids)) != len(device_ids):
             raise ProjectFormatError("device ids must be unique")
+        definition_ids = [item.definition_id for item in self.footprint_definitions]
+        if len(set(definition_ids)) != len(definition_ids):
+            raise ProjectFormatError("footprint definition ids must be unique")
+        definitions = set(definition_ids)
+        for device in self.devices:
+            if device.footprint_definition_id is not None and (
+                device.footprint_definition_id not in definitions
+            ):
+                raise ProjectFormatError(
+                    "device references an unknown footprint definition"
+                )
         references = [device.reference for device in self.devices]
         if len(set(references)) != len(references):
             raise ProjectFormatError("device references must be unique")
@@ -541,6 +852,53 @@ class ProjectDocument:  # pylint: disable=too-many-instance-attributes
         }
         if unknown_devices:
             raise ProjectFormatError("pad references an unknown device")
+        net_names = {
+            net
+            for net in (
+                [pad.net for pad in self.pads]
+                + [pin.net_id for device in self.devices for pin in device.pins]
+            )
+            if net
+        }
+        nets_by_name: dict[str, Net] = {}
+        for net in self.nets:
+            key = net.name.casefold()
+            if key in nets_by_name:
+                raise ProjectFormatError("net names must be unique")
+            nets_by_name[key] = net
+        for name in sorted(net_names):
+            if name.casefold() not in nets_by_name:
+                generated = Net(name=name)
+                self.nets.append(generated)
+                nets_by_name[name.casefold()] = generated
+        net_ids = [net.net_id for net in self.nets]
+        if len(set(net_ids)) != len(net_ids):
+            raise ProjectFormatError("net ids must be unique")
+
+    def reassign_device_footprint(self, device_id: str, definition_id: str) -> None:
+        """Associate one device with another shared footprint definition."""
+        definition = next(
+            (
+                item
+                for item in self.footprint_definitions
+                if item.definition_id == definition_id
+            ),
+            None,
+        )
+        if definition is None:
+            raise ProjectFormatError(f"unknown footprint definition: {definition_id}")
+        for index, device in enumerate(self.devices):
+            if device.device_id == device_id:
+                self.devices[index] = replace(
+                    device,
+                    footprint_library=definition.library,
+                    footprint_name=definition.name,
+                    footprint_path=definition.path,
+                    source_revision=definition.source_revision,
+                    footprint_definition_id=definition.definition_id,
+                )
+                return
+        raise ProjectFormatError(f"unknown device: {device_id}")
 
     def to_dict(self) -> dict[str, Any]:
         """Return complete JSON-compatible project data."""
@@ -554,6 +912,10 @@ class ProjectDocument:  # pylint: disable=too-many-instance-attributes
             "images": [image.to_dict() for image in self.images],
             "pads": [pad.to_dict() for pad in self.pads],
             "devices": [device.to_dict() for device in self.devices],
+            "nets": [net.to_dict() for net in self.nets],
+            "footprint_definitions": [
+                definition.to_dict() for definition in self.footprint_definitions
+            ],
             "display": self.display.to_dict(),
         }
 
@@ -563,7 +925,7 @@ class ProjectDocument:  # pylint: disable=too-many-instance-attributes
         if not isinstance(data, dict):
             raise ProjectFormatError("project root must be an object")
         version = data.get("format_version")
-        if version != CURRENT_FORMAT_VERSION:
+        if version not in {1, CURRENT_FORMAT_VERSION}:
             raise ProjectFormatError(f"unsupported project format version: {version}")
         images = data.get("images", [])
         if not isinstance(images, list):
@@ -574,8 +936,13 @@ class ProjectDocument:  # pylint: disable=too-many-instance-attributes
         devices = data.get("devices", [])
         if not isinstance(devices, list):
             raise ProjectFormatError("devices must be an array")
+        nets = data.get("nets", [])
+        if not isinstance(nets, list):
+            raise ProjectFormatError("nets must be an array")
+        footprint_definitions = data.get("footprint_definitions", [])
+        if not isinstance(footprint_definitions, list):
+            raise ProjectFormatError("footprint_definitions must be an array")
         return cls(
-            format_version=version,
             project_id=_required_string(data.get("project_id"), "project_id"),
             project_name=_required_string(data.get("project_name"), "project_name"),
             board_name=_required_string(data.get("board_name"), "board_name"),
@@ -584,7 +951,13 @@ class ProjectDocument:  # pylint: disable=too-many-instance-attributes
             images=[ImageAsset.from_dict(image) for image in images],
             pads=_pads_from_dict(pads),
             devices=[Device.from_dict(device) for device in devices],
+            nets=[Net.from_dict(net) for net in nets],
+            footprint_definitions=[
+                FootprintDefinition.from_dict(definition)
+                for definition in footprint_definitions
+            ],
             display=DisplaySettings.from_dict(data.get("display", {})),
+            format_version=CURRENT_FORMAT_VERSION,
         )
 
 
@@ -610,20 +983,51 @@ class ProjectStore:
         """Return project metadata file path."""
         return self.path if self.is_archive else self.root / PROJECT_FILENAME
 
-    def save(self, project: ProjectDocument) -> None:
+    def save(
+        self,
+        project: ProjectDocument,
+        progress: Callable[[str, int, int], None] | None = None,
+    ) -> None:
         """Atomically write project metadata to a directory or `.revp` archive."""
         self.root.mkdir(parents=True, exist_ok=True)
         project.updated_at = _utc_now()
         if self.is_archive:
+            self._prune_unused_footprint_assets(project)
+            payload_temporary = self.project_file.with_suffix(".revp.zip.tmp")
             temporary = self.project_file.with_suffix(".revp.tmp")
-            with ZipFile(temporary, "w", compression=ZIP_DEFLATED) as archive:
-                archive.writestr(
-                    PROJECT_FILENAME,
-                    json.dumps(project.to_dict(), indent=2, sort_keys=True) + "\n",
-                )
-                for path, content in sorted(self._assets.items()):
-                    archive.writestr(path, content)
-            temporary.replace(self.project_file)
+            assets = sorted(self._assets.items())
+            total = max(1, len(assets))
+            try:
+                with ZipFile(
+                    payload_temporary, "w", compression=ZIP_DEFLATED
+                ) as archive:
+                    archive.writestr(
+                        PROJECT_FILENAME,
+                        json.dumps(project.to_dict(), indent=2, sort_keys=True) + "\n",
+                    )
+                    if progress is not None:
+                        progress("Writing project metadata", 0, total)
+                    for index, (path, content) in enumerate(assets, start=1):
+                        compression = (
+                            ZIP_STORED
+                            if path.casefold().endswith(
+                                (".png", ".jpg", ".jpeg", ".webp")
+                            )
+                            else ZIP_DEFLATED
+                        )
+                        archive.writestr(path, content, compress_type=compression)
+                        if progress is not None:
+                            progress(f"Writing {path}", index, total)
+                with (
+                    payload_temporary.open("rb") as payload,
+                    temporary.open("wb") as signed_archive,
+                ):
+                    signed_archive.write(PROJECT_ARCHIVE_HEADER)
+                    shutil.copyfileobj(payload, signed_archive)
+                temporary.replace(self.project_file)
+            finally:
+                payload_temporary.unlink(missing_ok=True)
+                temporary.unlink(missing_ok=True)
             return
         temporary = self.project_file.with_suffix(".json.tmp")
         temporary.write_text(
@@ -641,8 +1045,109 @@ class ProjectStore:
         except (OSError, UnicodeError, json.JSONDecodeError) as error:
             raise ProjectFormatError(f"cannot read project: {error}") from error
         project = ProjectDocument.from_dict(data)
+        self._migrate_footprints(project)
         self._validate_assets(project)
         return project
+
+    def register_footprint(
+        self,
+        project: ProjectDocument,
+        library: str,
+        name: str,
+        source_revision: str,
+        content: bytes,
+    ) -> FootprintDefinition:
+        """Register one shared footprint source and archive it once."""
+        content_hash = FootprintDefinition.hash_content(content)
+        definition_id = FootprintDefinition.identity(library, name, content)
+        for definition in project.footprint_definitions:
+            if definition.definition_id == definition_id:
+                if definition.content_hash != content_hash:
+                    raise ProjectFormatError(
+                        f"footprint definition hash collision: {definition_id}"
+                    )
+                self.write_asset(definition.path, content)
+                return definition
+        definition = FootprintDefinition(
+            definition_id=definition_id,
+            library=library,
+            name=name,
+            path=f"assets/kicad/{definition_id}.kicad_mod",
+            source_revision=source_revision,
+            content_hash=content_hash,
+        )
+        project.footprint_definitions.append(definition)
+        self.write_asset(definition.path, content)
+        return definition
+
+    def _migrate_footprints(self, project: ProjectDocument) -> None:
+        """Convert direct device assets to shared definitions in memory."""
+        source_definitions = list(project.footprint_definitions)
+        project.footprint_definitions = []
+        definitions: dict[str, FootprintDefinition] = {}
+        for source in source_definitions:
+            content = self.read_asset(source.path)
+            if FootprintDefinition.hash_content(content) != source.content_hash:
+                raise ProjectFormatError(f"footprint hash mismatch: {source.path}")
+            try:
+                footprint = parse_footprint(content, source.library)
+            except KiCadFormatError as error:
+                raise ProjectFormatError(
+                    f"missing or invalid footprint asset: {source.path}"
+                ) from error
+            if footprint.name != source.name:
+                raise ProjectFormatError(f"footprint name mismatch: {source.path}")
+            canonical = self.register_footprint(
+                project,
+                source.library,
+                source.name,
+                source.source_revision,
+                content,
+            )
+            definitions[source.definition_id] = canonical
+        migrated: list[Device] = []
+        for device in project.devices:
+            definition = definitions.get(device.footprint_definition_id or "")
+            if definition is None:
+                content = self.read_asset(device.footprint_path)
+                try:
+                    footprint = parse_footprint(content, device.footprint_library)
+                except KiCadFormatError as error:
+                    raise ProjectFormatError(
+                        f"missing or invalid footprint asset: {device.footprint_path}"
+                    ) from error
+                if footprint.name != device.footprint_name:
+                    raise ProjectFormatError(
+                        f"footprint name mismatch: {device.footprint_path}"
+                    )
+                definition = self.register_footprint(
+                    project,
+                    device.footprint_library,
+                    device.footprint_name,
+                    device.source_revision,
+                    content,
+                )
+                definitions[definition.definition_id] = definition
+            migrated.append(
+                replace(
+                    device,
+                    footprint_path=definition.path,
+                    footprint_definition_id=definition.definition_id,
+                )
+            )
+        project.devices = migrated
+        project.format_version = CURRENT_FORMAT_VERSION
+
+    def _prune_unused_footprint_assets(self, project: ProjectDocument) -> None:
+        """Drop obsolete per-device footprint copies from archive output."""
+        if not project.footprint_definitions:
+            return
+        paths = {definition.path for definition in project.footprint_definitions}
+        self._assets = {
+            path: content
+            for path, content in self._assets.items()
+            if not path.startswith("assets/kicad/") or path in paths
+        }
 
     def write_asset(self, relative_path: str, content: bytes) -> None:
         """Store asset bytes in the archive or project directory."""
@@ -696,12 +1201,28 @@ class ProjectStore:
                     ) from error
         for device in project.devices:
             try:
-                content = self.read_asset(device.footprint_path)
-                footprint = parse_footprint(content, device.footprint_library)
-                if footprint.name != device.footprint_name:
+                definition = next(
+                    item
+                    for item in project.footprint_definitions
+                    if item.definition_id == device.footprint_definition_id
+                )
+                if device.footprint_path != definition.path:
+                    raise ProjectFormatError("device footprint path mismatch")
+                content = self.read_asset(definition.path)
+                if FootprintDefinition.hash_content(content) != definition.content_hash:
                     raise ProjectFormatError(
-                        f"footprint name mismatch: {device.footprint_path}"
+                        f"footprint hash mismatch: {definition.path}"
                     )
+                footprint = parse_footprint(content, definition.library)
+                if footprint.name != definition.name:
+                    raise ProjectFormatError(
+                        f"footprint name mismatch: {definition.path}"
+                    )
+                if (
+                    device.footprint_library != definition.library
+                    or device.footprint_name != definition.name
+                ):
+                    raise ProjectFormatError("device footprint metadata mismatch")
             except (ProjectFormatError, KiCadFormatError) as error:
                 raise ProjectFormatError(
                     f"missing or invalid footprint asset: {device.footprint_path}"
@@ -709,13 +1230,18 @@ class ProjectStore:
 
     def _load_archive(self) -> ProjectDocument:
         try:
-            with ZipFile(self.project_file) as archive:
-                data = json.loads(archive.read(PROJECT_FILENAME).decode("utf-8"))
-                self._assets = {
-                    name: archive.read(name)
-                    for name in archive.namelist()
-                    if name.startswith("assets/") and not name.endswith("/")
-                }
+            with self.project_file.open("rb") as source:
+                offset = _archive_payload_offset(source)
+                source.seek(offset)
+                with ZipFile(source) as archive:
+                    data = json.loads(archive.read(PROJECT_FILENAME).decode("utf-8"))
+                    self._assets = {
+                        name: archive.read(name)
+                        for name in archive.namelist()
+                        if name.startswith("assets/") and not name.endswith("/")
+                    }
+        except ProjectFormatError as error:
+            raise ProjectFormatError(f"cannot read project archive: {error}") from error
         except (
             BadZipFile,
             KeyError,
@@ -725,5 +1251,6 @@ class ProjectStore:
         ) as error:
             raise ProjectFormatError(f"cannot read project archive: {error}") from error
         project = ProjectDocument.from_dict(data)
+        self._migrate_footprints(project)
         self._validate_assets(project)
         return project
