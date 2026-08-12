@@ -40,6 +40,7 @@ from tnasrevner.project import (
     ImageAsset,
     Net,
     Pad,
+    NC_NET,
     ProjectDocument,
     ProjectFormatError,
     ProjectStore,
@@ -526,6 +527,20 @@ def test_connection_session_highlights_all_selected_pads(
     window._append_connection_terminal(("pad", "three", None))
 
     assert window._trace_highlight_ids == frozenset({"one", "two", "three"})
+
+
+def test_nc_mode_shift_click_assigns_nc_without_connection(window: MainWindow) -> None:
+    """NC mode marks a board pad without creating an electrical net."""
+    window.project = ProjectDocument(
+        "Project",
+        "Board",
+        pads=[Pad("P1", "top", 0.1, 0.1, "one")],
+    )
+    window._set_nc_mode(True)
+    window._select_board_connection_pad("top", 0.11, 0.11)
+
+    assert window.project.pads[0].net == NC_NET
+    assert window._selected_net is None
 
 
 def test_selected_link_terminals_use_connection_preview_color() -> None:

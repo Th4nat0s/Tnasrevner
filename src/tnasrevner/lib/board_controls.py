@@ -272,6 +272,14 @@ class BoardControlsMixin:
         connect_button.setText("--")
         connect_button.setCheckable(True)
         self._connect_button = connect_button
+        nc_button = add_button(
+            "NC",
+            QStyle.StandardPixmap.SP_DialogCancelButton,
+            "NC mode: Shift+click pads or pins as intentionally not connected",
+            self._toggle_nc_mode,
+        )
+        nc_button.setCheckable(True)
+        self._nc_button = nc_button
         optimize_button = add_button(
             "Optimize Schematic",
             QStyle.StandardPixmap.SP_BrowserReload,
@@ -508,6 +516,8 @@ class BoardControlsMixin:
     def _set_connection_mode(self, enabled: bool) -> None:
         """Set global terminal-selection mode and cursor."""
         self._connection_mode = enabled
+        if enabled:
+            self._set_nc_mode(False)
         if not enabled:
             self._pending_connection_terminals.clear()
             self._connection_trace_pairs = None
@@ -522,6 +532,26 @@ class BoardControlsMixin:
         self._schematic_view.set_connection_mode(enabled)
         if enabled:
             self._show_connection_prompt()
+
+    def _set_nc_mode(self, enabled: bool) -> None:
+        """Enable or disable intentional non-connection annotation mode.
+
+        Args:
+            enabled: Whether Shift-click should assign ``NC``.
+        """
+        self._nc_mode = enabled
+        button = getattr(self, "_nc_button", None)
+        if button is not None:
+            button.blockSignals(True)
+            button.setChecked(enabled)
+            button.blockSignals(False)
+        if enabled:
+            self._exit_connection_mode()
+            self.statusBar().showMessage("NC mode: Shift+click pads or pins to mark NC")
+
+    def _toggle_nc_mode(self) -> None:
+        """Toggle intentional non-connection annotation mode."""
+        self._set_nc_mode(not self._nc_mode)
 
     def _show_connection_prompt(self) -> None:
         """Display the persistent guidance for Connect mode."""

@@ -117,6 +117,7 @@ from ..project import (
 from .footprints import FootprintPreview, _paint_footprint
 from .app_support import LOGGER
 from .app_config import AppConfig, DEFAULT_COLORS
+from ..project import is_nc_net
 
 
 class ImageView(
@@ -997,7 +998,7 @@ class ImageView(
             preview_pen.setCosmetic(True)
             painter.setPen(preview_pen)
             painter.drawLine(origin, cursor)
-        if self._connection_net:
+        if self._connection_net and not is_nc_net(self._connection_net):
             connected = [pad for pad in pads if pad.net == self._connection_net]
             if self._connection_trace_pairs is not None:
                 visible_ids = {
@@ -1045,9 +1046,13 @@ class ImageView(
             )
             if pad.net:
                 pad_color = (
+                    "new_connected_pad"
+                    if is_nc_net(pad.net)
+                    else (
                     "connected_pad_1"
                     if pad.device_id is not None and pad.number == "1"
                     else "connected_pad"
+                    )
                 )
             else:
                 pad_color = (
@@ -1063,12 +1068,15 @@ class ImageView(
                 )
                 or (
                     self._connection_net is not None
+                    and not is_nc_net(self._connection_net)
                     and pad.net == self._connection_net
                 )
             )
             painter.setOpacity(1.0 if highlighted else 0.45)
             if highlighted:
                 painter.setBrush(self._color("connection_preview"))
+            elif pad.net and is_nc_net(pad.net):
+                painter.setBrush(self._color("new_connected_pad"))
             pad_pen = QPen(
                 (
                     self._color("connection_line")

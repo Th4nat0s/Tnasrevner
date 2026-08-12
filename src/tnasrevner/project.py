@@ -25,6 +25,7 @@ PROJECT_ARCHIVE_MAGIC = b"REVP"
 PROJECT_ARCHIVE_HEADER = PROJECT_ARCHIVE_MAGIC + f"{CURRENT_FORMAT_VERSION:04d}".encode(
     "ascii"
 )
+NC_NET = "NC"
 _ARCHIVE_HEADER_SIZE = len(PROJECT_ARCHIVE_HEADER)
 _SIDES = frozenset({"top", "bottom"})
 _DISPLAY_MODES = frozenset(
@@ -40,6 +41,18 @@ _DISPLAY_MODES = frozenset(
     }
 )
 _PAD_SHAPES = frozenset({"rect", "circle", "oval", "roundrect", "trapezoid"})
+
+
+def is_nc_net(value: str | None) -> bool:
+    """Return whether a net value is the reserved intentional-NC annotation.
+
+    Args:
+        value: Pad or component-pin net value.
+
+    Returns:
+        ``True`` when the value is the reserved ``NC`` marker.
+    """
+    return value is not None and value.casefold() == NC_NET.casefold()
 
 
 class ProjectFormatError(ValueError):

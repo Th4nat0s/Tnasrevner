@@ -112,6 +112,7 @@ from ..project import (
     ProjectFormatError,
     ProjectStore,
     swap_two_pin_assignments,
+    NC_NET,
 )
 
 # pylint: disable=unused-import
@@ -323,6 +324,11 @@ class PadActionsMixin:
 
     def _select_board_connection_pad(self, side: str, x: float, y: float) -> None:
         """Collect one Shift-clicked board pad for the current connection group."""
+        if getattr(self, "_nc_mode", False):
+            pad = self._pad_at(side, x, y)
+            if pad is not None:
+                self._assign_pad_net(pad.pad_id, NC_NET)
+            return
         if not self._connection_mode:
             return
         pad = self._pad_at(side, x, y)

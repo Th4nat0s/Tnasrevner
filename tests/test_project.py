@@ -21,6 +21,8 @@ from tnasrevner.project import (
     ProjectDocument,
     ProjectFormatError,
     ProjectStore,
+    NC_NET,
+    is_nc_net,
     swap_two_pin_assignments,
 )
 
@@ -39,6 +41,22 @@ def test_empty_project_round_trip(tmp_path: Path) -> None:
 
     assert loaded.to_dict() == project.to_dict()
     assert store.project_file.is_file()
+
+
+def test_nc_assignment_is_reserved_and_persists(tmp_path: Path) -> None:
+    """NC survives project persistence while retaining its reserved meaning."""
+    project = ProjectDocument(
+        "Project",
+        "Board",
+        pads=[Pad("P1", "top", 0.1, 0.1, "pad-id", net=NC_NET)],
+    )
+    store = ProjectStore(tmp_path / "project")
+
+    store.save(project)
+    loaded = store.load()
+
+    assert loaded.pads[0].net == NC_NET
+    assert is_nc_net(loaded.pads[0].net)
 
 
 def test_swap_two_pin_assignments_rotates_and_exchanges_electrical_data() -> None:

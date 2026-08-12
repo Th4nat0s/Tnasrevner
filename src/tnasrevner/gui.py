@@ -167,6 +167,7 @@ class MainWindow(
         # Qt can dispatch application events while QMainWindow is initializing;
         # the event filter must therefore see a valid default immediately.
         self._connection_mode = False
+        self._nc_mode = False
         super().__init__()
         application = QApplication.instance()
         if application is not None:

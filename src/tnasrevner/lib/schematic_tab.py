@@ -109,6 +109,7 @@ from ..project import (
     ProjectDocument,
     ProjectFormatError,
     ProjectStore,
+    is_nc_net,
 )
 
 # pylint: disable=unused-import
@@ -423,7 +424,11 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
         Returns:
             Pad center and outward routing direction.
         """
-        group_key = self._net_group_key(pad.net) if pad.net else None
+        group_key = (
+            self._net_group_key(pad.net)
+            if pad.net and not is_nc_net(pad.net)
+            else None
+        )
         terminals = device_net_points.get(group_key, []) if group_key else []
         if terminals:
             if pad.schematic_x is not None:
@@ -501,6 +506,7 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
             if (
                 pad.device_id is None
                 and pad.net
+                and not is_nc_net(pad.net)
                 and pad.schematic_x is None
                 and not device_net_points.get(self._net_group_key(pad.net))
             ):
@@ -708,7 +714,11 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
         by_net: dict[str, list[str]] = {}
         for device in devices:
             for pin in device.pins:
-                if pin.net_id and self._power_net_label(pin.net_id) is None:
+                if (
+                    pin.net_id
+                    and not is_nc_net(pin.net_id)
+                    and self._power_net_label(pin.net_id) is None
+                ):
                     by_net.setdefault(pin.net_id, []).append(device.device_id)
         edges: set[tuple[str, str]] = set()
         for members in by_net.values():
@@ -733,7 +743,11 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
         by_net: dict[str, list[tuple[str, int]]] = {}
         for device in devices:
             for index, pin in enumerate(device.pins):
-                if pin.net_id and cls._power_net_label(pin.net_id) is None:
+                if (
+                    pin.net_id
+                    and not is_nc_net(pin.net_id)
+                    and cls._power_net_label(pin.net_id) is None
+                ):
                     by_net.setdefault(pin.net_id, []).append((device.device_id, index))
         connections: list[tuple[str, int, str, int]] = []
         for members in by_net.values():
@@ -1551,10 +1565,19 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
             self._terminal_hits.append(
                 (endpoint, ("pin", device.device_id, pin.number))
             )
-            if self._selected_net and pin.net_id == self._selected_net:
+            if (
+                self._selected_net
+                and not is_nc_net(self._selected_net)
+                and pin.net_id == self._selected_net
+            ):
                 painter.setPen(QPen(self._color("connection_preview"), 4))
                 painter.setBrush(self._color("connection_preview"))
                 painter.drawEllipse(endpoint, 12, 12)
+            if is_nc_net(pin.net_id):
+                painter.setPen(QPen(self._color("new_connected_pad"), 3))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawLine(endpoint - QPointF(7, 7), endpoint + QPointF(7, 7))
+                painter.drawLine(endpoint - QPointF(7, -7), endpoint + QPointF(7, -7))
             painter.setPen(QColor("#c5d2dd"))
             delta_x = endpoint.x() - center.x()
             delta_y = endpoint.y() - center.y()
@@ -1635,9 +1658,13 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
                 self._net_group_key(pin.net_id)
                 for device in devices
                 for pin in device.pins
-                if pin.net_id
+                if pin.net_id and not is_nc_net(pin.net_id)
             }
-            | {self._net_group_key(pad.net) for pad in pads if pad.net}
+            | {
+                self._net_group_key(pad.net)
+                for pad in pads
+                if pad.net and not is_nc_net(pad.net)
+            }
         )
         if not devices and not pads:
             painter.setPen(QColor("#aeb7c4"))
@@ -1675,10 +1702,19 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
             self._pad_centers[pad.pad_id] = pad_point
             painter.save()
             painter.translate(pad_point)
-            if self._selected_net and pad.net == self._selected_net:
+            if (
+                self._selected_net
+                and not is_nc_net(self._selected_net)
+                and pad.net == self._selected_net
+            ):
                 painter.setPen(QPen(self._color("connection_preview"), 4))
                 painter.setBrush(self._color("connection_preview"))
                 painter.drawEllipse(QPointF(0, 0), 12, 12)
+            if is_nc_net(pad.net):
+                painter.setPen(QPen(self._color("new_connected_pad"), 3))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawLine(QPointF(-7, -7), QPointF(7, 7))
+                painter.drawLine(QPointF(-7, 7), QPointF(7, -7))
             self._draw_schemdraw_symbol(
                 painter,
                 "pad",
@@ -1688,7 +1724,7 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
             painter.setPen(QColor("#c5d2dd"))
             painter.drawText(int(pad_point.x() + 12), int(pad_point.y() - 16), pad.name)
             self._terminal_hits.append((pad_point, ("pad", pad.pad_id, None)))
-            if pad.net:
+            if pad.net and not is_nc_net(pad.net):
                 net_points.setdefault(self._net_group_key(pad.net), []).append(
                     (pad_point, pad_outward)
                 )
@@ -1792,7 +1828,7 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
 
         orphan_y = 82 + len(devices) * 150
         for pad in pads:
-            if pad.device_id or pad.net:
+            if pad.device_id or (pad.net and not is_nc_net(pad.net)):
                 continue
             painter.setPen(QColor("#aeb7c4"))
             painter.drawText(24, orphan_y, f"Pad {pad.name} (unconnected)")

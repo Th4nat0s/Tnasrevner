@@ -110,6 +110,8 @@ from ..project import (
     ProjectDocument,
     ProjectFormatError,
     ProjectStore,
+    NC_NET,
+    is_nc_net,
 )
 
 # pylint: disable=unused-import
@@ -268,7 +270,10 @@ class ConnectionsTabMixin:
             if name
         }
         removed = {
-            name for name in candidates if len(self._logical_net_terminals(name)) < 2
+            name
+            for name in candidates
+            if not is_nc_net(name)
+            and len(self._logical_net_terminals(name)) < 2
         }
         if not removed:
             self._sync_net_registry()
@@ -345,6 +350,12 @@ class ConnectionsTabMixin:
         if net is None:
             return
         new_name = item.text().strip()
+        if is_nc_net(net.name) or is_nc_net(new_name):
+            self._nets_table.blockSignals(True)
+            item.setText(net.name)
+            self._nets_table.blockSignals(False)
+            self.statusBar().showMessage("NC is a reserved NET name", 3000)
+            return
         if not new_name or any(
             candidate.net_id != net.net_id
             and candidate.name.casefold() == new_name.casefold()
@@ -583,6 +594,9 @@ class ConnectionsTabMixin:
             return
         terminal = self._validated_terminal(value)
         if terminal is None:
+            return
+        if getattr(self, "_nc_mode", False):
+            self._assign_schematic_terminal_net(terminal, NC_NET)
             return
         if self._connection_mode:
             self._append_connection_terminal(terminal)

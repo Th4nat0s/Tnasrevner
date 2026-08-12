@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added reserved NC annotation mode for intentionally unconnected pads and pins;
+  NC remains auditable in tables but is excluded from schematic electrical routing.
 - Added an application Config tab with YAML-persisted, validated pad and connection colors.
 - Highlight active connection board pads and schematic terminals in green, distinct
   from the blue pads already assigned to a net.
