@@ -563,9 +563,14 @@ class BoardControlsMixin:
             self._pending_connection_terminals.clear()
         self._pending_connection_terminals.append(terminal)
         current_pad = self._connection_pad_id(terminal)
-        self._trace_highlight_ids = (
-            frozenset({current_pad}) if current_pad is not None else frozenset()
-        )
+        selected_pad_ids = {
+            pad_id
+            for pair in self._connection_trace_pairs or ()
+            for pad_id in pair
+        }
+        if current_pad is not None:
+            selected_pad_ids.add(current_pad)
+        self._trace_highlight_ids = frozenset(selected_pad_ids)
         self._refresh_trace_selection_highlights()
         self._show_connection_prompt()
 

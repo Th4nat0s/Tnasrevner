@@ -507,6 +507,27 @@ def test_connection_session_keeps_endpoint_filter_transient(
     assert window._trace_highlight_ids is None
 
 
+def test_connection_session_highlights_all_selected_pads(
+    window: MainWindow,
+) -> None:
+    """All pads selected during a rolling Shift-link use preview highlighting."""
+    window.project = ProjectDocument(
+        "Project",
+        "Board",
+        pads=[
+            Pad("P1", "top", 0.1, 0.1, "one"),
+            Pad("P2", "top", 0.3, 0.1, "two"),
+            Pad("P3", "top", 0.5, 0.1, "three"),
+        ],
+    )
+    window._set_connection_mode(True)
+    window._append_connection_terminal(("pad", "one", None))
+    window._append_connection_terminal(("pad", "two", None))
+    window._append_connection_terminal(("pad", "three", None))
+
+    assert window._trace_highlight_ids == frozenset({"one", "two", "three"})
+
+
 def test_info_exits_connection_mode(window: MainWindow) -> None:
     """Info button cancels Connect mode and clears its selection."""
     window.project = ProjectDocument("Project", "Board")

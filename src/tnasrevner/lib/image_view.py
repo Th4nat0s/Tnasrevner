@@ -1062,7 +1062,7 @@ class ImageView(
             )
             painter.setOpacity(1.0 if highlighted else 0.45)
             if highlighted:
-                painter.setBrush(self._color("new_connected_pad"))
+                painter.setBrush(self._color("connection_preview"))
             pad_pen = QPen(
                 (
                     self._color("connection_line")
