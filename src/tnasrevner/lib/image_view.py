@@ -1057,8 +1057,14 @@ class ImageView(
                 )
             painter.setBrush(self._color(pad_color))
             highlighted = (
-                self._connection_highlight_ids is not None
-                and pad.pad_id in self._connection_highlight_ids
+                (
+                    self._connection_highlight_ids is not None
+                    and pad.pad_id in self._connection_highlight_ids
+                )
+                or (
+                    self._connection_net is not None
+                    and pad.net == self._connection_net
+                )
             )
             painter.setOpacity(1.0 if highlighted else 0.45)
             if highlighted:

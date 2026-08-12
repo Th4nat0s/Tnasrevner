@@ -1553,7 +1553,7 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
             )
             if self._selected_net and pin.net_id == self._selected_net:
                 painter.setPen(QPen(self._color("connection_preview"), 4))
-                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.setBrush(self._color("connection_preview"))
                 painter.drawEllipse(endpoint, 12, 12)
             painter.setPen(QColor("#c5d2dd"))
             delta_x = endpoint.x() - center.x()
@@ -1677,7 +1677,7 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
             painter.translate(pad_point)
             if self._selected_net and pad.net == self._selected_net:
                 painter.setPen(QPen(self._color("connection_preview"), 4))
-                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.setBrush(self._color("connection_preview"))
                 painter.drawEllipse(QPointF(0, 0), 12, 12)
             self._draw_schemdraw_symbol(
                 painter,
