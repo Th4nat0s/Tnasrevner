@@ -1068,7 +1068,7 @@ class ImageView(
                     self._color("connection_line")
                     if pad.pad_id == self._connection_origin_id
                     else (
-                        self._color("selected_terminal")
+                        self._color("connection_preview")
                         if highlighted
                         else self._color("unconnected_pad_1")
                     )

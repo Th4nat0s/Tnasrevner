@@ -528,6 +528,19 @@ def test_connection_session_highlights_all_selected_pads(
     assert window._trace_highlight_ids == frozenset({"one", "two", "three"})
 
 
+def test_selected_link_terminals_use_connection_preview_color() -> None:
+    """Board and schematic selected terminals share the preview palette key."""
+    image_view_source = Path("src/tnasrevner/lib/image_view.py").read_text(
+        encoding="utf-8"
+    )
+    schematic_source = Path("src/tnasrevner/lib/schematic_tab.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'self._color("connection_preview")' in image_view_source
+    assert 'self._color("connection_preview"), 4' in schematic_source
+
+
 def test_info_exits_connection_mode(window: MainWindow) -> None:
     """Info button cancels Connect mode and clears its selection."""
     window.project = ProjectDocument("Project", "Board")
