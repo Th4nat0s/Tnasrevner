@@ -116,6 +116,7 @@ from ..project import (
 
 from .footprints import FootprintPreview, _paint_footprint
 from .app_support import LOGGER
+from .app_config import AppConfig, DEFAULT_COLORS
 
 
 class ImageView(
@@ -142,9 +143,10 @@ class ImageView(
     ruler_measured = Signal(float)
     pad_hovered = Signal(object)
 
-    def __init__(self, empty_text: str) -> None:
+    def __init__(self, empty_text: str, config: AppConfig | None = None) -> None:
         super().__init__()
         self._empty_text = empty_text
+        self._config = config
         self._pixmap = QPixmap()
         self._scale = 1.0
         self._zoom_revision = 0
@@ -189,6 +191,31 @@ class ImageView(
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.horizontalScrollBar().valueChanged.connect(self.view_changed)
         self.verticalScrollBar().valueChanged.connect(self.view_changed)
+
+    def set_config(self, config: AppConfig) -> None:
+        """Use updated application colors and repaint the visible image.
+
+        Args:
+            config: Shared application display configuration.
+        """
+        self._config = config
+        self._render()
+
+    def _color(self, key: str) -> QColor:
+        """Resolve a configured color with the built-in fallback.
+
+        Args:
+            key: Semantic color key.
+
+        Returns:
+            Qt color for the requested rendering state.
+        """
+        value = (
+            self._config.colors.get(key, DEFAULT_COLORS[key])
+            if self._config
+            else DEFAULT_COLORS[key]
+        )
+        return QColor(value)
 
     def set_image(self, path: Path | None) -> None:
         """Display image at its native scale, or show an empty state."""
@@ -856,7 +883,7 @@ class ImageView(
         painter.drawLine(start, end)
         if self._ruler_end is not None:
             label = f"{self._ruler_measurement_mm():.2f} mm"
-            painter.setPen(Qt.GlobalColor.white)
+            painter.setPen(self._color("connection_line"))
             painter.drawText(
                 QRectF(end.x() + 8, end.y() - 24, 150, 24),
                 Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
@@ -964,7 +991,9 @@ class ImageView(
                 self._connection_preview_cursor[0] * width,
                 self._connection_preview_cursor[1] * height,
             )
-            preview_pen = QPen(QColor("#66c2ff"), 4.0, Qt.PenStyle.DashLine)
+            preview_pen = QPen(
+                self._color("connection_preview"), 4.0, Qt.PenStyle.DashLine
+            )
             preview_pen.setCosmetic(True)
             painter.setPen(preview_pen)
             painter.drawLine(origin, cursor)
@@ -988,7 +1017,9 @@ class ImageView(
                 else next(iter(centers), None)
             )
             if origin_id is not None:
-                connection_pen = QPen(Qt.GlobalColor.white, self._CONNECTION_LINE_WIDTH)
+                connection_pen = QPen(
+                    self._color("connection_line"), self._CONNECTION_LINE_WIDTH
+                )
                 connection_pen.setCosmetic(True)
                 painter.setPen(connection_pen)
                 if self._connection_trace_pairs is not None:
@@ -1012,27 +1043,35 @@ class ImageView(
                 (pad.x + pad.width / 2) * (pixmap.width() - 1),
                 (pad.y + pad.height / 2) * (pixmap.height() - 1),
             )
-            painter.setBrush(
-                QColor("#3b82f6")
-                if pad.net
-                else (
-                    Qt.GlobalColor.yellow
+            if pad.net:
+                pad_color = (
+                    "connected_pad_1"
                     if pad.device_id is not None and pad.number == "1"
-                    else Qt.GlobalColor.red
+                    else "connected_pad"
                 )
-            )
+            else:
+                pad_color = (
+                    "unconnected_pad_1"
+                    if pad.device_id is not None and pad.number == "1"
+                    else "unconnected_pad"
+                )
+            painter.setBrush(self._color(pad_color))
             highlighted = (
                 self._connection_highlight_ids is not None
                 and pad.pad_id in self._connection_highlight_ids
             )
             painter.setOpacity(1.0 if highlighted else 0.45)
             if highlighted:
-                painter.setBrush(QColor("#00ff00"))
+                painter.setBrush(self._color("new_connected_pad"))
             pad_pen = QPen(
                 (
-                    Qt.GlobalColor.white
+                    self._color("connection_line")
                     if pad.pad_id == self._connection_origin_id
-                    else (QColor("#bbf7d0") if highlighted else Qt.GlobalColor.yellow)
+                    else (
+                        self._color("selected_terminal")
+                        if highlighted
+                        else self._color("unconnected_pad_1")
+                    )
                 ),
                 2.5
                 if pad.pad_id == self._connection_origin_id

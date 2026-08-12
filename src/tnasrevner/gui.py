@@ -140,6 +140,8 @@ from .lib.image_view import ImageView
 from .lib.pad_actions import PadActionsMixin
 from .lib.project_io import ProjectIOMixin
 from .lib.schematic_tab import SchematicCanvas, SchematicView
+from .lib.app_config import AppConfig
+from .lib.config_tab import ConfigPage
 
 
 class MainWindow(
@@ -160,6 +162,7 @@ class MainWindow(
         show_startup: bool = True,
         footprint_cache: KiCadFootprintCache | None = None,
         settings: QSettings | None = None,
+        config_path: Path | None = None,
     ) -> None:
         # Qt can dispatch application events while QMainWindow is initializing;
         # the event filter must therefore see a valid default immediately.
@@ -199,6 +202,7 @@ class MainWindow(
         self._settings = (
             settings if settings is not None else QSettings("Tnasrevner", "Tnasrevner")
         )
+        self._config = AppConfig.load(config_path or Path.cwd() / "config.yaml")
         self._footprint_cache = footprint_cache or KiCadFootprintCache(
             _application_data_directory(create=False) / "kicad-footprints"
         )
@@ -216,8 +220,8 @@ class MainWindow(
         self.setWindowTitle("Tnasrevner")
         self.resize(1100, 700)
         self._views = {
-            "top": ImageView("No top picture"),
-            "bottom": ImageView("No bottom picture"),
+            "top": ImageView("No top picture", self._config),
+            "bottom": ImageView("No bottom picture", self._config),
         }
         self._tabs = QTabWidget()
         self._tabs.addTab(self._views["top"], "Top")
@@ -225,13 +229,13 @@ class MainWindow(
         side_by_side = QWidget()
         side_layout = QHBoxLayout(side_by_side)
         self._side_views = {
-            "top": ImageView("No top picture"),
-            "bottom": ImageView("No bottom picture"),
+            "top": ImageView("No top picture", self._config),
+            "bottom": ImageView("No bottom picture", self._config),
         }
         side_layout.addWidget(self._side_views["top"])
         side_layout.addWidget(self._side_views["bottom"])
         self._tabs.addTab(side_by_side, "Top + bottom")
-        self._overlay_view = ImageView("No top/bottom images")
+        self._overlay_view = ImageView("No top/bottom images", self._config)
         self._tabs.addTab(self._overlay_view, "Both")
         self._net_table = QTableWidget(0, 6)
         self._net_table.setHorizontalHeaderLabels(
@@ -258,7 +262,7 @@ class MainWindow(
         self._bom_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._bom_table.customContextMenuRequested.connect(self._show_bom_menu)
         self._tabs.addTab(self._bom_table, "BOM")
-        self._schematic_view = SchematicView()
+        self._schematic_view = SchematicView(config=self._config)
         self._schematic_view.zoom_changed.connect(self._show_zoom_ratio)
         self._schematic_view.layout_changed.connect(self._schematic_layout_changed)
         self._schematic_view.layout_started.connect(self._schematic_layout_started)
@@ -281,6 +285,10 @@ class MainWindow(
             self._show_schematic_device_menu
         )
         self._tabs.addTab(self._schematic_view, "Schematic")
+        self._config_page = ConfigPage(self._config, self._configuration_changed)
+        self._tabs.addTab(self._config_page, "Config")
+        self._config_tab_index = self._tabs.indexOf(self._config_page)
+        self._tabs.setTabVisible(self._config_tab_index, False)
         self._last_tab_index = self._tabs.currentIndex()
         self._tabs.currentChanged.connect(self._handle_tab_changed)
         for view in (*self._views.values(), *self._side_views.values()):
@@ -365,6 +373,21 @@ class MainWindow(
         if show_startup:
             QTimer.singleShot(0, self._startup_choice)
             QTimer.singleShot(1_000, self._prefetch_footprints)
+
+    def _configuration_changed(self) -> None:
+        """Refresh every board and schematic renderer after color changes."""
+        for view in (
+            *self._views.values(),
+            *self._side_views.values(),
+            self._overlay_view,
+        ):
+            view.set_config(self._config)
+        self._schematic_view.set_config(self._config)
+
+    def _show_config(self) -> None:
+        """Open the application configuration tab."""
+        self._tabs.setTabVisible(self._config_tab_index, True)
+        self._tabs.setCurrentIndex(self._config_tab_index)
 
 
 def main() -> int:

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added an application Config tab with YAML-persisted, validated pad and connection colors.
 - Highlight active connection board pads and schematic terminals in green, distinct
   from the blue pads already assigned to a net.
 - Add Pad mode now shows a crosshair cursor on both the PCB view and image label,

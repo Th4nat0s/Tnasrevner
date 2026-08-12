@@ -7,7 +7,7 @@ name = "tnasrevner"
 version = "0.1.0"
 description = "Reverse-engineering workspace for electronic circuit boards"
 requires-python = ">=3.11"
-dependencies = ["PySide6>=6.7,<7", "schemdraw>=0.23,<1"]
+dependencies = ["PySide6>=6.7,<7", "schemdraw>=0.23,<1", "PyYAML>=6.0,<7"]
 
 [project.scripts]
 tnasrevner = "tnasrevner.gui:main"

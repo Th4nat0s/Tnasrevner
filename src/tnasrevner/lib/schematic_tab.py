@@ -114,6 +114,7 @@ from ..project import (
 # pylint: disable=unused-import
 
 from .app_support import _footprint_family, _reference_sort_key
+from .app_config import AppConfig, DEFAULT_COLORS
 from .schematic_layout import SchematicOptimizationWorker
 from .schematic_router import OrthogonalRouter
 
@@ -154,8 +155,11 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
     device_context_requested = Signal(str)
     pan_requested = Signal(int, int)
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(
+        self, parent: QWidget | None = None, config: AppConfig | None = None
+    ) -> None:
         super().__init__(parent)
+        self._config = config
         self._project: ProjectDocument | None = None
         self._project_dirty = False
         self._zoom = 1.0
@@ -183,6 +187,31 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.resize(self._logical_width, self._logical_height)
         self.setAutoFillBackground(True)
+
+    def set_config(self, config: AppConfig) -> None:
+        """Use updated application colors and repaint the schematic.
+
+        Args:
+            config: Shared application display configuration.
+        """
+        self._config = config
+        self.update()
+
+    def _color(self, key: str) -> QColor:
+        """Resolve a configured schematic color.
+
+        Args:
+            key: Semantic color key.
+
+        Returns:
+            Qt color for the requested rendering state.
+        """
+        value = (
+            self._config.colors.get(key, DEFAULT_COLORS[key])
+            if self._config
+            else DEFAULT_COLORS[key]
+        )
+        return QColor(value)
 
     def set_project(self, project: ProjectDocument | None) -> None:
         """Replace the displayed project and repaint the schematic."""
@@ -1181,8 +1210,7 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
                 label,
             )
 
-    @classmethod
-    def _net_pen(cls, selected: bool) -> QPen:
+    def _net_pen(self, selected: bool) -> QPen:
         """Build screen-width pen used for electrical net wires.
 
         Args:
@@ -1192,8 +1220,10 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
             Cosmetic pen that remains visible at overview zoom.
         """
         pen = QPen(
-            QColor("#66c2ff") if selected else QColor("#e4b363"),
-            cls._SELECTED_NET_LINE_WIDTH if selected else cls._NET_LINE_WIDTH,
+            self._color("selected_schematic_net")
+            if selected
+            else self._color("schematic_net"),
+            self._SELECTED_NET_LINE_WIDTH if selected else self._NET_LINE_WIDTH,
         )
         pen.setCosmetic(True)
         return pen
@@ -1522,7 +1552,7 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
                 (endpoint, ("pin", device.device_id, pin.number))
             )
             if self._selected_net and pin.net_id == self._selected_net:
-                painter.setPen(QPen(QColor("#bbf7d0"), 4))
+                painter.setPen(QPen(self._color("selected_terminal"), 4))
                 painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.drawEllipse(endpoint, 12, 12)
             painter.setPen(QColor("#c5d2dd"))
@@ -1646,7 +1676,7 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
             painter.save()
             painter.translate(pad_point)
             if self._selected_net and pad.net == self._selected_net:
-                painter.setPen(QPen(QColor("#bbf7d0"), 4))
+                painter.setPen(QPen(self._color("selected_terminal"), 4))
                 painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.drawEllipse(QPointF(0, 0), 12, 12)
             self._draw_schemdraw_symbol(
@@ -1662,8 +1692,8 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
                 net_points.setdefault(self._net_group_key(pad.net), []).append(
                     (pad_point, pad_outward)
                 )
-        painter.setPen(QPen(QColor("#e4b363"), 2))
-        painter.setBrush(QColor("#e4b363"))
+        painter.setPen(QPen(self._color("schematic_net"), 2))
+        painter.setBrush(self._color("schematic_net"))
         obstacles = tuple(
             self._device_bounds(device, self._device_centers[device.device_id])
             for device in devices
@@ -1676,7 +1706,11 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
                 self._net_group_key(self._selected_net)
             )
             painter.setPen(self._net_pen(selected))
-            painter.setBrush(QColor("#66c2ff") if selected else QColor("#e4b363"))
+            painter.setBrush(
+                self._color("selected_schematic_net")
+                if selected
+                else self._color("schematic_net")
+            )
             points = net_points.get(group_key, [])
             if not points:
                 continue
@@ -1746,7 +1780,9 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
             self._connection_preview_origin is not None
             and self._connection_preview_cursor is not None
         ):
-            preview_pen = QPen(QColor("#66c2ff"), 5.0, Qt.PenStyle.DashLine)
+            preview_pen = QPen(
+                self._color("connection_preview"), 5.0, Qt.PenStyle.DashLine
+            )
             preview_pen.setCosmetic(True)
             painter.setPen(preview_pen)
             painter.drawLine(
@@ -1779,10 +1815,12 @@ class SchematicView(QScrollArea):
     terminal_menu_requested = Signal(object)
     device_context_requested = Signal(str)
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(
+        self, parent: QWidget | None = None, config: AppConfig | None = None
+    ) -> None:
         super().__init__(parent)
         self._zoom = 1.0
-        self._canvas = SchematicCanvas()
+        self._canvas = SchematicCanvas(config=config)
         self._canvas.layout_changed.connect(self.layout_changed)
         self._canvas.layout_started.connect(self.layout_started)
         self._canvas.layout_finished.connect(self.layout_finished)
@@ -1812,6 +1850,14 @@ class SchematicView(QScrollArea):
     def set_project(self, project: ProjectDocument | None) -> None:
         """Set the project rendered by the schematic canvas."""
         self._canvas.set_project(project)
+
+    def set_config(self, config: AppConfig) -> None:
+        """Apply application colors to the schematic canvas.
+
+        Args:
+            config: Shared application display configuration.
+        """
+        self._canvas.set_config(config)
 
     def optimize_layout(self) -> None:
         """Run the explicit schematic layout optimization pass."""

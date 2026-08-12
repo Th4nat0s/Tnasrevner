@@ -335,6 +335,11 @@ class HistoryActionsMixin:
         quit_action = QAction("Quit", self)
         quit_action.triggered.connect(self.close)
         file_menu.addAction(quit_action)
+        application_menu = self.menuBar().addMenu("Application")
+        config_action = QAction("Configuration…", self)
+        config_action.setToolTip("Configure application display colors")
+        config_action.triggered.connect(self._show_config)
+        application_menu.addAction(config_action)
 
     def eventFilter(self, watched, event) -> bool:  # noqa: N802
         """Commit the current terminal group when Shift is released."""
