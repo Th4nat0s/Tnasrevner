@@ -371,6 +371,9 @@ class BoardControlsMixin:
             show_pads_button,
             device_button,
             pad_button,
+            info_button,
+            connect_button,
+            nc_button,
             delete_button,
         )
         self._actual_button = actual_button
