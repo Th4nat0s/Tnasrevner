@@ -239,24 +239,6 @@ class BoardControlsMixin:
             self._show_info,
         )
         self._info_button = info_button
-        config_button = add_button(
-            "Configuration",
-            QStyle.StandardPixmap.SP_FileDialogDetailedView,
-            "Configure application display colors",
-            self._show_config,
-        )
-        config_button.setIcon(
-            QIcon.fromTheme(
-                "preferences-system",
-                self.style().standardIcon(
-                    QStyle.StandardPixmap.SP_FileDialogDetailedView
-                ),
-            )
-        )
-        if config_button.icon().isNull():
-            config_button.setText("⚙")
-            config_button.setFont(QFont(".AppleSystemUIFont", 18))
-        self._config_button = config_button
         device_button = add_button(
             "Add Footprint",
             QStyle.StandardPixmap.SP_FileDialogDetailedView,
@@ -340,6 +322,24 @@ class BoardControlsMixin:
             "Show diagnostic log file path",
             self._show_log_path,
         )
+        config_button = add_button(
+            "Configuration",
+            QStyle.StandardPixmap.SP_FileDialogDetailedView,
+            "Configure application display colors",
+            self._show_config,
+        )
+        config_button.setIcon(
+            QIcon.fromTheme(
+                "preferences-system",
+                self.style().standardIcon(
+                    QStyle.StandardPixmap.SP_FileDialogDetailedView
+                ),
+            )
+        )
+        if config_button.icon().isNull():
+            config_button.setText("⚙")
+            config_button.setFont(QFont(".AppleSystemUIFont", 18))
+        self._config_button = config_button
         add_button(
             "Quit",
             QStyle.StandardPixmap.SP_DialogCloseButton,
