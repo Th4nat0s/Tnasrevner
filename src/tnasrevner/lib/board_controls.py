@@ -275,7 +275,7 @@ class BoardControlsMixin:
         nc_button = add_button(
             "NC",
             QStyle.StandardPixmap.SP_DialogCancelButton,
-            "NC mode: Shift+click pads or pins as intentionally not connected",
+            "Set Pin not connected",
             self._toggle_nc_mode,
         )
         nc_button.setCheckable(True)
