@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .app_config import AppConfig, DEFAULT_COLORS
+from .app_config import AppConfig, DEFAULT_COLORS, contrasting_text_color
 
 COLOR_LABELS = {
     "connected_pad": "Connected Pad",
@@ -70,7 +70,7 @@ class ConfigPage(QWidget):
         """
         color = self._config.colors[key]
         self._buttons[key].setText(color)
-        text_color = "black" if color.lower() in {"#ffffff", "#ffff00"} else "white"
+        text_color = contrasting_text_color(QColor(color)).name()
         self._buttons[key].setStyleSheet(
             f"background-color: {color}; color: {text_color};"
         )

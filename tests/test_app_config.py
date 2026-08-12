@@ -7,7 +7,11 @@ from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication
 
 from tnasrevner.gui import MainWindow
-from tnasrevner.lib.app_config import AppConfig, DEFAULT_COLORS
+from tnasrevner.lib.app_config import (
+    AppConfig,
+    DEFAULT_COLORS,
+    contrasting_text_color,
+)
 
 
 def test_missing_config_uses_all_defaults(tmp_path: Path) -> None:
@@ -49,6 +53,12 @@ def test_unknown_color_cannot_be_added() -> None:
     config = AppConfig(Path("config.yaml"))
 
     assert not config.set_color("unused_pad_99", "#ffffff")
+
+
+def test_contrasting_text_color_handles_light_and_dark_backgrounds() -> None:
+    """Configured pad text switches between dark and light for readability."""
+    assert contrasting_text_color(QColor("#ffffff")).name() == "#111111"
+    assert contrasting_text_color(QColor("#111111")).name() == "#ffffff"
 
 
 def test_main_window_exposes_config_page_and_loads_yaml(

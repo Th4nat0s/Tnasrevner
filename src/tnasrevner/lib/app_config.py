@@ -26,6 +26,22 @@ DEFAULT_COLORS = {
 }
 
 
+def contrasting_text_color(background: QColor) -> QColor:
+    """Return readable black or white text for a background color.
+
+    Args:
+        background: Color behind the text.
+
+    Returns:
+        Dark text for light backgrounds, or light text for dark backgrounds.
+    """
+    red = background.redF()
+    green = background.greenF()
+    blue = background.blueF()
+    luminance = 0.2126 * red + 0.7152 * green + 0.0722 * blue
+    return QColor("#111111" if luminance >= 0.55 else "#ffffff")
+
+
 def _valid_color(value: object) -> str | None:
     """Return a canonical color string, or ``None`` for invalid input.
 

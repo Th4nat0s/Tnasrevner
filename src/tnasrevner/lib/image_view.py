@@ -116,7 +116,11 @@ from ..project import (
 
 from .footprints import FootprintPreview, _paint_footprint
 from .app_support import LOGGER
-from .app_config import AppConfig, DEFAULT_COLORS
+from .app_config import (
+    AppConfig,
+    DEFAULT_COLORS,
+    contrasting_text_color,
+)
 from ..project import is_nc_net
 
 
@@ -926,11 +930,19 @@ class ImageView(
             ):
                 font.setPixelSize(font.pixelSize() - 1)
                 painter.setFont(font)
-            painter.setPen(
-                QColor(20, 20, 20)
-                if pad.device_id is not None and pad.number == "1"
-                else Qt.GlobalColor.yellow
-            )
+            if pad.net and is_nc_net(pad.net):
+                label_color = self._color("new_connected_pad")
+            elif pad.net:
+                label_color = self._color("connected_pad")
+            else:
+                label_color = self._color("unconnected_pad")
+            if (
+                self._connection_net
+                and not is_nc_net(self._connection_net)
+                and pad.net == self._connection_net
+            ):
+                label_color = self._color("connection_preview")
+            painter.setPen(contrasting_text_color(label_color))
             painter.drawText(
                 QRectF(
                     -label_width / 2,

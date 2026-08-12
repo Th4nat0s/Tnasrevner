@@ -115,7 +115,11 @@ from ..project import (
 # pylint: disable=unused-import
 
 from .app_support import _footprint_family, _reference_sort_key
-from .app_config import AppConfig, DEFAULT_COLORS
+from .app_config import (
+    AppConfig,
+    DEFAULT_COLORS,
+    contrasting_text_color,
+)
 from .schematic_layout import SchematicOptimizationWorker
 from .schematic_router import OrthogonalRouter
 
@@ -1578,7 +1582,10 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
                 painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.drawLine(endpoint - QPointF(7, 7), endpoint + QPointF(7, 7))
                 painter.drawLine(endpoint - QPointF(7, -7), endpoint + QPointF(7, -7))
-            painter.setPen(QColor("#c5d2dd"))
+            pin_color = self._color("schematic_net") if pin.net_id else QColor("#20242b")
+            if self._selected_net and pin.net_id == self._selected_net:
+                pin_color = self._color("connection_preview")
+            painter.setPen(contrasting_text_color(pin_color))
             delta_x = endpoint.x() - center.x()
             delta_y = endpoint.y() - center.y()
             if kind == "uc":
@@ -1721,7 +1728,10 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
                 [ComponentPin(pad.number or pad.name, pad.name)],
             )
             painter.restore()
-            painter.setPen(QColor("#c5d2dd"))
+            pad_color = self._color("schematic_net") if pad.net else QColor("#20242b")
+            if self._selected_net and pad.net == self._selected_net:
+                pad_color = self._color("connection_preview")
+            painter.setPen(contrasting_text_color(pad_color))
             painter.drawText(int(pad_point.x() + 12), int(pad_point.y() - 16), pad.name)
             self._terminal_hits.append((pad_point, ("pad", pad.pad_id, None)))
             if pad.net and not is_nc_net(pad.net):
