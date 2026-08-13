@@ -279,6 +279,9 @@ class BoardControlsMixin:
             self._toggle_nc_mode,
         )
         nc_button.setCheckable(True)
+        nc_button.setIcon(QIcon())
+        nc_button.setText("⛓️‍💥")
+        nc_button.setFont(QFont(".AppleSystemUIFont", 18))
         self._nc_button = nc_button
         optimize_button = add_button(
             "Optimize Schematic",
