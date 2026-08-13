@@ -40,6 +40,7 @@ from tnasrevner.lib.schematic_router import OrthogonalRouter
 from tnasrevner.project import (
     ComponentPin,
     Device,
+    FootprintDefinition,
     ImageAsset,
     Pad,
     ProjectDocument,
@@ -468,6 +469,62 @@ def test_save_as_copies_assets_switches_store_and_preserves_source(
     assert not window.save_project_as()
     assert window.store.path == target_path
     assert window._dirty
+
+
+def test_save_as_recovers_missing_footprint_from_kicad_cache(
+    window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Save As restores a missing shared footprint from the local KiCad cache."""
+    source = tmp_path / "source.revp"
+    target = tmp_path / "recovered"
+    definition = FootprintDefinition.identity("Resistor_SMD", "R_0603", FOOTPRINT)
+    window.store = ProjectStore(source)
+    window.project = ProjectDocument(
+        "Project",
+        "Board",
+        devices=[
+            Device(
+                "R1",
+                "top",
+                0.5,
+                0.5,
+                "Resistor_SMD",
+                "R_0603",
+                f"assets/kicad/{definition}.kicad_mod",
+                "a" * 40,
+                footprint_definition_id=definition,
+            )
+        ],
+        footprint_definitions=[
+            FootprintDefinition(
+                definition,
+                "Resistor_SMD",
+                "R_0603",
+                f"assets/kicad/{definition}.kicad_mod",
+                "a" * 40,
+                FootprintDefinition.hash_content(FOOTPRINT),
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        "tnasrevner.lib.project_io.QFileDialog.getSaveFileName",
+        lambda *_args: (str(target), ""),
+    )
+    monkeypatch.setattr(
+        window._footprint_cache,
+        "catalog",
+        lambda: (FootprintReference("Resistor_SMD", "R_0603", tmp_path / "R"),),
+    )
+    monkeypatch.setattr(
+        window._footprint_cache,
+        "load",
+        lambda _reference: (None, FOOTPRINT),
+    )
+
+    assert window.save_project_as()
+    assert ProjectStore(target.with_suffix(".revp")).read_asset(
+        f"assets/kicad/{definition}.kicad_mod"
+    ) == FOOTPRINT
 
 
 def test_save_as_actions_are_exposed(window: MainWindow) -> None:

@@ -103,6 +103,7 @@ from ..kicad import (
 from ..project import (
     ComponentPin,
     Device,
+    FootprintDefinition,
     ImageAsset,
     Net,
     Pad,
@@ -340,12 +341,54 @@ class ProjectIOMixin:
             for path in (image.path, image.original_path)
             if path
         }
+        for definition in self.project.footprint_definitions:
+            self._copy_footprint_asset(target, definition)
         paths.update(
-            definition.path for definition in self.project.footprint_definitions
+            device.footprint_path
+            for device in self.project.devices
+            if not any(
+                definition.definition_id == device.footprint_definition_id
+                for definition in self.project.footprint_definitions
+            )
         )
-        paths.update(device.footprint_path for device in self.project.devices)
         for path in paths:
             target.write_asset(path, self.store.read_asset(path))
+
+    def _copy_footprint_asset(
+        self, target: ProjectStore, definition: FootprintDefinition
+    ) -> None:
+        """Copy one footprint, recovering it from the KiCad cache if needed.
+
+        Args:
+            target: Destination project store.
+            definition: Project footprint definition with path, library, and name.
+
+        Raises:
+            ProjectFormatError: If the source and cache both lack the footprint.
+        """
+        if not self.store or not self.project:
+            return
+        try:
+            content = self.store.read_asset(definition.path)
+        except ProjectFormatError:
+            try:
+                reference = next(
+                    item
+                    for item in self._footprint_cache.catalog()
+                    if item.library == definition.library
+                    and item.name == definition.name
+                )
+                _footprint, content = self._footprint_cache.load(reference)
+            except (KiCadCacheError, KiCadFormatError, StopIteration) as cache_error:
+                raise ProjectFormatError(
+                    f"cannot recover footprint asset: {definition.library}:"
+                    f"{definition.name} ({definition.path})"
+                ) from cache_error
+            LOGGER.warning(
+                "Recovered missing footprint asset path=%s from KiCad cache",
+                definition.path,
+            )
+        target.write_asset(definition.path, content)
 
     def _save_to_store(self, store: ProjectStore) -> bool:
         """Write current project to one store and update UI state on success."""

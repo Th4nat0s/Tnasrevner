@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fixed Save As recovery when a device references a missing legacy KiCad footprint path.
 - Added reserved NC annotation mode for intentionally unconnected pads and pins;
   NC remains auditable in tables but is excluded from schematic electrical routing.
 - Added an application Config tab with YAML-persisted, validated pad and connection colors.
