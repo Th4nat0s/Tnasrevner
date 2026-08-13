@@ -81,6 +81,51 @@ def test_net_view_and_right_click_assignment(window: MainWindow) -> None:
 
     assert window.project.pads[0].name == "P1"
     assert window.project.pads[0].net == "GND"
+
+
+def test_connections_table_can_edit_pad_net(window: MainWindow) -> None:
+    """Editing the Connections Net cell updates the pad and NET summary."""
+    window.project = ProjectDocument(
+        "Project",
+        "Board",
+        pads=[Pad("P1", "top", 0.1, 0.1, "one")],
+    )
+    window._refresh_net_table()
+    window._net_table.item(0, 1).setText("VCC")
+
+    assert window.project.pads[0].net == "VCC"
+    assert window._dirty
+    assert window._nets_table.findItems("VCC", Qt.MatchFlag.MatchExactly)
+
+
+def test_connections_table_net_edit_syncs_generated_pin(window: MainWindow) -> None:
+    """Editing a generated pad Net cell updates its component pin."""
+    device = Device("U1", "top", 0.5, 0.5, "IC", "QFN", "assets/u1", "rev")
+    window.project = ProjectDocument(
+        "Project",
+        "Board",
+        devices=[device],
+        pads=[Pad("U1.1", "top", 0.1, 0.1, "pad", device_id=device.device_id, number="1")],
+    )
+    window._refresh_net_table()
+    window._net_table.item(0, 1).setText("DATA")
+
+    assert window.project.pads[0].net == "DATA"
+    assert window.project.devices[0].pins[0].net_id == "DATA"
+
+
+def test_connections_table_rejects_reserved_nc_edit(window: MainWindow) -> None:
+    """The Connections table directs users to the explicit NC mode."""
+    window.project = ProjectDocument(
+        "Project",
+        "Board",
+        pads=[Pad("P1", "top", 0.1, 0.1, "one")],
+    )
+    window._refresh_net_table()
+    window._net_table.item(0, 1).setText("NC")
+
+    assert window.project.pads[0].net is None
+    assert window._net_table.item(0, 1).text() == ""
     assert window._net_table.item(0, 0).text() == "P1"
     assert window._net_table.item(0, 1).text() == "GND"
     assert not window._net_table.item(0, 0).flags() & Qt.ItemFlag.ItemIsEditable

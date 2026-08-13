@@ -187,7 +187,7 @@ class ConnectionsTabMixin:
                     (5, device.value if device is not None else ""),
                 ):
                     item = QTableWidgetItem(value)
-                    if column in (1, 2, 4, 5):
+                    if column in (2, 4, 5):
                         item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                     item.setData(
                         Qt.ItemDataRole.UserRole,
@@ -200,6 +200,94 @@ class ConnectionsTabMixin:
                     self._net_table.setItem(row, column, item)
         finally:
             self._net_table.blockSignals(False)
+
+    def _edit_connection_net(self, row: int, value: str) -> None:
+        """Apply a net edit made directly in the Connections table.
+
+        Args:
+            row: Connections-table row containing the edited pad.
+            value: New net name, or empty text to clear the assignment.
+        """
+        if not self.project:
+            return
+        pad_item = self._net_table.item(row, 0)
+        if pad_item is None:
+            return
+        pad_id = pad_item.data(Qt.ItemDataRole.UserRole)
+        if not isinstance(pad_id, str):
+            return
+        pad = next((item for item in self.project.pads if item.pad_id == pad_id), None)
+        if pad is None:
+            return
+        new_net = value.strip() or None
+        if new_net and is_nc_net(new_net) and not is_nc_net(pad.net):
+            self._restore_connection_net_cell(row, pad.net)
+            self.statusBar().showMessage("Use NC mode to assign reserved NC", 3000)
+            return
+        if new_net and any(
+            candidate.name.casefold() == new_net.casefold()
+            and not is_nc_net(candidate.name)
+            for candidate in self.project.nets
+            if pad.net is None or candidate.name.casefold() != pad.net.casefold()
+        ):
+            self._restore_connection_net_cell(row, pad.net)
+            self.statusBar().showMessage("NET name already exists", 3000)
+            return
+        old_net = pad.net
+        self._assign_connection_net(pad_id, new_net)
+        if old_net != new_net:
+            self.statusBar().showMessage("Pad NET assignment updated", 2000)
+
+    def _restore_connection_net_cell(self, row: int, value: str | None) -> None:
+        """Restore a rejected Connections-table net edit.
+
+        Args:
+            row: Connections-table row to restore.
+            value: Previous net value.
+        """
+        item = self._net_table.item(row, 1)
+        if item is None:
+            return
+        self._net_table.blockSignals(True)
+        item.setText(value or "")
+        self._net_table.blockSignals(False)
+
+    def _assign_connection_net(self, pad_id: str, net: str | None) -> None:
+        """Assign a Connections-table net and synchronize generated pins.
+
+        Args:
+            pad_id: Physical pad identifier.
+            net: New net name, or ``None`` to clear it.
+        """
+        pad = next((item for item in self.project.pads if item.pad_id == pad_id), None)
+        if pad is None:
+            return
+        self.project.pads = [
+            replace(item, net=net) if item.pad_id == pad_id else item
+            for item in self.project.pads
+        ]
+        if pad.device_id and pad.number:
+            self.project.devices = [
+                (
+                    replace(
+                        device,
+                        pins=[
+                            replace(pin, net_id=net) if pin.number == pad.number else pin
+                            for pin in device.pins
+                        ],
+                    )
+                    if device.device_id == pad.device_id
+                    else device
+                )
+                for device in self.project.devices
+            ]
+        if pad.net and pad.net != net and not is_nc_net(pad.net):
+            self._cleanup_single_terminal_nets({pad.net})
+        self._dirty = True
+        current_tab = self._tabs.currentIndex()
+        self._refresh_views()
+        self._tabs.setCurrentIndex(current_tab)
+        self._update_title()
 
     def _sync_net_registry(self) -> None:
         """Keep registry entries aligned with assigned pads and pins."""
@@ -475,7 +563,7 @@ class ConnectionsTabMixin:
 
     def _net_table_cell_changed(self, row: int, column: int) -> None:
         """Persist function or net edits made in the Nets tab."""
-        if not self.project or column != 3:
+        if not self.project or column not in (1, 3):
             return
         pad_item = self._net_table.item(row, 0)
         value_item = self._net_table.item(row, column)
@@ -488,6 +576,9 @@ class ConnectionsTabMixin:
         pad = next((item for item in self.project.pads if item.pad_id == pad_id), None)
         _, device = self._component_pin_for_pad(pad) if pad else (None, None)
         if pad is None:
+            return
+        if column == 1:
+            self._edit_connection_net(row, value_item.text())
             return
         if device is None:
             self.project.pads = [
@@ -716,7 +807,7 @@ class ConnectionsTabMixin:
         menu = QMenu(self)
         connect_action = menu.addAction("Connect to net…")
         disconnect_action = menu.addAction("Disconnect")
-        disconnect_action.setEnabled(self._terminal_net(terminal) is not None)
+        disconnect_action.setEnabled(False)
         connect_action.triggered.connect(
             lambda: self._edit_schematic_terminal_net(terminal)
         )
