@@ -299,12 +299,15 @@ class BoardControlsMixin:
         delete_button.setCheckable(True)
         self._delete_button = delete_button
         layout.addStretch()
-        add_button(
+        image_button = add_button(
             "Image",
             QStyle.StandardPixmap.SP_DialogOpenButton,
             "Choose Top or Bottom image: load, resize, or remove",
             self.manage_picture,
         )
+        image_button.setIcon(QIcon())
+        image_button.setText("📷")
+        image_button.setFont(QFont(".AppleSystemUIFont", 18))
         add_button(
             "Log file",
             QStyle.StandardPixmap.SP_FileDialogInfoView,
