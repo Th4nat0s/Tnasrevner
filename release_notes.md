@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fixed saves after stale or missing KiCad footprint references by repairing them
+  from shared definitions or the local KiCad cache.
 - Fixed Save As recovery when a device references a missing legacy KiCad footprint path.
 - Added reserved NC annotation mode for intentionally unconnected pads and pins;
   NC remains auditable in tables but is excluded from schematic electrical routing.

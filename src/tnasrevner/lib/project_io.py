@@ -334,6 +334,7 @@ class ProjectIOMixin:
         """Copy archive and on-disk assets referenced by current project."""
         if not self.project or not self.store:
             return
+        self._repair_footprint_references()
         self.store.copy_pending_assets_to(target)
         paths = {
             path
@@ -353,6 +354,83 @@ class ProjectIOMixin:
         )
         for path in paths:
             target.write_asset(path, self.store.read_asset(path))
+
+    def _repair_footprint_references(self) -> None:
+        """Align device footprint references with shared project definitions.
+
+        Missing or stale device paths are repaired by matching library/name, then
+        by loading the footprint from the local KiCad cache when necessary.
+
+        Raises:
+            ProjectFormatError: If a referenced footprint cannot be recovered.
+        """
+        if not self.project or not self.store:
+            return
+        definitions = self.project.footprint_definitions
+        repaired_devices: list[Device] = []
+        for device in self.project.devices:
+            definition = next(
+                (
+                    item
+                    for item in definitions
+                    if item.definition_id == device.footprint_definition_id
+                    or (
+                        item.library == device.footprint_library
+                        and item.name == device.footprint_name
+                    )
+                ),
+                None,
+            )
+            if definition is None:
+                content = self._read_device_footprint(device)
+                definition = self.store.register_footprint(
+                    self.project,
+                    device.footprint_library,
+                    device.footprint_name,
+                    device.source_revision,
+                    content,
+                )
+                definitions = self.project.footprint_definitions
+            repaired_devices.append(
+                replace(
+                    device,
+                    footprint_path=definition.path,
+                    footprint_definition_id=definition.definition_id,
+                )
+            )
+        self.project.devices = repaired_devices
+
+    def _read_device_footprint(self, device: Device) -> bytes:
+        """Read one device footprint from the project or KiCad cache.
+
+        Args:
+            device: Device whose footprint content is required.
+
+        Returns:
+            Raw KiCad footprint bytes.
+
+        Raises:
+            ProjectFormatError: If neither project storage nor cache contains it.
+        """
+        if not self.store:
+            raise ProjectFormatError("project store is unavailable")
+        try:
+            return self.store.read_asset(device.footprint_path)
+        except ProjectFormatError as source_error:
+            try:
+                reference = next(
+                    item
+                    for item in self._footprint_cache.catalog()
+                    if item.library == device.footprint_library
+                    and item.name == device.footprint_name
+                )
+                _footprint, content = self._footprint_cache.load(reference)
+                return content
+            except (KiCadCacheError, KiCadFormatError, StopIteration) as cache_error:
+                raise ProjectFormatError(
+                    f"cannot recover footprint asset: {device.footprint_library}:"
+                    f"{device.footprint_name} ({device.footprint_path})"
+                ) from cache_error
 
     def _copy_footprint_asset(
         self, target: ProjectStore, definition: FootprintDefinition
@@ -432,6 +510,7 @@ class ProjectIOMixin:
 
         try:
             report("Preparing save", 0, 1)
+            self._repair_footprint_references()
             self._write_history_backup()
             store.save(self.project, progress=report)
         except (OSError, ProjectFormatError) as error:
