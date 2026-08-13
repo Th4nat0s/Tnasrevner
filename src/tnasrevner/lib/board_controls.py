@@ -521,9 +521,10 @@ class BoardControlsMixin:
 
     def _set_connection_mode(self, enabled: bool) -> None:
         """Set global terminal-selection mode and cursor."""
-        self._connection_mode = enabled
         if enabled:
+            self._set_delete_mode(False)
             self._set_nc_mode(False)
+        self._connection_mode = enabled
         if not enabled:
             self._pending_connection_terminals.clear()
             self._connection_trace_pairs = None
@@ -545,6 +546,9 @@ class BoardControlsMixin:
         Args:
             enabled: Whether Shift-click should assign ``NC``.
         """
+        if enabled:
+            self._set_delete_mode(False)
+            self._set_connection_mode(False)
         self._nc_mode = enabled
         button = getattr(self, "_nc_button", None)
         if button is not None:
@@ -683,6 +687,7 @@ class BoardControlsMixin:
         """Enable or disable deletion mode on every board view."""
         if enabled:
             self._exit_connection_mode()
+            self._set_nc_mode(False)
             if self._pending_pad is not None:
                 self._cancel_pad_placement()
             if self._pending_device is not None:
