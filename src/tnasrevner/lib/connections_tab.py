@@ -220,19 +220,16 @@ class ConnectionsTabMixin:
         if pad is None:
             return
         new_net = value.strip() or None
-        if new_net and is_nc_net(new_net) and not is_nc_net(pad.net):
-            self._restore_connection_net_cell(row, pad.net)
-            self.statusBar().showMessage("Use NC mode to assign reserved NC", 3000)
-            return
-        if new_net and any(
-            candidate.name.casefold() == new_net.casefold()
-            and not is_nc_net(candidate.name)
-            for candidate in self.project.nets
-            if pad.net is None or candidate.name.casefold() != pad.net.casefold()
-        ):
-            self._restore_connection_net_cell(row, pad.net)
-            self.statusBar().showMessage("NET name already exists", 3000)
-            return
+        if new_net:
+            existing = next(
+                (
+                    candidate.name
+                    for candidate in self.project.nets
+                    if candidate.name.casefold() == new_net.casefold()
+                ),
+                None,
+            )
+            new_net = NC_NET if is_nc_net(new_net) else (existing or new_net)
         old_net = pad.net
         self._assign_connection_net(pad_id, new_net)
         if old_net != new_net:

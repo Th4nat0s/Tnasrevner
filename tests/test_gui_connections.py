@@ -115,7 +115,7 @@ def test_connections_table_net_edit_syncs_generated_pin(window: MainWindow) -> N
 
 
 def test_connections_table_rejects_reserved_nc_edit(window: MainWindow) -> None:
-    """The Connections table directs users to the explicit NC mode."""
+    """The Connections table accepts the reserved NC annotation."""
     window.project = ProjectDocument(
         "Project",
         "Board",
@@ -124,8 +124,21 @@ def test_connections_table_rejects_reserved_nc_edit(window: MainWindow) -> None:
     window._refresh_net_table()
     window._net_table.item(0, 1).setText("NC")
 
-    assert window.project.pads[0].net is None
-    assert window._net_table.item(0, 1).text() == ""
+    assert window.project.pads[0].net == "NC"
+
+
+def test_connections_table_reuses_existing_net_name(window: MainWindow) -> None:
+    """Editing a pad to an existing net joins that net using its canonical name."""
+    window.project = ProjectDocument(
+        "Project",
+        "Board",
+        pads=[Pad("P1", "top", 0.1, 0.1, "one")],
+        nets=[Net(name="3V3")],
+    )
+    window._refresh_net_table()
+    window._net_table.item(0, 1).setText("3v3")
+
+    assert window.project.pads[0].net == "3V3"
     assert window._net_table.item(0, 0).text() == "P1"
     assert window._net_table.item(0, 1).text() == "GND"
     assert not window._net_table.item(0, 0).flags() & Qt.ItemFlag.ItemIsEditable
