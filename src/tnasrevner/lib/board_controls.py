@@ -524,6 +524,7 @@ class BoardControlsMixin:
         if enabled:
             self._set_delete_mode(False)
             self._set_nc_mode(False)
+            self._disable_ruler()
         self._connection_mode = enabled
         if not enabled:
             self._pending_connection_terminals.clear()
@@ -549,6 +550,7 @@ class BoardControlsMixin:
         if enabled:
             self._set_delete_mode(False)
             self._set_connection_mode(False)
+            self._disable_ruler()
         self._nc_mode = enabled
         button = getattr(self, "_nc_button", None)
         if button is not None:
@@ -688,6 +690,7 @@ class BoardControlsMixin:
         if enabled:
             self._exit_connection_mode()
             self._set_nc_mode(False)
+            self._disable_ruler()
             if self._pending_pad is not None:
                 self._cancel_pad_placement()
             if self._pending_device is not None:
@@ -749,6 +752,8 @@ class BoardControlsMixin:
         if not enabled:
             self._disable_ruler()
             return
+        self._set_delete_mode(False)
+        self._set_nc_mode(False)
         self._exit_connection_mode()
         views = self._active_views()
         scales = [self._ruler_scale_for_view(view) for view in views]
