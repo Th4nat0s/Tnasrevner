@@ -298,28 +298,6 @@ class BoardControlsMixin:
         )
         delete_button.setCheckable(True)
         self._delete_button = delete_button
-        save_button = add_button(
-            "Save",
-            QStyle.StandardPixmap.SP_DialogSaveButton,
-            "Save project",
-            self.save_project,
-        )
-        save_button.setIcon(_save_tool_icon())
-        undo_button = add_button(
-            "Undo",
-            QStyle.StandardPixmap.SP_ArrowBack,
-            "Undo the last action",
-            self.undo,
-        )
-        redo_button = add_button(
-            "Redo",
-            QStyle.StandardPixmap.SP_ArrowForward,
-            "Redo the last undone action",
-            self.redo,
-        )
-        self._undo_button = undo_button
-        self._redo_button = redo_button
-        self._update_history_buttons()
         layout.addStretch()
         add_button(
             "Image",
@@ -351,6 +329,28 @@ class BoardControlsMixin:
             config_button.setText("⚙")
             config_button.setFont(QFont(".AppleSystemUIFont", 18))
         self._config_button = config_button
+        save_button = add_button(
+            "Save",
+            QStyle.StandardPixmap.SP_DialogSaveButton,
+            "Save project",
+            self.save_project,
+        )
+        save_button.setIcon(_save_tool_icon())
+        undo_button = add_button(
+            "Undo",
+            QStyle.StandardPixmap.SP_ArrowBack,
+            "Undo the last action",
+            self.undo,
+        )
+        redo_button = add_button(
+            "Redo",
+            QStyle.StandardPixmap.SP_ArrowForward,
+            "Redo the last undone action",
+            self.redo,
+        )
+        self._undo_button = undo_button
+        self._redo_button = redo_button
+        self._update_history_buttons()
         add_button(
             "Quit",
             QStyle.StandardPixmap.SP_DialogCloseButton,
