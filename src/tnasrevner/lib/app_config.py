@@ -23,7 +23,7 @@ DEFAULT_COLORS = {
     "selected_terminal": "#bbf7d0",
     "schematic_net": "#e4b363",
     "selected_schematic_net": "#66c2ff",
-    "schematic_glued": "#f6d365",
+    "schematic_glued": "#f5a3c7",
 }
 
 

@@ -1049,11 +1049,11 @@ def test_schemdraw_cache_separates_glued_foreground(app: QApplication) -> None:
     image = QImage(400, 400, QImage.Format.Format_ARGB32)
     painter = QPainter(image)
     canvas._draw_schemdraw_symbol(painter, "resistor", pins)
-    canvas._draw_schemdraw_symbol(painter, "resistor", pins, QColor("#f6d365"))
+    canvas._draw_schemdraw_symbol(painter, "resistor", pins, QColor("#f5a3c7"))
     painter.end()
 
     normal_key = ("resistor", ("1", "2"), "#e7edf5")
-    glued_key = ("resistor", ("1", "2"), "#f6d365")
+    glued_key = ("resistor", ("1", "2"), "#f5a3c7")
     assert normal_key in canvas._schemdraw_cache
     assert glued_key in canvas._schemdraw_cache
     assert canvas._schemdraw_cache[normal_key][0] is not canvas._schemdraw_cache[
