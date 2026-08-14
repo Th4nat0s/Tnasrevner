@@ -772,6 +772,10 @@ class ConnectionsTabMixin:
             ]
         if previous_net is not None and previous_net != net:
             self._cleanup_single_terminal_nets({previous_net})
+        if is_nc_net(net):
+            self._selected_net = None
+            self._selected_schematic_terminal = None
+            self._selected_pad_id = None
         self._dirty = True
         self._schematic_view.set_project(self.project)
         self._refresh_net_table()

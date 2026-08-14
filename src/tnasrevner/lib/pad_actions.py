@@ -113,6 +113,7 @@ from ..project import (
     ProjectStore,
     swap_two_pin_assignments,
     NC_NET,
+    is_nc_net,
 )
 
 # pylint: disable=unused-import
@@ -490,7 +491,10 @@ class PadActionsMixin:
             and active_pad_id != pad_id
             and active_net not in removed_nets
         )
-        if removed_nets:
+        if is_nc_net(net):
+            self._selected_net = None
+            self._selected_pad_id = None
+        elif removed_nets:
             self._selected_net = None
             self._selected_pad_id = None
         elif keep_active_selection:
