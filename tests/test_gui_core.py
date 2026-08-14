@@ -978,7 +978,7 @@ def test_schematic_renders_all_symbol_families_with_schemdraw(
         painter.end()
         assert len(endpoints) == count
 
-    cache_key = ("uc", tuple(pin.number for pin in pins))
+    cache_key = ("uc", tuple(pin.number for pin in pins), "#e7edf5")
     cached_renderer = canvas._schemdraw_cache[cache_key][0]
     painter = QPainter(image)
     endpoints = canvas._draw_schemdraw_symbol(painter, "uc", pins)
@@ -1039,6 +1039,26 @@ def test_schemdraw_ic_anchors_touch_rendered_pins(app: QApplication) -> None:
             for candidate_x in range(x - 2, x + 3)
             for candidate_y in range(y - 2, y + 3)
         )
+
+
+def test_schemdraw_cache_separates_glued_foreground(app: QApplication) -> None:
+    """Schemdraw symbols with different glued colors use separate renderers."""
+    del app
+    canvas = SchematicCanvas()
+    pins = [ComponentPin("1", "1"), ComponentPin("2", "2")]
+    image = QImage(400, 400, QImage.Format.Format_ARGB32)
+    painter = QPainter(image)
+    canvas._draw_schemdraw_symbol(painter, "resistor", pins)
+    canvas._draw_schemdraw_symbol(painter, "resistor", pins, QColor("#f6d365"))
+    painter.end()
+
+    normal_key = ("resistor", ("1", "2"), "#e7edf5")
+    glued_key = ("resistor", ("1", "2"), "#f6d365")
+    assert normal_key in canvas._schemdraw_cache
+    assert glued_key in canvas._schemdraw_cache
+    assert canvas._schemdraw_cache[normal_key][0] is not canvas._schemdraw_cache[
+        glued_key
+    ][0]
 
 
 def test_schematic_net_wire_stays_visible_at_overview_zoom(

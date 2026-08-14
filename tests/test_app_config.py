@@ -19,6 +19,7 @@ def test_missing_config_uses_all_defaults(tmp_path: Path) -> None:
     config = AppConfig.load(tmp_path / "config.yaml")
 
     assert config.colors == DEFAULT_COLORS
+    assert "schematic_glued" in DEFAULT_COLORS
 
 
 def test_config_round_trip_preserves_colors_and_extra_values(tmp_path: Path) -> None:

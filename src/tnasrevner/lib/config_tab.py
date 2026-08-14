@@ -27,6 +27,7 @@ COLOR_LABELS = {
     "selected_terminal": "Selected Terminal",
     "schematic_net": "Schematic Net",
     "selected_schematic_net": "Selected Schematic Net",
+    "schematic_glued": "Glued Schematic Component",
 }
 
 

@@ -53,3 +53,5 @@
   complete KiCad device together with all generated pads.
 - Device placement now continues with the same footprint and the next unique
   reference until Escape, while preserving an active Top or Bottom view.
+- Added a configurable light color for glued schematic components and pads,
+  with immediate Glue/Unglue visual updates.

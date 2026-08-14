@@ -134,6 +134,7 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
     _SCHEMDRAW_UNIT_TO_SVG = 36.0
     _NET_LINE_WIDTH = 5.0
     _SELECTED_NET_LINE_WIDTH = 7.0
+    _SCHEMATIC_FOREGROUND = "#e7edf5"
     _POWER_NETS = {
         "gnd": "GND",
         "v5": "V5",
@@ -184,7 +185,7 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
         self._optimization_worker: SchematicOptimizationWorker | None = None
         self._pan_position: QPoint | None = None
         self._schemdraw_cache: dict[
-            tuple[str, tuple[str, ...]],
+            tuple[str, tuple[str, ...], str],
             tuple[QSvgRenderer, QRectF, tuple[QPointF, ...]],
         ] = {}
         self._route_cache: dict[tuple, list[QPointF]] = {}
@@ -1463,12 +1464,33 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
         ), tuple(f"tnasrevner_pin_{index}" for index in range(len(pins)))
 
     def _draw_schemdraw_symbol(
-        self, painter: QPainter, kind: str, pins: list[ComponentPin]
+        self,
+        painter: QPainter,
+        kind: str,
+        pins: list[ComponentPin],
+        foreground: QColor | None = None,
     ) -> list[QPointF]:
-        """Render one Schemdraw symbol and return its terminal endpoints."""
+        """Render one Schemdraw symbol and return its terminal endpoints.
+
+        Args:
+            painter: Painter receiving the rendered SVG symbol.
+            kind: Schemdraw symbol family to render.
+            pins: Ordered component pins used to build symbol anchors.
+            foreground: Optional symbol stroke color; defaults to the normal
+                schematic foreground.
+
+        Returns:
+            Rendered terminal endpoints in the symbol's local coordinate frame.
+        """
         from schemdraw import Drawing  # pylint: disable=import-outside-toplevel
 
-        cache_key = kind, tuple(pin.number for pin in pins)
+        symbol_color = (
+            foreground
+            if foreground is not None
+            else QColor(self._SCHEMATIC_FOREGROUND)
+        )
+        color_name = symbol_color.name()
+        cache_key = kind, tuple(pin.number for pin in pins), color_name
         cached = self._schemdraw_cache.get(cache_key)
         if cached is not None:
             renderer, target, endpoints = cached
@@ -1478,7 +1500,9 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
         element, anchor_names = self._schemdraw_symbol(kind, pins)
         drawing = Drawing(show=False, fontsize=10)
         drawing.add(element)
-        svg = drawing.get_imagedata("svg").replace(b"black", b"#e7edf5")
+        svg = drawing.get_imagedata("svg").replace(
+            b"black", color_name.encode("ascii")
+        )
         renderer = QSvgRenderer(QByteArray(svg))
         viewbox = renderer.viewBoxF()
         element_bbox = element.get_bbox()
@@ -1529,18 +1553,23 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
         """Draw one symbol and collect its connected terminal positions."""
         pins = device.pins or [ComponentPin("?", "unmapped")]
         kind = self._symbol_kind(device)
-        painter.setPen(QPen(QColor("#e7edf5"), 2))
+        foreground = (
+            self._color("schematic_glued")
+            if device.schematic_glued
+            else QColor(self._SCHEMATIC_FOREGROUND)
+        )
+        painter.setPen(QPen(foreground, 2))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.save()
         painter.translate(center)
         painter.rotate(device.schematic_rotation)
-        endpoints = self._draw_schemdraw_symbol(painter, kind, pins)
+        endpoints = self._draw_schemdraw_symbol(painter, kind, pins, foreground)
         transform = QTransform()
         transform.translate(center.x(), center.y())
         transform.rotate(device.schematic_rotation)
         endpoints = [transform.map(endpoint) for endpoint in endpoints]
         painter.restore()
-        painter.setPen(QColor("#f2f6fa"))
+        painter.setPen(foreground)
         compact_passive = kind in {"resistor", "capacitor"}
         if compact_passive:
             painter.drawText(
@@ -1709,6 +1738,12 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
             self._pad_centers[pad.pad_id] = pad_point
             painter.save()
             painter.translate(pad_point)
+            foreground = (
+                self._color("schematic_glued")
+                if pad.schematic_glued
+                else QColor(self._SCHEMATIC_FOREGROUND)
+            )
+            painter.setPen(QPen(foreground, 2))
             if (
                 self._selected_net
                 and not is_nc_net(self._selected_net)
@@ -1726,12 +1761,17 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
                 painter,
                 "pad",
                 [ComponentPin(pad.number or pad.name, pad.name)],
+                foreground,
             )
             painter.restore()
             pad_color = self._color("schematic_net") if pad.net else QColor("#20242b")
             if self._selected_net and pad.net == self._selected_net:
                 pad_color = self._color("connection_preview")
-            painter.setPen(contrasting_text_color(pad_color))
+            painter.setPen(
+                foreground
+                if pad.schematic_glued
+                else contrasting_text_color(pad_color)
+            )
             painter.drawText(int(pad_point.x() + 12), int(pad_point.y() - 16), pad.name)
             self._terminal_hits.append((pad_point, ("pad", pad.pad_id, None)))
             if pad.net and not is_nc_net(pad.net):
