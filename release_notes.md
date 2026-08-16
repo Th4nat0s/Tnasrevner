@@ -4,6 +4,8 @@
 
 - Connections view now allows direct editing of pad net assignments with pin
   synchronization and validation.
+- Added Top, Bottom, and side-by-side Top + Bottom controls to the board-photo
+  calibration editor, with validated settings saved before switching faces.
 - Fixed saves after stale or missing KiCad footprint references by repairing them
   from shared definitions or the local KiCad cache.
 - Fixed Save As recovery when a device references a missing legacy KiCad footprint path.

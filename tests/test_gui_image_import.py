@@ -131,6 +131,51 @@ def test_bottom_editor_shows_right_edge_flip_orientation_guide(
     dialog.close()
 
 
+def test_import_editor_shows_top_and_bottom_photos_together(
+    app: QApplication,
+) -> None:
+    """Top + Bottom displays the opposite board photo beside the active one."""
+    top = QImage(200, 100, QImage.Format.Format_RGB32)
+    top.fill(QColor("red"))
+    bottom = QImage(100, 200, QImage.Format.Format_RGB32)
+    bottom.fill(QColor("blue"))
+    dialog = ImageEditDialog(
+        QPixmap.fromImage(top),
+        side="top",
+        comparison_image=QPixmap.fromImage(bottom),
+    )
+    dialog.show()
+    app.processEvents()
+
+    dialog._both_sides_button.click()
+    app.processEvents()
+
+    assert dialog._comparison_panel.isVisible()
+    assert dialog._both_sides_button.isChecked()
+    assert not dialog._comparison_canvas.pixmap().isNull()
+    assert dialog._current_side_label.text() == "Top"
+    assert dialog._comparison_side_label.text() == "Bottom"
+    dialog.close()
+
+
+def test_import_editor_switches_to_other_side_after_valid_setup(
+    app: QApplication,
+) -> None:
+    """Selecting the other face accepts valid work and requests that face."""
+    image = QImage(200, 100, QImage.Format.Format_RGB32)
+    image.fill(0xFFFFFF)
+    dialog = ImageEditDialog(QPixmap.fromImage(image), side="top")
+    dialog._set_selection(QPoint(0, 0), QPoint(199, 99))
+    dialog._set_calibration_line(QPoint(10, 10), QPoint(110, 10))
+    dialog._millimeters.setValue(20)
+
+    dialog._bottom_side_button.click()
+
+    assert dialog.result() == QDialog.DialogCode.Accepted
+    assert dialog.requested_side() == "bottom"
+    dialog.close()
+
+
 def test_overlay_mirrors_bottom_pad_position_and_rotation(
     window: MainWindow,
 ) -> None:

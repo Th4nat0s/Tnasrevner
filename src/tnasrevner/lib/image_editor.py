@@ -164,6 +164,7 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
 ):
     """Rotate and crop an image before it enters a project archive."""
 
+    # pylint: disable-next=too-many-arguments,too-many-positional-arguments
     def __init__(
         self,
         image: QPixmap,
@@ -172,6 +173,7 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         load_callback: Callable[[], None] | None = None,
         original_image: QPixmap | None = None,
         side: str | None = None,
+        comparison_image: QPixmap | None = None,
     ) -> None:  # pylint: disable=too-many-locals,too-many-statements
         """Create an image calibration editor.
 
@@ -182,12 +184,19 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
             load_callback: Callback used to replace the image for this side.
             original_image: Optional uncropped source image.
             side: Board face being edited; Bottom shows the orientation guide.
+            comparison_image: Optional image from the opposite board face.
         """
         super().__init__(parent)
         self.setWindowTitle("Edit imported image")
         self.resize(1000, 700)
         self._base_image = image
         self._source = image
+        self._side = side
+        self._requested_side: str | None = None
+        self._comparison_image = (
+            QPixmap(comparison_image) if comparison_image is not None else QPixmap()
+        )
+        self._showing_both_sides = False
         self._original_image = (
             QPixmap(original_image) if original_image is not None else QPixmap()
         )
@@ -228,6 +237,12 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         self._scroll.setWidget(self._canvas)
         self._scroll.setWidgetResizable(False)
         self._scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._comparison_canvas = QLabel()
+        self._comparison_canvas.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._comparison_scroll = QScrollArea()
+        self._comparison_scroll.setWidget(self._comparison_canvas)
+        self._comparison_scroll.setWidgetResizable(False)
+        self._comparison_scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)
         calibration_button = QPushButton("Scale line")
         calibration_button.setCheckable(True)
         calibration_button.setChecked(True)
@@ -301,11 +316,7 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
             "Top-to-Bottom convention: turn the board 180° around its right edge"
         )
         guide = QPixmap(
-            str(
-                Path(__file__).parent.parent
-                / "assets"
-                / "board-right-edge-flip.png"
-            )
+            str(Path(__file__).parent.parent / "assets" / "board-right-edge-flip.png")
         )
         if side == "bottom" and not guide.isNull():
             orientation_guide.setPixmap(
@@ -319,6 +330,59 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         else:
             orientation_guide.hide()
         self._orientation_guide = orientation_guide
+        top_side_button = QPushButton("Top")
+        top_side_button.setCheckable(True)
+        top_side_button.setToolTip("Edit the Top board photo")
+        top_side_button.clicked.connect(lambda: self._select_board_side("top"))
+        bottom_side_button = QPushButton("Bottom")
+        bottom_side_button.setCheckable(True)
+        bottom_side_button.setToolTip("Edit the Bottom board photo")
+        bottom_side_button.clicked.connect(lambda: self._select_board_side("bottom"))
+        both_sides_button = QPushButton("Top + Bottom")
+        both_sides_button.setCheckable(True)
+        both_sides_button.setToolTip("Show both board photos at the same time")
+        both_sides_button.clicked.connect(self._show_both_board_sides)
+        self._top_side_button = top_side_button
+        self._bottom_side_button = bottom_side_button
+        self._both_sides_button = both_sides_button
+        side_controls = QHBoxLayout()
+        side_controls.addWidget(QLabel("Board photo"))
+        side_controls.addWidget(top_side_button)
+        side_controls.addWidget(bottom_side_button)
+        side_controls.addWidget(both_sides_button)
+        side_controls.addStretch()
+        current_side_label = QLabel()
+        current_side_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        current_side_label.setStyleSheet("font-weight: 600;")
+        comparison_side_label = QLabel()
+        comparison_side_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        comparison_side_label.setStyleSheet("font-weight: 600;")
+        self._current_side_label = current_side_label
+        self._comparison_side_label = comparison_side_label
+        current_panel = QWidget()
+        current_layout = QVBoxLayout(current_panel)
+        current_layout.setContentsMargins(0, 0, 0, 0)
+        current_layout.addWidget(current_side_label)
+        current_layout.addWidget(self._scroll)
+        comparison_panel = QWidget()
+        comparison_layout = QVBoxLayout(comparison_panel)
+        comparison_layout.setContentsMargins(0, 0, 0, 0)
+        comparison_layout.addWidget(comparison_side_label)
+        comparison_layout.addWidget(self._comparison_scroll)
+        comparison_panel.hide()
+        self._comparison_panel = comparison_panel
+        picture_layout = QHBoxLayout()
+        picture_layout.addWidget(current_panel, 1)
+        picture_layout.addWidget(comparison_panel, 1)
+        if side in {"top", "bottom"}:
+            current_side_label.setText(side.title())
+            comparison_side_label.setText("Bottom" if side == "top" else "Top")
+            top_side_button.setChecked(side == "top")
+            bottom_side_button.setChecked(side == "bottom")
+        else:
+            top_side_button.hide()
+            bottom_side_button.hide()
+            both_sides_button.hide()
         controls = QHBoxLayout()
         controls.addWidget(load_image_button)
         controls.addWidget(original_button)
@@ -347,13 +411,80 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
             )
         )
         layout.addWidget(orientation_guide)
+        layout.addLayout(side_controls)
         layout.addWidget(self._mode_hint)
-        layout.addWidget(self._scroll)
+        layout.addLayout(picture_layout, 1)
         layout.addLayout(controls)
         self.showMaximized()
         self._render()
         QTimer.singleShot(0, self._render)
         self._set_edit_mode("calibration")
+
+    def _set_side_button_state(self, mode: str) -> None:
+        """Keep the board-photo view buttons mutually exclusive."""
+        buttons = {
+            "top": self._top_side_button,
+            "bottom": self._bottom_side_button,
+            "both": self._both_sides_button,
+        }
+        for name, button in buttons.items():
+            button.setChecked(name == mode)
+
+    def _select_board_side(self, side: str) -> None:
+        """Save the current calibration before opening another board face."""
+        if side == self._side:
+            self._showing_both_sides = False
+            self._comparison_panel.hide()
+            self._set_side_button_state(side)
+            self._render()
+            return
+        if self._side not in {"top", "bottom"}:
+            return
+        if not self._buttons.button(QDialogButtonBox.StandardButton.Ok).isEnabled():
+            self._mode_hint.setText(
+                "Complete the scale and crop before switching board side."
+            )
+            self._mode_hint.setStyleSheet("color: #ff8a80; font-weight: 600;")
+            self._set_side_button_state(self._side)
+            return
+        self._requested_side = side
+        self.accept()
+
+    def _show_both_board_sides(self) -> None:
+        """Show the active photo and the opposite face side by side."""
+        if self._side not in {"top", "bottom"}:
+            return
+        self._showing_both_sides = True
+        self._comparison_panel.show()
+        self._set_side_button_state("both")
+        self._render()
+        QTimer.singleShot(0, self._render)
+
+    def requested_side(self) -> str | None:
+        """Return the face requested through the Top or Bottom button."""
+        return self._requested_side
+
+    def _render_comparison(self) -> None:
+        """Fit the opposite board image in its read-only comparison panel."""
+        if not self._showing_both_sides:
+            return
+        if self._comparison_image.isNull():
+            other_side = "Bottom" if self._side == "top" else "Top"
+            self._comparison_canvas.setPixmap(QPixmap())
+            self._comparison_canvas.setText(f"No {other_side} picture")
+            self._comparison_canvas.adjustSize()
+            return
+        self._comparison_canvas.setText("")
+        available = self._comparison_scroll.maximumViewportSize()
+        if available.width() < 2 or available.height() < 2:
+            available = self._comparison_image.size()
+        displayed = self._comparison_image.scaled(
+            available,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self._comparison_canvas.setPixmap(displayed)
+        self._comparison_canvas.resize(displayed.size())
 
     def _close_for_image_action(self, callback: Callable[[], None]) -> None:
         """Close editor before changing its project-side image."""
@@ -1014,6 +1145,7 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         if self._selection is not None:
             self._rubber_band.show()
         self._restore_selection(selection_ratio)
+        self._render_comparison()
 
     def _set_selection(self, start: QPoint, end: QPoint) -> None:
         """Update selection rectangle constrained to displayed image."""

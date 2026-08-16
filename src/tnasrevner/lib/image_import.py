@@ -236,6 +236,7 @@ class ImageImportMixin:
         self._dirty = True
         self._refresh_views()
         self._update_title()
+        self._continue_picture_setup()
 
     def remove_picture(self, side: str | None = None) -> None:
         """Remove selected Top or Bottom image after explicit side choice."""
@@ -344,6 +345,7 @@ class ImageImportMixin:
         self._dirty = True
         self._refresh_views()
         self._update_title()
+        self._continue_picture_setup()
 
     def _rotate_image_side_geometry(self, side: str, angle: float) -> None:
         """Rotate existing board geometry for quarter-turn image edits."""
@@ -433,6 +435,14 @@ class ImageImportMixin:
         | None
     ):
         """Open editor and return image plus scale, or `None` on cancel."""
+        self._next_picture_side = None
+        comparison_image = QPixmap()
+        if side in {"top", "bottom"}:
+            other_side = "bottom" if side == "top" else "top"
+            try:
+                comparison_image = self._base_pixmap_for_asset(other_side)
+            except ProjectFormatError:
+                comparison_image = QPixmap()
         dialog = ImageEditDialog(
             image,
             self,
@@ -440,6 +450,7 @@ class ImageImportMixin:
             load_callback=(lambda: self.import_picture(side)) if side else None,
             original_image=original_image,
             side=side,
+            comparison_image=comparison_image,
         )
         if pixels_per_mm is not None:
             dialog.prepare_existing_image(
@@ -447,6 +458,7 @@ class ImageImportMixin:
             )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return None
+        self._next_picture_side = dialog.requested_side()
         return (
             dialog.result_pixmap(),
             dialog.pixels_per_mm(),
@@ -455,6 +467,23 @@ class ImageImportMixin:
             dialog.transformation(),
             dialog.started_from_original(),
         )
+
+    def _continue_picture_setup(self) -> None:
+        """Open a face selected from the image editor after saving this one."""
+        side = getattr(self, "_next_picture_side", None)
+        self._next_picture_side = None
+        if side not in {"top", "bottom"}:
+            return
+        QTimer.singleShot(0, lambda requested=side: self._open_picture_side(requested))
+
+    def _open_picture_side(self, side: str) -> None:
+        """Edit an existing face or import it when it has no photo yet."""
+        if not self.project or not self.store:
+            return
+        if any(image.side == side for image in self.project.images):
+            self.edit_picture(side)
+        else:
+            self.import_picture(side)
 
     @staticmethod
     def _pixmap_bytes(image: QPixmap) -> bytes:
