@@ -663,7 +663,8 @@ class FootprintActionsMixin:
             self._refresh_views()
             restore_deferred = True
         else:
-            self._refresh_device_side(side)
+            for affected_side in dict.fromkeys(pad.side for pad in generated):
+                self._refresh_device_side(affected_side)
             restore_deferred = False
         self._tabs.setCurrentIndex(view_context[0])
         if restore_deferred:

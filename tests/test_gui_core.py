@@ -762,6 +762,14 @@ def test_add_through_hole_device_creates_opposite_face_pads(
         "J1.2",
         "J1.2.bottom",
     ]
+    assert [pad.name for pad in window._views["bottom"]._pad_labels] == [
+        "J1.1.bottom",
+        "J1.2.bottom",
+    ]
+    assert [pad.name for pad in window._side_views["bottom"]._pad_labels] == [
+        "J1.1.bottom",
+        "J1.2.bottom",
+    ]
     window._cancel_device_placement()
 
 
