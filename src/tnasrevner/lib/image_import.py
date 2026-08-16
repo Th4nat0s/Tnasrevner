@@ -99,6 +99,7 @@ from ..kicad import (
     KiCadFormatError,
     place_footprint_pads,
     parse_footprint,
+    generated_pad_name,
 )
 from ..project import (
     ComponentPin,
@@ -712,18 +713,18 @@ class ImageImportMixin:
                 )
                 continue
             existing = {
-                pad.number: pad
+                (pad.number, pad.side): pad
                 for pad in self.project.pads
                 if pad.device_id == device.device_id and pad.number is not None
             }
             rebuilt = []
             for placed in placed_pads:
-                previous = existing.get(placed.number)
+                previous = existing.get((placed.number, placed.side))
                 if previous is None:
                     rebuilt.append(
                         Pad(
-                            f"{device.reference}.{placed.number}",
-                            side,
+                            generated_pad_name(device.reference, side, placed),
+                            placed.side,
                             placed.x,
                             placed.y,
                             width=placed.width,
@@ -738,7 +739,7 @@ class ImageImportMixin:
                     rebuilt.append(
                         replace(
                             previous,
-                            side=side,
+                            side=placed.side,
                             x=placed.x,
                             y=placed.y,
                             width=placed.width,

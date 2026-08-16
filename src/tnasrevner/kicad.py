@@ -63,8 +63,8 @@ class FootprintReference:
         return f"{self.library}:{self.name}"
 
 
-@dataclass(frozen=True)
-class FootprintPad:
+@dataclass(frozen=True)  # pylint: disable=too-many-instance-attributes
+class FootprintPad:  # pylint: disable=too-many-instance-attributes
     """Named physical pad geometry in footprint-local millimeters."""
 
     number: str
@@ -74,6 +74,7 @@ class FootprintPad:
     height: float
     shape: str
     rotation: float = 0.0
+    pad_type: str = "smd"
 
 
 @dataclass(frozen=True)
@@ -176,8 +177,8 @@ class Footprint:
         return max(x_values) - min(x_values), max(y_values) - min(y_values)
 
 
-@dataclass(frozen=True)
-class PlacedFootprintPad:
+@dataclass(frozen=True)  # pylint: disable=too-many-instance-attributes
+class PlacedFootprintPad:  # pylint: disable=too-many-instance-attributes
     """One logical KiCad pad transformed into normalized image coordinates."""
 
     number: str
@@ -187,6 +188,25 @@ class PlacedFootprintPad:
     height: float
     shape: str
     rotation: float
+    side: str = "top"
+
+
+def generated_pad_name(
+    reference: str, device_side: str, placed: PlacedFootprintPad
+) -> str:
+    """Return a stable name for one physical representation of a device pad.
+
+    Args:
+        reference: Device reference designator.
+        device_side: Face where the device is placed.
+        placed: Transformed physical pad representation.
+
+    Returns:
+        Base pad name for the device face, or a face-qualified name for an
+        opposite-side through-hole representation.
+    """
+    base_name = f"{reference}.{placed.number}"
+    return base_name if placed.side == device_side else f"{base_name}.{placed.side}"
 
 
 @dataclass(frozen=True)
@@ -490,7 +510,7 @@ def place_footprint_pads(  # pylint: disable=too-many-locals,too-many-arguments,
         raise KiCadFormatError("A calibrated image is required for device placement.")
     angle = math.radians(rotation)
     cosine, sine = math.cos(angle), math.sin(angle)
-    grouped: dict[str, list[PlacedFootprintPad]] = {}
+    grouped: dict[tuple[str, str], list[PlacedFootprintPad]] = {}
     for pad in footprint.pads:
         # CMS board images are supplied looking from the component side for
         # both faces, so Bottom uses the same top-view footprint coordinates.
@@ -511,12 +531,28 @@ def place_footprint_pads(  # pylint: disable=too-many-locals,too-many-arguments,
             height,
             pad.shape,
             pad_rotation,
+            side,
         )
         if not _placed_pad_fits(placed):
             raise KiCadFormatError("Footprint pads must fit inside the image.")
-        grouped.setdefault(pad.number, []).append(placed)
+        grouped.setdefault((pad.number, side), []).append(placed)
+        if pad.pad_type == "thru_hole":
+            opposite_side = "bottom" if side == "top" else "top"
+            mirrored = PlacedFootprintPad(
+                pad.number,
+                1.0 - placed.x - placed.width,
+                placed.y,
+                placed.width,
+                placed.height,
+                placed.shape,
+                (-placed.rotation) % 360.0,
+                opposite_side,
+            )
+            if not _placed_pad_fits(mirrored):
+                raise KiCadFormatError("Footprint pads must fit inside the image.")
+            grouped.setdefault((pad.number, opposite_side), []).append(mirrored)
     result = []
-    for number, pads in grouped.items():
+    for (number, pad_side), pads in grouped.items():
         if len(pads) == 1:
             result.append(pads[0])
             continue
@@ -534,6 +570,7 @@ def place_footprint_pads(  # pylint: disable=too-many-locals,too-many-arguments,
                 bottom - top,
                 "rect",
                 0.0,
+                pad_side,
             )
         )
     return tuple(result)
@@ -688,6 +725,7 @@ def _parse_pad(node: list[Any]) -> tuple[FootprintPad, ...]:
     """Return physical shapes belonging to one KiCad electrical pad."""
     if len(node) < 4 or not all(isinstance(node[index], str) for index in range(1, 4)):
         raise KiCadFormatError("Footprint pad header is invalid.")
+    pad_type = node[2]
     shape = node[3]
     if shape not in _SUPPORTED_PAD_SHAPES and shape != "custom":
         raise KiCadFormatError(f"Unsupported KiCad pad shape: {shape}")
@@ -704,23 +742,29 @@ def _parse_pad(node: list[Any]) -> tuple[FootprintPad, ...]:
             position,
             size,
             rotation,
+            pad_type,
         )
-    return (FootprintPad(node[1].strip(), *position, *size, shape, rotation),)
+    return (
+        FootprintPad(
+            node[1].strip(), *position, *size, shape, rotation, pad_type
+        ),
+    )
 
 
-def _parse_custom_pad(
+def _parse_custom_pad(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     node: list[Any],
     number: str,
     position: tuple[float, float],
     size: tuple[float, float],
     rotation: float,
+    pad_type: str,
 ) -> tuple[FootprintPad, ...]:
     """Return custom pad anchor plus polygon primitives as physical shapes."""
     options = _child(node, "options")
     anchor = _child(options, "anchor") if options else None
     anchor_shape = "circle" if anchor and anchor[1:] == ["circle"] else "rect"
     shapes = [
-        FootprintPad(number, *position, *size, anchor_shape, rotation),
+        FootprintPad(number, *position, *size, anchor_shape, rotation, pad_type),
     ]
     primitives = _child(node, "primitives")
     if primitives is not None:
@@ -733,15 +777,18 @@ def _parse_custom_pad(
                 for point in _children(point_list, "xy")
             ]
             if points:
-                shapes.append(_custom_polygon_pad(number, position, rotation, points))
+                shapes.append(
+                    _custom_polygon_pad(number, position, rotation, points, pad_type)
+                )
     return tuple(shapes)
 
 
-def _custom_polygon_pad(
+def _custom_polygon_pad(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     number: str,
     position: tuple[float, float],
     rotation: float,
     points: list[tuple[float, float]],
+    pad_type: str,
 ) -> FootprintPad:
     """Approximate one custom polygon primitive with its local bounding box."""
     min_x = min(point[0] for point in points)
@@ -760,6 +807,7 @@ def _custom_polygon_pad(
         max_y - min_y,
         "rect",
         rotation,
+        pad_type,
     )
 
 

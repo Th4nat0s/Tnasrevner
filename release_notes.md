@@ -55,3 +55,5 @@
   reference until Escape, while preserving an active Top or Bottom view.
 - Added a configurable light color for glued schematic components and pads,
   with immediate Glue/Unglue visual updates.
+- Through-hole KiCad footprints now create mirrored physical pad representations
+  on both board faces while preserving one logical pin per pad number.

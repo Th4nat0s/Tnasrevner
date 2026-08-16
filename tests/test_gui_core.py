@@ -54,6 +54,12 @@ FOOTPRINT = b"""(footprint "R_0603"
     (stroke (width 0.15) (type default)) (fill none) (layer "F.SilkS"))
   (pad "1" smd rect (at -0.8 0) (size 1 1) (layers "F.Cu"))
   (pad "2" smd rect (at 0.8 0) (size 1 1) (layers "F.Cu")))"""
+THT_FOOTPRINT = b"""(footprint "DIP-2"
+  (version 20240108) (generator test) (layer "F.Cu")
+  (pad "1" thru_hole circle (at -1 0) (size 1.6 1.6)
+    (drill 0.8) (layers "*.Cu" "*.Mask"))
+  (pad "2" thru_hole oval (at 1 0) (size 1.8 1.4)
+    (drill oval 0.8 1.0) (layers "*.Cu" "*.Mask")))"""
 
 
 @pytest.fixture(scope="module")
@@ -710,6 +716,53 @@ def test_add_device_rotates_and_creates_named_footprint_pads(
         button.toolTip() == "Add Component"
         for button in window._tools_dock.widget().findChildren(QPushButton)
     )
+
+
+def test_add_through_hole_device_creates_opposite_face_pads(
+    window: MainWindow, tmp_path: Path
+) -> None:
+    """A placed THT device exposes each physical pad on both board faces."""
+    window.store = ProjectStore(tmp_path / "board.revp")
+    window.project = ProjectDocument("Project", "Board")
+    image = QImage(200, 200, QImage.Format.Format_RGB32)
+    image.fill(0xFFFFFF)
+    window.store.write_asset(
+        "assets/top.png", window._pixmap_bytes(QPixmap.fromImage(image))
+    )
+    window.project.images.append(
+        ImageAsset(
+            "top",
+            "assets/top.png",
+            "top.png",
+            pixels_per_mm=1,
+            calibration_line=(0.0, 0.5, 1.0, 0.5),
+            calibration_length_mm=20,
+        )
+    )
+    window._refresh_views()
+    source = FootprintReference(
+        "Connector_Generic", "DIP-2", tmp_path / "DIP-2.kicad_mod"
+    )
+    footprint = parse_footprint(THT_FOOTPRINT, source.library)
+
+    window._begin_device_placement("J1", source, footprint, THT_FOOTPRINT, "a" * 40)
+    window._place_device("top", 0.5, 0.5)
+
+    assert len(window.project.devices) == 1
+    assert [pin.number for pin in window.project.devices[0].pins] == ["1", "2"]
+    assert [(pad.number, pad.side) for pad in window.project.pads] == [
+        ("1", "top"),
+        ("1", "bottom"),
+        ("2", "top"),
+        ("2", "bottom"),
+    ]
+    assert [pad.name for pad in window.project.pads] == [
+        "J1.1",
+        "J1.1.bottom",
+        "J1.2",
+        "J1.2.bottom",
+    ]
+    window._cancel_device_placement()
 
 
 def test_add_device_keeps_current_single_side_view(

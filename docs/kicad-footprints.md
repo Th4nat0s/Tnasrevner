@@ -56,6 +56,11 @@ preview, outline, and pads remain at 1:1 physical scale through FIT and zoom cha
 The measurement field accepts either `30.5` or `30,5`. Legacy images that do not
 contain both measurement values must be recalibrated once through **Edit image**.
 
+Through-hole (`thru_hole`) pads are physical terminals on both board faces. When a
+THT footprint is placed, Tna’’Srevn’Er creates a face-qualified opposite-side pad
+representation while keeping one logical component pin and net assignment. SMD
+pads remain on their declared placement face only.
+
 The first implementation accepts standard rectangular, circular, oval, rounded
 rectangle, and trapezoid pads. Unsupported custom pad shapes and malformed files are
 rejected without modifying the project.

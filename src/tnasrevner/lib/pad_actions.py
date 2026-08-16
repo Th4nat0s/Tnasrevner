@@ -454,7 +454,14 @@ class PadActionsMixin:
         active_pad_id = self._selected_pad_id
         net = value.strip() or None
         self.project.pads = [
-            replace(item, net=net) if item.pad_id == pad_id else item
+            replace(item, net=net)
+            if item.pad_id == pad_id
+            or (
+                pad.device_id is not None
+                and item.device_id == pad.device_id
+                and item.number == pad.number
+            )
+            else item
             for item in self.project.pads
         ]
         changed_pad = next(

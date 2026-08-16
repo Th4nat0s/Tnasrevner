@@ -47,6 +47,12 @@ CUSTOM_PAD_FOOTPRINT = b"""(footprint "SOT-89-3"
         (width 0) (fill yes))))
   (pad "3" smd roundrect (at -1.95 1.5) (size 1.3 0.9)
     (layers "F.Cu" "F.Paste" "F.Mask")))"""
+THT_FOOTPRINT = b"""(footprint "DIP-2"
+  (version 20240108) (generator test) (layer "F.Cu")
+  (pad "1" thru_hole circle (at -1 0) (size 1.6 1.6)
+    (drill 0.8) (layers "*.Cu" "*.Mask"))
+  (pad "2" thru_hole oval (at 1 0 30) (size 1.8 1.4)
+    (drill oval 0.8 1.0) (layers "*.Cu" "*.Mask")))"""
 
 
 def _archive(content: bytes = FOOTPRINT, unsafe: bool = False) -> bytes:
@@ -109,6 +115,29 @@ def test_place_footprint_rotates_without_bottom_mirroring() -> None:
     assert rotated[0].y < 0.5 < rotated[1].y
     assert bottom[0].x < 0.5 < bottom[1].x
     assert [pad.number for pad in rotated] == ["1", "2"]
+
+
+def test_through_hole_pads_are_created_on_both_mirrored_faces() -> None:
+    """THT pads are duplicated on the opposite face without duplicating pins."""
+    footprint = parse_footprint(THT_FOOTPRINT, "Connector_Generic")
+
+    assert {pad.pad_type for pad in footprint.pads} == {"thru_hole"}
+    placed = place_footprint_pads(footprint, "top", 0.5, 0.5, 0, 100, 100, 10)
+
+    assert [(pad.number, pad.side) for pad in placed] == [
+        ("1", "top"),
+        ("1", "bottom"),
+        ("2", "top"),
+        ("2", "bottom"),
+    ]
+    for index in (0, 2):
+        pad = placed[index]
+        opposite = placed[index + 1]
+        assert opposite.x == pytest.approx(1.0 - pad.x - pad.width)
+        assert opposite.y == pytest.approx(pad.y)
+        assert opposite.width == pytest.approx(pad.width)
+        assert opposite.height == pytest.approx(pad.height)
+        assert opposite.rotation == pytest.approx((-pad.rotation) % 360.0)
 
 
 def test_parse_custom_polygon_pad_as_physical_bounding_geometry() -> None:

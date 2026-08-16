@@ -260,7 +260,14 @@ class ConnectionsTabMixin:
         if pad is None:
             return
         self.project.pads = [
-            replace(item, net=net) if item.pad_id == pad_id else item
+            replace(item, net=net)
+            if item.pad_id == pad_id
+            or (
+                pad.device_id is not None
+                and item.device_id == pad.device_id
+                and item.number == pad.number
+            )
+            else item
             for item in self.project.pads
         ]
         if pad.device_id and pad.number:

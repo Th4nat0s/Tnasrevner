@@ -100,6 +100,7 @@ from ..kicad import (
     KiCadFormatError,
     place_footprint_pads,
     parse_footprint,
+    generated_pad_name,
 )
 from ..project import (
     ComponentPin,
@@ -614,17 +615,17 @@ class FootprintActionsMixin:
                 object_type=_footprint_family(pending.footprint.library),
                 pins=[
                     ComponentPin(
-                        number=placed.number,
-                        pin_id=placed.number,
-                        footprint_pad=placed.number,
+                        number=number,
+                        pin_id=number,
+                        footprint_pad=number,
                     )
-                    for placed in placed_pads
+                    for number in dict.fromkeys(placed.number for placed in placed_pads)
                 ],
             )
             generated = [
                 Pad(
-                    f"{pending.reference}.{placed.number}",
-                    side,
+                    generated_pad_name(pending.reference, side, placed),
+                    placed.side,
                     placed.x,
                     placed.y,
                     width=placed.width,
