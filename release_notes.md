@@ -57,3 +57,5 @@
   with immediate Glue/Unglue visual updates.
 - Through-hole KiCad footprints now create mirrored physical pad representations
   on both board faces while preserving one logical pin per pad number.
+- Bottom-image calibration now shows the right-edge 180° flip convention, shared
+  by THT mirroring and the corrected Top-oriented overlay rendering.

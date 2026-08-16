@@ -171,7 +171,18 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         footprint_selector: Callable[[QWidget], Footprint | None] | None = None,
         load_callback: Callable[[], None] | None = None,
         original_image: QPixmap | None = None,
+        side: str | None = None,
     ) -> None:  # pylint: disable=too-many-locals,too-many-statements
+        """Create an image calibration editor.
+
+        Args:
+            image: Working image shown in the editor.
+            parent: Optional owning widget.
+            footprint_selector: Callback used to select a calibration footprint.
+            load_callback: Callback used to replace the image for this side.
+            original_image: Optional uncropped source image.
+            side: Board face being edited; Bottom shows the orientation guide.
+        """
         super().__init__(parent)
         self.setWindowTitle("Edit imported image")
         self.resize(1000, 700)
@@ -284,6 +295,30 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         self._buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(False)
         self._mode_hint = QLabel()
         self._mode_hint.setStyleSheet("color: #66c2ff; font-weight: 600;")
+        orientation_guide = QLabel()
+        orientation_guide.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        orientation_guide.setToolTip(
+            "Top-to-Bottom convention: turn the board 180° around its right edge"
+        )
+        guide = QPixmap(
+            str(
+                Path(__file__).parent.parent
+                / "assets"
+                / "board-right-edge-flip.png"
+            )
+        )
+        if side == "bottom" and not guide.isNull():
+            orientation_guide.setPixmap(
+                guide.scaled(
+                    720,
+                    260,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            )
+        else:
+            orientation_guide.hide()
+        self._orientation_guide = orientation_guide
         controls = QHBoxLayout()
         controls.addWidget(load_image_button)
         controls.addWidget(original_button)
@@ -311,6 +346,7 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
                 "rectangle."
             )
         )
+        layout.addWidget(orientation_guide)
         layout.addWidget(self._mode_hint)
         layout.addWidget(self._scroll)
         layout.addLayout(controls)

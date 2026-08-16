@@ -209,6 +209,33 @@ def generated_pad_name(
     return base_name if placed.side == device_side else f"{base_name}.{placed.side}"
 
 
+def mirror_board_rectangle(
+    x: float,
+    y: float,
+    width: float,
+    height: float,
+    rotation: float,
+) -> tuple[float, float, float, float, float]:
+    """Flip board geometry around the vertical axis at the right edge.
+
+    This is the physical Top-to-Bottom convention used by the application: the
+    board turns like a book cover hinged on its right edge. Vertical position is
+    preserved, horizontal position is mirrored, and clockwise rotation changes
+    sign when viewed from the opposite face.
+
+    Args:
+        x: Normalized rectangle left coordinate.
+        y: Normalized rectangle top coordinate.
+        width: Normalized rectangle width.
+        height: Normalized rectangle height.
+        rotation: Clockwise angle in degrees on the source face.
+
+    Returns:
+        Mirrored x, y, width, height, and clockwise rotation.
+    """
+    return 1.0 - x - width, y, width, height, (-rotation) % 360.0
+
+
 @dataclass(frozen=True)
 class CacheResult:
     """Result of preparing the local KiCad footprint cache."""
@@ -538,14 +565,18 @@ def place_footprint_pads(  # pylint: disable=too-many-locals,too-many-arguments,
         grouped.setdefault((pad.number, side), []).append(placed)
         if pad.pad_type == "thru_hole":
             opposite_side = "bottom" if side == "top" else "top"
-            mirrored = PlacedFootprintPad(
-                pad.number,
-                1.0 - placed.x - placed.width,
+            mirrored_geometry = mirror_board_rectangle(
+                placed.x,
                 placed.y,
                 placed.width,
                 placed.height,
+                placed.rotation,
+            )
+            mirrored = PlacedFootprintPad(
+                pad.number,
+                *mirrored_geometry[:4],
                 placed.shape,
-                (-placed.rotation) % 360.0,
+                mirrored_geometry[4],
                 opposite_side,
             )
             if not _placed_pad_fits(mirrored):

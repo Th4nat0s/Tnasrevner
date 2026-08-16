@@ -97,6 +97,7 @@ from ..kicad import (
     KiCadCacheError,
     KiCadFootprintCache,
     KiCadFormatError,
+    mirror_board_rectangle,
     place_footprint_pads,
     parse_footprint,
     generated_pad_name,
@@ -438,6 +439,7 @@ class ImageImportMixin:
             footprint_selector=self._select_calibration_footprint,
             load_callback=(lambda: self.import_picture(side)) if side else None,
             original_image=original_image,
+            side=side,
         )
         if pixels_per_mm is not None:
             dialog.prepare_existing_image(
@@ -502,9 +504,7 @@ class ImageImportMixin:
             view.set_footprint_overlays(self._vector_footprints_for_side(side))
             view.set_pad_labels(self._vector_labels_for_side(side))
             view.set_pixmap(images[side])
-        overlay_labels = self._vector_labels_for_side("top") + tuple(
-            self._vector_labels_for_side("bottom")
-        )
+        overlay_labels = self._overlay_pad_labels()
         self._overlay_view.set_trace_selection(
             self._selected_net,
             self._selected_pad_id,
@@ -627,6 +627,7 @@ class ImageImportMixin:
                 Qt.AspectRatioMode.IgnoreAspectRatio,
                 Qt.TransformationMode.SmoothTransformation,
             )
+            bottom = bottom.transformed(QTransform().scale(-1.0, 1.0))
             painter.setOpacity(0.5)
             painter.drawPixmap(0, 0, bottom)
         if not top.isNull():
@@ -639,6 +640,31 @@ class ImageImportMixin:
             painter.drawPixmap(0, 0, top)
         painter.end()
         self._overlay_view.set_pixmap(canvas)
+
+    def _overlay_pad_labels(self) -> tuple[Pad, ...]:
+        """Return Top-oriented pad labels for the mirrored overlay view.
+
+        Returns:
+            Top pads unchanged followed by Bottom pads flipped around the board's
+            right edge, including mirrored footprint rotation.
+        """
+        top = self._vector_labels_for_side("top")
+        bottom = []
+        for pad in self._vector_labels_for_side("bottom"):
+            x, y, width, height, rotation = mirror_board_rectangle(
+                pad.x, pad.y, pad.width, pad.height, pad.rotation
+            )
+            bottom.append(
+                replace(
+                    pad,
+                    x=x,
+                    y=y,
+                    width=width,
+                    height=height,
+                    rotation=rotation,
+                )
+            )
+        return top + tuple(bottom)
 
     def _pixmap_for_asset(self, side: str) -> QPixmap:
         """Copy one cached working image and draw device/pad overlays."""

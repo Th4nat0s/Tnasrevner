@@ -118,6 +118,44 @@ def test_import_editor_supports_free_rotation_and_zoom(app: QApplication) -> Non
     dialog.close()
 
 
+def test_bottom_editor_shows_right_edge_flip_orientation_guide(
+    app: QApplication,
+) -> None:
+    """Bottom calibration explains the fixed Top-to-Bottom board orientation."""
+    image = QImage(200, 100, QImage.Format.Format_RGB32)
+    image.fill(0xFFFFFF)
+    dialog = ImageEditDialog(QPixmap.fromImage(image), side="bottom")
+
+    assert not dialog._orientation_guide.pixmap().isNull()
+    assert "right edge" in dialog._orientation_guide.toolTip().lower()
+    dialog.close()
+
+
+def test_overlay_mirrors_bottom_pad_position_and_rotation(
+    window: MainWindow,
+) -> None:
+    """Both view applies the right-edge flip to Bottom pad geometry."""
+    bottom = Pad(
+        "P1",
+        "bottom",
+        0.1,
+        0.2,
+        "bottom-pad",
+        0.2,
+        0.1,
+        rotation=30.0,
+    )
+    window.project = ProjectDocument("Project", "Board", pads=[bottom])
+    window._pad_display_mode = "both"
+
+    labels = window._overlay_pad_labels()
+
+    assert len(labels) == 1
+    assert labels[0].x == pytest.approx(0.7)
+    assert labels[0].y == pytest.approx(0.2)
+    assert labels[0].rotation == pytest.approx(330.0)
+
+
 def test_import_editor_can_return_to_uncropped_original(app: QApplication) -> None:
     """Original button restores the raw image without closing the editor."""
     original = QImage(240, 160, QImage.Format.Format_RGB32)

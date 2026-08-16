@@ -61,6 +61,12 @@ THT footprint is placed, Tna’’Srevn’Er creates a face-qualified opposite-s
 representation while keeping one logical component pin and net assignment. SMD
 pads remain on their declared placement face only.
 
+Top-to-Bottom coordinates follow one physical convention: turn the board 180°
+around the vertical axis formed by its right edge. The horizontal coordinate and
+clockwise footprint angle are mirrored while the vertical coordinate is preserved.
+The Bottom image editor displays this convention during initial calibration, and
+the Both overlay mirrors the Bottom image and its pad labels back into Top view.
+
 The first implementation accepts standard rectangular, circular, oval, rounded
 rectangle, and trapezoid pads. Unsupported custom pad shapes and malformed files are
 rejected without modifying the project.
