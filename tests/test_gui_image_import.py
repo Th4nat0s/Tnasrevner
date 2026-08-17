@@ -118,6 +118,56 @@ def test_import_editor_supports_free_rotation_and_zoom(app: QApplication) -> Non
     dialog.close()
 
 
+def test_import_editor_rotation_moves_crop_with_image(app: QApplication) -> None:
+    """A crop rectangle follows image rotation instead of keeping old ratios."""
+    image = QImage(200, 100, QImage.Format.Format_RGB32)
+    image.fill(0xFFFFFF)
+    dialog = ImageEditDialog(QPixmap.fromImage(image))
+    dialog._set_selection(QPoint(10, 10), QPoint(80, 60))
+    before = dialog._source_rect(dialog._selection)
+
+    dialog._rotate(90)
+
+    rotated = dialog._source_rect(dialog._selection)
+    assert rotated.x() == pytest.approx(
+        image.height() - before.y() - before.height(), abs=1
+    )
+    assert rotated.y() == pytest.approx(before.x(), abs=1)
+    assert rotated.width() == pytest.approx(before.height(), abs=1)
+    assert rotated.height() == pytest.approx(before.width(), abs=1)
+
+    dialog._rotate(-90)
+
+    restored = dialog._source_rect(dialog._selection)
+    assert restored.x() == pytest.approx(before.x(), abs=1)
+    assert restored.y() == pytest.approx(before.y(), abs=1)
+    assert restored.width() == pytest.approx(before.width(), abs=1)
+    assert restored.height() == pytest.approx(before.height(), abs=1)
+    dialog.close()
+
+
+def test_import_editor_free_rotation_does_not_expand_crop_repeatedly(
+    app: QApplication,
+) -> None:
+    """Returning to a free angle restores the same transformed crop bounds."""
+    image = QImage(200, 100, QImage.Format.Format_RGB32)
+    image.fill(0xFFFFFF)
+    dialog = ImageEditDialog(QPixmap.fromImage(image))
+    dialog._set_selection(QPoint(10, 10), QPoint(80, 60))
+
+    dialog._set_angle(30)
+    first = dialog._source_rect(dialog._selection)
+    dialog._set_angle(45)
+    dialog._set_angle(30)
+    repeated = dialog._source_rect(dialog._selection)
+
+    assert repeated.x() == pytest.approx(first.x(), abs=1)
+    assert repeated.y() == pytest.approx(first.y(), abs=1)
+    assert repeated.width() == pytest.approx(first.width(), abs=1)
+    assert repeated.height() == pytest.approx(first.height(), abs=1)
+    dialog.close()
+
+
 def test_bottom_editor_shows_right_edge_flip_orientation_guide(
     app: QApplication,
 ) -> None:

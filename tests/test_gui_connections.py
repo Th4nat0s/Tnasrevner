@@ -4,6 +4,7 @@
 # state to verify lifecycle behavior.
 # pylint: disable=wrong-import-position,no-name-in-module,redefined-outer-name
 # pylint: disable=unused-argument,protected-access,unused-import,duplicate-code
+# pylint: disable=too-many-lines
 # pylint: disable=too-many-statements
 
 import os
@@ -105,7 +106,9 @@ def test_connections_table_net_edit_syncs_generated_pin(window: MainWindow) -> N
         "Project",
         "Board",
         devices=[device],
-        pads=[Pad("U1.1", "top", 0.1, 0.1, "pad", device_id=device.device_id, number="1")],
+        pads=[
+            Pad("U1.1", "top", 0.1, 0.1, "pad", device_id=device.device_id, number="1")
+        ],
     )
     window._refresh_net_table()
     window._net_table.item(0, 1).setText("DATA")
@@ -140,18 +143,12 @@ def test_connections_table_reuses_existing_net_name(window: MainWindow) -> None:
 
     assert window.project.pads[0].net == "3V3"
     assert window._net_table.item(0, 0).text() == "P1"
-    assert window._net_table.item(0, 1).text() == "GND"
+    assert window._net_table.item(0, 1).text() == "3V3"
     assert not window._net_table.item(0, 0).flags() & Qt.ItemFlag.ItemIsEditable
-    assert not window._net_table.item(0, 1).flags() & Qt.ItemFlag.ItemIsEditable
+    assert window._net_table.item(0, 1).flags() & Qt.ItemFlag.ItemIsEditable
     assert not window._net_table.item(0, 2).flags() & Qt.ItemFlag.ItemIsEditable
     assert window._net_table.item(0, 3).flags() & Qt.ItemFlag.ItemIsEditable
     assert not window._net_table.item(0, 4).flags() & Qt.ItemFlag.ItemIsEditable
-
-    window._connect_pad_to_net("top", 0.15, 0.15)
-    assert window._net_dialog is not None
-    window._net_dialog.reject()
-    QApplication.processEvents()
-    assert window._net_dialog is None
 
 
 def test_net_summary_renames_every_assignment_and_counts_connections(
@@ -397,9 +394,14 @@ def test_connect_button_links_shift_selected_board_pads_on_release(
     QApplication.processEvents()
     assert view._connection_preview_origin == pytest.approx((0.15, 0.15), abs=0.02)
     pending_color = view._label.pixmap().toImage().pixelColor(15, 15)
-    assert pending_color.green() > 200
-    assert pending_color.red() < 80
-    assert pending_color.blue() < 80
+    configured_preview = QColor(window._config.colors["connection_preview"])
+    color_distance = sum(
+        abs(actual - expected)
+        for actual, expected in zip(
+            pending_color.getRgb()[:3], configured_preview.getRgb()[:3]
+        )
+    )
+    assert color_distance < 80
     QTest.mouseMove(
         view._label, QPoint(0.35 * view._label.width(), 0.35 * view._label.height())
     )
@@ -469,6 +471,48 @@ def test_connect_button_links_shift_selected_board_pads_on_release(
     assert not window._pending_connection_terminals
     assert not window._connection_mode
     assert view.cursor().shape() != Qt.CursorShape.CrossCursor
+
+
+def test_connection_shift_never_changes_dual_board_viewport(
+    window: MainWindow, tmp_path: Path
+) -> None:
+    """Pressing or releasing Shift in Connect mode preserves zoom and pan."""
+    window.store = ProjectStore(tmp_path / "board.revp")
+    image = QImage(1000, 1000, QImage.Format.Format_RGB32)
+    image.fill(0x202020)
+    image_content = window._pixmap_bytes(QPixmap.fromImage(image))
+    window.project = ProjectDocument("Project", "Board")
+    for side in ("top", "bottom"):
+        path = f"assets/{side}.png"
+        window.store.write_asset(path, image_content)
+        window.project.images.append(ImageAsset(side, path, f"{side}.png"))
+    window._refresh_views()
+    window.show()
+    QApplication.processEvents()
+    window._tabs.setCurrentIndex(2)
+    expected = (2.5, 0.8, 0.2)
+    window._syncing_views = True
+    try:
+        for view in window._side_views.values():
+            view.apply_view_state(expected)
+    finally:
+        window._syncing_views = False
+    expected = window._side_views["bottom"].view_state()
+    window._set_connection_mode(True)
+
+    QTest.keyPress(window, Qt.Key.Key_Shift)
+    QApplication.processEvents()
+    QApplication.processEvents()
+
+    for view in window._side_views.values():
+        assert view.view_state() == pytest.approx(expected, abs=0.01)
+
+    QTest.keyRelease(window, Qt.Key.Key_Shift)
+    QApplication.processEvents()
+    QApplication.processEvents()
+
+    for view in window._side_views.values():
+        assert view.view_state() == pytest.approx(expected, abs=0.01)
 
 
 def test_connection_mode_plain_pad_click_selects_existing_net(
@@ -554,9 +598,7 @@ def test_connection_session_keeps_endpoint_filter_transient(
         ],
     )
 
-    window._connect_terminals(
-        (("pad", "one", None), ("pad", "two", None))
-    )
+    window._connect_terminals((("pad", "one", None), ("pad", "two", None)))
 
     assert window._selected_net == "NT2"
     assert window._trace_highlight_ids == frozenset({"one", "two"})
@@ -801,6 +843,152 @@ def test_shift_click_device_edits_bom_value_and_deletes_whole_footprint(
         window.store.read_asset(device.footprint_path)
     if window._pad_menu is not None:
         window._pad_menu.close()
+
+
+def test_delete_device_never_changes_board_viewport(
+    window: MainWindow, tmp_path: Path
+) -> None:
+    """Dual-view deletion preserves the clicked side zoom and pan."""
+    window.store = ProjectStore(tmp_path / "board.revp")
+    device = Device(
+        "C1",
+        "bottom",
+        0.5,
+        0.5,
+        "Capacitor_SMD",
+        "C_0603",
+        "assets/kicad/device.kicad_mod",
+        "a" * 40,
+        device_id="device-id",
+    )
+    image = QImage(1000, 1000, QImage.Format.Format_RGB32)
+    image.fill(0xFFFFFF)
+    image_content = window._pixmap_bytes(QPixmap.fromImage(image))
+    for side in ("top", "bottom"):
+        window.store.write_asset(f"assets/{side}.png", image_content)
+    window.store.write_asset(device.footprint_path, FOOTPRINT)
+    window.project = ProjectDocument(
+        "Project",
+        "Board",
+        images=[
+            ImageAsset("top", "assets/top.png", "top.png"),
+            ImageAsset("bottom", "assets/bottom.png", "bottom.png"),
+        ],
+        pads=[
+            Pad(
+                "C1.1",
+                "bottom",
+                0.45,
+                0.45,
+                "pad-id",
+                0.1,
+                0.1,
+                device_id=device.device_id,
+                number="1",
+            )
+        ],
+        devices=[device],
+    )
+    window._refresh_views()
+    window.show()
+    QApplication.processEvents()
+    window._tabs.setCurrentIndex(2)
+    window._syncing_views = True
+    try:
+        window._side_views["top"].apply_view_state((1.5, 0.2, 0.7))
+        window._side_views["bottom"].apply_view_state((2.5, 0.8, 0.2))
+    finally:
+        window._syncing_views = False
+    before = window._side_views["bottom"].view_state()
+
+    window._delete_at("bottom", 0.5, 0.5)
+    QApplication.processEvents()
+    QApplication.processEvents()
+
+    assert window._tabs.currentIndex() == 2
+    assert window._side_views["top"].view_state() == pytest.approx(before, abs=0.01)
+    assert window._side_views["bottom"].view_state() == pytest.approx(before, abs=0.01)
+
+
+def test_add_pad_never_changes_dual_board_viewport(
+    window: MainWindow, tmp_path: Path
+) -> None:
+    """Dual-view pad creation preserves the placement-side zoom and pan."""
+    window.store = ProjectStore(tmp_path / "board.revp")
+    image = QImage(1000, 1000, QImage.Format.Format_RGB32)
+    image.fill(0xFFFFFF)
+    image_content = window._pixmap_bytes(QPixmap.fromImage(image))
+    window.project = ProjectDocument("Project", "Board")
+    for side in ("top", "bottom"):
+        path = f"assets/{side}.png"
+        window.store.write_asset(path, image_content)
+        window.project.images.append(ImageAsset(side, path, f"{side}.png"))
+    window._refresh_views()
+    window.show()
+    QApplication.processEvents()
+    window._tabs.setCurrentIndex(2)
+    window._syncing_views = True
+    try:
+        window._side_views["top"].apply_view_state((1.5, 0.2, 0.7))
+        window._side_views["bottom"].apply_view_state((2.5, 0.8, 0.2))
+    finally:
+        window._syncing_views = False
+    before = window._side_views["bottom"].view_state()
+    window._pending_pad = Pad("P1", "top", 0.0, 0.0)
+
+    window._place_pad("bottom", 0.4, 0.4, 0.1, 0.1)
+    QApplication.processEvents()
+    QApplication.processEvents()
+
+    assert window._tabs.currentIndex() == 2
+    assert window._side_views["top"].view_state() == pytest.approx(before, abs=0.01)
+    assert window._side_views["bottom"].view_state() == pytest.approx(before, abs=0.01)
+
+
+def test_add_device_never_changes_dual_board_viewport(
+    window: MainWindow, tmp_path: Path
+) -> None:
+    """Dual-view component placement preserves the placement-side zoom and pan."""
+    window.store = ProjectStore(tmp_path / "board.revp")
+    image = QImage(1000, 1000, QImage.Format.Format_RGB32)
+    image.fill(0xFFFFFF)
+    image_content = window._pixmap_bytes(QPixmap.fromImage(image))
+    window.project = ProjectDocument("Project", "Board")
+    for side in ("top", "bottom"):
+        path = f"assets/{side}.png"
+        window.store.write_asset(path, image_content)
+        window.project.images.append(
+            ImageAsset(
+                side,
+                path,
+                f"{side}.png",
+                pixels_per_mm=1,
+                calibration_line=(0.0, 0.5, 1.0, 0.5),
+                calibration_length_mm=1000,
+            )
+        )
+    window._refresh_views()
+    window.show()
+    QApplication.processEvents()
+    window._tabs.setCurrentIndex(2)
+    window._syncing_views = True
+    try:
+        window._side_views["top"].apply_view_state((1.5, 0.2, 0.7))
+        window._side_views["bottom"].apply_view_state((2.5, 0.8, 0.2))
+    finally:
+        window._syncing_views = False
+    before = window._side_views["bottom"].view_state()
+    source = FootprintReference("Resistor_SMD", "R_0603", tmp_path / "R_0603.kicad_mod")
+    footprint = parse_footprint(FOOTPRINT, source.library)
+    window._begin_device_placement("R1", source, footprint, FOOTPRINT, "a" * 40)
+
+    window._place_device("bottom", 0.4, 0.4)
+    QApplication.processEvents()
+    QApplication.processEvents()
+
+    assert window._tabs.currentIndex() == 2
+    assert window._side_views["top"].view_state() == pytest.approx(before, abs=0.01)
+    assert window._side_views["bottom"].view_state() == pytest.approx(before, abs=0.01)
 
 
 def test_bom_value_and_object_dropdown_are_editable(

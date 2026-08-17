@@ -335,11 +335,15 @@ class HistoryActionsMixin:
         quit_action = QAction("Quit", self)
         quit_action.triggered.connect(self.close)
         file_menu.addAction(quit_action)
-        application_menu = self.menuBar().addMenu("Application")
-        config_action = QAction("Configuration…", self)
-        config_action.setToolTip("Configure application display colors")
-        config_action.triggered.connect(self._show_config)
-        application_menu.addAction(config_action)
+        self._application_menu = self.menuBar().addMenu("Application")
+        # Keep the submenu action wrapper alive. PySide may otherwise destroy
+        # the submenu when a temporary wrapper returned by menuBar().actions()
+        # is released immediately after QAction.menu().
+        self._application_menu_action = self._application_menu.menuAction()
+        self._configuration_action = QAction("Configuration…", self)
+        self._configuration_action.setToolTip("Configure application display colors")
+        self._configuration_action.triggered.connect(self._show_config)
+        self._application_menu.addAction(self._configuration_action)
 
     def eventFilter(self, watched, event) -> bool:  # noqa: N802
         """Commit the current terminal group when Shift is released."""

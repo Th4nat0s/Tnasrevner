@@ -209,6 +209,7 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         self._pan_position: QPoint | None = None
         self._selection = None
         self._selection_source_ratio: tuple[float, float, float, float] | None = None
+        self._selection_base_points: tuple[QPointF, ...] | None = None
         self._editing_existing_image = False
         self._crop_selection_modified = False
         self._resize_edges: set[str] = set()
@@ -513,6 +514,7 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         self._crop_selection_modified = True
         self._selection = None
         self._selection_source_ratio = None
+        self._selection_base_points = None
         self._rubber_band.hide()
         self._set_edit_mode("calibration")
         self._render(preserve_selection=False)
@@ -740,6 +742,7 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
             if not self._resize_edges:
                 self._selection = None
                 self._selection_source_ratio = None
+                self._selection_base_points = None
                 self._rubber_band.hide()
                 self._buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(
                     False
@@ -953,33 +956,25 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         self._buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(enabled)
 
     def _rotate(self, angle: int) -> None:
-        """Rotate source image and clear old selection."""
+        """Rotate the source image and its crop selection."""
         self._set_angle(self._angle + angle)
 
     def _set_angle(self, angle: float) -> None:
         """Apply free rotation relative to original imported image."""
         self._zoom_revision += 1
-        old_size = self._source.size()
-        selection_ratio = None
-        if self._selection is not None:
-            selection = self._source_rect(self._selection)
-            selection_ratio = (
-                selection.x() / old_size.width(),
-                selection.y() / old_size.height(),
-                selection.width() / old_size.width(),
-                selection.height() / old_size.height(),
-            )
-        line_ratio = None
-        if self._calibration_line is not None:
-            line_ratio = tuple(
-                QPointF(point.x() / old_size.width(), point.y() / old_size.height())
-                for point in self._calibration_line
-            )
-        footprint_ratio = None
-        if self._footprint_center is not None:
-            footprint_ratio = (
-                self._footprint_center.x() / old_size.width(),
-                self._footprint_center.y() / old_size.height(),
+        old_angle = self._angle
+        old_matrix = self._rotation_matrix(old_angle)
+        old_inverse, invertible = old_matrix.inverted()
+        new_matrix = self._rotation_matrix(angle)
+
+        def remap(point: QPointF) -> QPointF:
+            return new_matrix.map(old_inverse.map(point))
+
+        selection_base_points = self._selection_base_points
+        if selection_base_points is None and self._selection is not None and invertible:
+            source = QRectF(self._source_rect(self._selection))
+            selection_base_points = tuple(
+                old_inverse.map(point) for point in self._rectangle_points(source)
             )
         self._angle = angle
         self._angle_spin.blockSignals(True)
@@ -988,31 +983,37 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         self._source = self._base_image.transformed(
             QTransform().rotate(angle), Qt.TransformationMode.SmoothTransformation
         )
-        new_size = self._source.size()
-        if line_ratio is not None:
+        if self._calibration_line is not None and invertible:
             self._calibration_line = tuple(
-                QPointF(point.x() * new_size.width(), point.y() * new_size.height())
-                for point in line_ratio
+                remap(point) for point in self._calibration_line
             )
-        if footprint_ratio is not None:
-            self._footprint_center = QPointF(
-                footprint_ratio[0] * new_size.width(),
-                footprint_ratio[1] * new_size.height(),
-            )
+        if self._footprint_center is not None and invertible:
+            self._footprint_center = remap(self._footprint_center)
+            self._footprint_rotation = (
+                self._footprint_rotation + angle - old_angle
+            ) % 360.0
         self._update_confirm_state()
         self._selection = None
         self._selection_source_ratio = None
         self._rubber_band.hide()
         self._render(preserve_selection=False)
-        if selection_ratio is not None:
+        if selection_base_points is not None:
+            mapped = tuple(new_matrix.map(point) for point in selection_base_points)
+            left = min(point.x() for point in mapped)
+            top = min(point.y() for point in mapped)
+            right = max(point.x() for point in mapped)
+            bottom = max(point.y() for point in mapped)
+            x = round(left * self._display_scale)
+            y = round(top * self._display_scale)
             selection = QRect(
-                round(selection_ratio[0] * new_size.width() * self._display_scale),
-                round(selection_ratio[1] * new_size.height() * self._display_scale),
-                round(selection_ratio[2] * new_size.width() * self._display_scale),
-                round(selection_ratio[3] * new_size.height() * self._display_scale),
+                x,
+                y,
+                round(right * self._display_scale) - x,
+                round(bottom * self._display_scale) - y,
             ).intersected(self._canvas.rect())
             if selection.width() >= 2 and selection.height() >= 2:
-                self._update_selection(selection)
+                self._selection_base_points = selection_base_points
+                self._update_selection(selection, store_base=False)
 
     def _zoom_by(self, factor: float, anchor: QPoint | None = None) -> None:
         """Zoom around anchor point, preserving content under cursor."""
@@ -1185,7 +1186,12 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
         if selection.width() >= 2 and selection.height() >= 2:
             self._update_selection(selection, store_source=False)
 
-    def _update_selection(self, selection: QRect, store_source: bool = True) -> None:
+    def _update_selection(
+        self,
+        selection: QRect,
+        store_source: bool = True,
+        store_base: bool = True,
+    ) -> None:
         """Apply selection geometry and update validation state."""
         self._selection = selection
         if store_source:
@@ -1197,10 +1203,41 @@ class ImageEditDialog(  # pylint: disable=too-many-instance-attributes,too-many-
                 source.width() / width,
                 source.height() / height,
             )
+            if store_base:
+                inverse, invertible = self._rotation_matrix(self._angle).inverted()
+                self._selection_base_points = (
+                    tuple(
+                        inverse.map(point)
+                        for point in self._rectangle_points(QRectF(source))
+                    )
+                    if invertible
+                    else None
+                )
         self._rubber_band.setGeometry(self._canvas.rect())
         self._rubber_band.set_selection(self._selection)
         self._rubber_band.show()
         self._update_confirm_state()
+
+    def _rotation_matrix(self, angle: float) -> QTransform:
+        """Return Qt's translated rotation matrix for the uncropped image."""
+        return QPixmap.trueMatrix(
+            QTransform().rotate(angle),
+            self._base_image.width(),
+            self._base_image.height(),
+        )
+
+    @staticmethod
+    def _rectangle_points(rectangle: QRectF) -> tuple[QPointF, ...]:
+        """Return rectangle boundary corners without integer-edge ambiguity."""
+        return (
+            QPointF(rectangle.left(), rectangle.top()),
+            QPointF(rectangle.left() + rectangle.width(), rectangle.top()),
+            QPointF(
+                rectangle.left() + rectangle.width(),
+                rectangle.top() + rectangle.height(),
+            ),
+            QPointF(rectangle.left(), rectangle.top() + rectangle.height()),
+        )
 
     def _hit_edges(self, point: QPoint) -> set[str]:
         """Return selection edges near point for individual edge dragging."""

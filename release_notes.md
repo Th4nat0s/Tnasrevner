@@ -6,6 +6,14 @@
   synchronization and validation.
 - Added Top, Bottom, and side-by-side Top + Bottom controls to the board-photo
   calibration editor, with validated settings saved before switching faces.
+- Stabilized the Application configuration menu lifetime and aligned regression
+  coverage with configurable preview colors and canonical KiCad footprint assets.
+- Crop rectangles now rotate with board photos and remain stable across repeated
+  free-angle or quarter-turn adjustments.
+- Adding or deleting board objects in the dual view now preserves the clicked
+  side viewport and never resets or moves zoom and pan.
+- Pressing or releasing Shift in Connect mode now preserves the board viewport;
+  added `documentation/shortcuts.md` with common and mode-specific controls.
 - Fixed saves after stale or missing KiCad footprint references by repairing them
   from shared definitions or the local KiCad cache.
 - Fixed Save As recovery when a device references a missing legacy KiCad footprint path.

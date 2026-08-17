@@ -609,9 +609,7 @@ class BoardControlsMixin:
         self._pending_connection_terminals.append(terminal)
         current_pad = self._connection_pad_id(terminal)
         selected_pad_ids = {
-            pad_id
-            for pair in self._connection_trace_pairs or ()
-            for pad_id in pair
+            pad_id for pair in self._connection_trace_pairs or () for pad_id in pair
         }
         if current_pad is not None:
             selected_pad_ids.add(current_pad)
@@ -715,21 +713,22 @@ class BoardControlsMixin:
         self._set_delete_mode(enabled)
 
     def _delete_at(self, side: str, x: float, y: float) -> None:
-        """Delete the pad or footprint under a deletion-mode click."""
+        """Delete an object without changing the clicked view zoom or pan."""
         if not self.project:
             return
+        view_state = self._view_state_for_side(side)
         pad = self._pad_at(side, x, y)
         if pad is not None:
             if pad.device_id:
-                self._delete_device(pad.device_id)
+                self._delete_device(pad.device_id, view_state)
             else:
-                self._delete_pad(pad.pad_id)
+                self._delete_pad(pad.pad_id, view_state)
             if self._delete_button.isChecked():
                 self.statusBar().showMessage("Deleting - Esc to stop")
             return
         device = self._device_at(side, x, y)
         if device is not None:
-            self._delete_device(device.device_id)
+            self._delete_device(device.device_id, view_state)
         if self._delete_button.isChecked():
             self.statusBar().showMessage("Deleting - Esc to stop")
 
@@ -901,6 +900,13 @@ class BoardControlsMixin:
         if index == 2:
             return list(self._side_views.values())
         return [self._overlay_view]
+
+    def _view_state_for_side(self, side: str) -> tuple[float, float, float] | None:
+        """Capture the action-source viewport, especially in the dual view."""
+        if self._tabs.currentIndex() == 2 and side in self._side_views:
+            return self._side_views[side].view_state()
+        active = self._active_views()
+        return active[0].view_state() if active else None
 
     def _sync_board_views(self, source: ImageView) -> None:
         """Synchronize zoom and pan between Top and Bottom views."""

@@ -460,7 +460,10 @@ def test_save_as_copies_assets_switches_store_and_preserves_source(
     saved = copied.load()
     assert saved.project_name == "Project"
     assert copied.read_asset("assets/top.png")
-    assert copied.read_asset("assets/kicad/c1.kicad_mod") == FOOTPRINT
+    assert len(saved.footprint_definitions) == 1
+    canonical_path = saved.footprint_definitions[0].path
+    assert saved.devices[0].footprint_path == canonical_path
+    assert copied.read_asset(canonical_path) == FOOTPRINT
 
     window.project.devices[0] = replace(window.project.devices[0], value="10 nF")
     window._dirty = True
@@ -528,9 +531,10 @@ def test_save_as_recovers_missing_footprint_from_kicad_cache(
     )
 
     assert window.save_project_as()
-    assert ProjectStore(target.with_suffix(".revp")).read_asset(
-        f"assets/kicad/{definition}.kicad_mod"
-    ) == FOOTPRINT
+    recovered = ProjectStore(target.with_suffix(".revp"))
+    saved = recovered.load()
+    assert saved.devices[0].footprint_definition_id == definition
+    assert recovered.read_asset(f"assets/kicad/{definition}.kicad_mod") == FOOTPRINT
 
 
 def test_save_as_actions_are_exposed(window: MainWindow) -> None:
@@ -1117,9 +1121,10 @@ def test_schemdraw_cache_separates_glued_foreground(app: QApplication) -> None:
     glued_key = ("resistor", ("1", "2"), "#f5a3c7")
     assert normal_key in canvas._schemdraw_cache
     assert glued_key in canvas._schemdraw_cache
-    assert canvas._schemdraw_cache[normal_key][0] is not canvas._schemdraw_cache[
-        glued_key
-    ][0]
+    assert (
+        canvas._schemdraw_cache[normal_key][0]
+        is not canvas._schemdraw_cache[glued_key][0]
+    )
 
 
 def test_schematic_net_wire_stays_visible_at_overview_zoom(

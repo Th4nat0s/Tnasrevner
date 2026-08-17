@@ -6,6 +6,7 @@ from __future__ import annotations
 # inspect those names despite them being available at runtime.
 # pylint: disable=no-name-in-module,invalid-name,unused-import
 # pylint: disable=too-few-public-methods,too-many-instance-attributes,duplicate-code
+# pylint: disable=too-many-lines
 # pylint: disable=protected-access
 # pylint: disable=too-many-locals,too-many-statements
 # pylint: disable=too-many-return-statements
@@ -156,6 +157,8 @@ from .schematic_tab import SchematicView
 class PadActionsMixin:
     """Provide padactions behavior to the main window."""
 
+    _view_restore_revision = 0
+
     def create_pad(self) -> None:
         """Start rectangle placement on the currently visible board view."""
         self._exit_connection_mode()
@@ -229,7 +232,9 @@ class PadActionsMixin:
         self._pending_pad = Pad(self._next_pad_name(), "top", 0.0, 0.0)
         self._dirty = True
         self.statusBar().showMessage("Adding Pad - Esc to stop")
-        self._schedule_pad_refresh(self._active_views()[0].view_state())
+        view_state = self._view_state_for_side(side)
+        if view_state is not None:
+            self._schedule_pad_refresh(view_state)
         self._update_title()
 
     def _pad_at(self, side: str, x: float, y: float) -> Pad | None:
@@ -405,15 +410,36 @@ class PadActionsMixin:
             self._apply_active_view_state(state)
 
     def _apply_active_view_state(self, state: tuple[float, float, float]) -> None:
-        """Restore zoom and pan after refreshing visible pad markers."""
+        """Restore zoom/pan exactly; content mutations must never move the view."""
+        self._pending_board_view_sync_source = None
+        self._board_view_sync_pending = False
+        self._view_restore_revision += 1
+        revision = self._view_restore_revision
+        self._apply_active_view_state_now(state)
+        QTimer.singleShot(
+            0,
+            lambda: self._finish_active_view_state_restore(revision, state),
+        )
+
+    def _apply_active_view_state_now(self, state: tuple[float, float, float]) -> None:
+        """Apply one viewport state without recapturing a quantized dual view."""
+        active_views = tuple(self._active_views())
         self._syncing_views = True
         try:
-            for view in self._active_views():
+            for view in active_views:
                 view.apply_view_state(state)
+            for view in (*self._views.values(), *self._side_views.values()):
+                if view not in active_views:
+                    view.defer_view_state(state)
         finally:
             self._syncing_views = False
-        if self._tabs.currentIndex() < _CONNECTIONS_TAB:
-            self._sync_board_views(self._active_views()[0])
+
+    def _finish_active_view_state_restore(
+        self, revision: int, state: tuple[float, float, float]
+    ) -> None:
+        """Correct scrollbar pan after Qt completes the refreshed-view layout."""
+        if revision == self._view_restore_revision:
+            self._apply_active_view_state_now(state)
 
     def _connect_pad_to_net(self, side: str, x: float, y: float) -> None:
         """Open non-blocking net assignment for a right-clicked pad."""
@@ -454,14 +480,16 @@ class PadActionsMixin:
         active_pad_id = self._selected_pad_id
         net = value.strip() or None
         self.project.pads = [
-            replace(item, net=net)
-            if item.pad_id == pad_id
-            or (
-                pad.device_id is not None
-                and item.device_id == pad.device_id
-                and item.number == pad.number
+            (
+                replace(item, net=net)
+                if item.pad_id == pad_id
+                or (
+                    pad.device_id is not None
+                    and item.device_id == pad.device_id
+                    and item.number == pad.number
+                )
+                else item
             )
-            else item
             for item in self.project.pads
         ]
         changed_pad = next(
@@ -555,7 +583,9 @@ class PadActionsMixin:
         menu = QMenu(self)
         if device is None:
             delete_action = menu.addAction("Delete pad")
-            delete_action.triggered.connect(lambda: self._delete_pad(pad.pad_id))
+            delete_action.triggered.connect(
+                lambda: self._delete_pad(pad.pad_id, self._view_state_for_side(side))
+            )
         else:
             delete_action = menu.addAction("Delete device")
             rotate_action = menu.addAction("Rotate 45°")
@@ -567,7 +597,9 @@ class PadActionsMixin:
             description_action = menu.addAction("Edit description…")
             datasheet_action = menu.addAction("Edit datasheet…")
             delete_action.triggered.connect(
-                lambda: self._delete_device(device.device_id)
+                lambda: self._delete_device(
+                    device.device_id, self._view_state_for_side(side)
+                )
             )
             rotate_action.triggered.connect(
                 lambda: self._rotate_device(device.device_id)
@@ -798,14 +830,18 @@ class PadActionsMixin:
         if self._pad_menu is menu:
             self._pad_menu = None
 
-    def _delete_pad(self, pad_id: str) -> None:
-        """Delete one pad selected from the Shift+click menu."""
+    def _delete_pad(
+        self,
+        pad_id: str,
+        view_state: tuple[float, float, float] | None = None,
+    ) -> None:
+        """Delete one pad while preserving the action-source viewport."""
         if not self.project:
             return
         pad = next((item for item in self.project.pads if item.pad_id == pad_id), None)
         if pad is None:
             return
-        view_state = self._active_views()[0].view_state()
+        view_state = view_state or self._view_state_for_side(pad.side)
         current_tab = self._tabs.currentIndex()
         self.project.pads = [
             item for item in self.project.pads if item.pad_id != pad_id
@@ -818,7 +854,8 @@ class PadActionsMixin:
         LOGGER.info("Pad deleted id=%s pad=%s", pad.pad_id, pad.name)
         self._refresh_views()
         self._tabs.setCurrentIndex(current_tab)
-        self._apply_active_view_state(view_state)
+        if view_state is not None:
+            self._apply_active_view_state(view_state)
         self._update_title()
 
     def _edit_device_value(self, device_id: str) -> None:
@@ -903,8 +940,12 @@ class PadActionsMixin:
         if self._device_value_dialog is dialog:
             self._device_value_dialog = None
 
-    def _delete_device(self, device_id: str) -> None:
-        """Delete one footprint instance, all generated pads, and its asset."""
+    def _delete_device(
+        self,
+        device_id: str,
+        view_state: tuple[float, float, float] | None = None,
+    ) -> None:
+        """Delete a footprint and pads without ever changing tab, zoom, or pan."""
         if not self.project:
             return
         device = next(
@@ -914,7 +955,7 @@ class PadActionsMixin:
         if device is None:
             return
         current_tab = self._tabs.currentIndex()
-        view_state = self._active_views()[0].view_state()
+        view_state = view_state or self._view_state_for_side(device.side)
         removed_pad_ids = {
             pad.pad_id for pad in self.project.pads if pad.device_id == device_id
         }
@@ -960,7 +1001,8 @@ class PadActionsMixin:
         )
         self._refresh_views()
         self._tabs.setCurrentIndex(current_tab)
-        self._apply_active_view_state(view_state)
+        if view_state is not None:
+            self._apply_active_view_state(view_state)
         self._update_title()
 
     def _log_ui_heartbeat(self) -> None:

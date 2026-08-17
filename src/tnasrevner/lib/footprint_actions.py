@@ -558,7 +558,7 @@ class FootprintActionsMixin:
             return
         view_context = (
             self._tabs.currentIndex(),
-            self._active_views()[0].view_state(),
+            self._view_state_for_side(side),
         )
         image = next(
             (asset for asset in self.project.images if asset.side == side), None
@@ -675,7 +675,8 @@ class FootprintActionsMixin:
                 ),
             )
         else:
-            self._apply_active_view_state(view_context[1])
+            if view_context[1] is not None:
+                self._apply_active_view_state(view_context[1])
         self.statusBar().showMessage(
             f"Place {self._pending_device.reference}: left click to place, "
             "right click rotates 45°, Esc ends the series."
@@ -683,11 +684,12 @@ class FootprintActionsMixin:
         self._update_title(refresh_bom=False)
 
     def _restore_device_view_context(
-        self, tab_index: int, state: tuple[float, float, float]
+        self, tab_index: int, state: tuple[float, float, float] | None
     ) -> None:
         """Restore placement tab and view state after board refresh callbacks."""
         self._tabs.setCurrentIndex(tab_index)
-        self._apply_active_view_state(state)
+        if state is not None:
+            self._apply_active_view_state(state)
 
     def _clear_device_previews(self) -> None:
         for view in (*self._views.values(), *self._side_views.values()):
