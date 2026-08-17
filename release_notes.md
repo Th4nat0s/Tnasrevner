@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Added a `↔️` footprint Move tool with alternating **Dual face move** and
+  **Single face move** scopes, Shift-selection, mirrored Top/Bottom movement,
+  persisted per-face offsets, Escape exit, and undo history integration.
 - Connections view now allows direct editing of pad net assignments with pin
   synchronization and validation.
 - Added Top, Bottom, and side-by-side Top + Bottom controls to the board-photo

@@ -161,6 +161,7 @@ class PadActionsMixin:
 
     def create_pad(self) -> None:
         """Start rectangle placement on the currently visible board view."""
+        self._set_move_mode(None)
         self._exit_connection_mode()
         self._set_delete_mode(False)
         if not self.project:

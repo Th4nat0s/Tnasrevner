@@ -369,6 +369,10 @@ class HistoryActionsMixin:
             event.accept()
             return
         if key == Qt.Key.Key_Escape:
+            if getattr(self, "_move_mode", None) is not None:
+                self._set_move_mode(None)
+                event.accept()
+                return
             if (
                 getattr(self, "_delete_button", None) is not None
                 and self._delete_button.isChecked()

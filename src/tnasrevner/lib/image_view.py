@@ -141,6 +141,9 @@ class ImageView(
     pad_menu_requested = Signal(float, float)
     trace_menu_requested = Signal(float, float)
     pad_connection_requested = Signal(float, float)
+    pad_move_started = Signal(str, float, float)
+    pad_move_updated = Signal(str, float, float)
+    pad_move_finished = Signal(str, float, float)
     device_placed = Signal(float, float)
     device_rotated = Signal()
     delete_requested = Signal(float, float)
@@ -164,6 +167,10 @@ class ImageView(
         self._click_position: QPoint | None = None
         self._device_placement = False
         self._delete_mode = False
+        self._move_mode = False
+        self._moving_pad_id: str | None = None
+        self._pad_move_press_point: QPoint | None = None
+        self._pad_move_dragged = False
         self._device_preview_point = (0.5, 0.5)
         self._ruler_enabled = False
         self._ruler_pixels_per_mm = 0.0
@@ -290,6 +297,20 @@ class ImageView(
             self._label.unsetCursor()
             self.clear_connection_preview()
 
+    def set_move_mode(self, enabled: bool) -> None:
+        """Enable Shift-selection and pointer movement of one board footprint."""
+        self._move_mode = enabled
+        if not enabled:
+            self._moving_pad_id = None
+            self._pad_move_press_point = None
+            self._pad_move_dragged = False
+            self.unsetCursor()
+            self._label.unsetCursor()
+            return
+        cursor = QCursor(Qt.CursorShape.SizeAllCursor)
+        self.setCursor(cursor)
+        self._label.setCursor(cursor)
+
     def set_connection_preview_origin(self, x: float, y: float) -> None:
         """Start a temporary line from the first selected board pad.
 
@@ -406,6 +427,34 @@ class ImageView(
                 self._drag_position = event.globalPosition().toPoint()
                 self.setCursor(QCursor(Qt.CursorShape.ClosedHandCursor))
                 return True
+            if (
+                self._move_mode
+                and event.button() == Qt.MouseButton.LeftButton
+                and event.modifiers() & Qt.KeyboardModifier.ShiftModifier
+                and not self._pixmap.isNull()
+                and self._label.rect().contains(point)
+            ):
+                pad = self._pad_at_point(point)
+                if pad is not None:
+                    self._moving_pad_id = pad.pad_id
+                    self._pad_move_press_point = point
+                    self._pad_move_dragged = False
+                    x, y = self._normalized_point(point)
+                    self.pad_move_started.emit(pad.pad_id, x, y)
+                    return True
+            if (
+                self._move_mode
+                and self._moving_pad_id is not None
+                and event.button() == Qt.MouseButton.LeftButton
+            ):
+                point = self._clamp_point(point, self._label.rect())
+                x, y = self._normalized_point(point)
+                pad_id = self._moving_pad_id
+                self._moving_pad_id = None
+                self._pad_move_press_point = None
+                self._pad_move_dragged = False
+                self.pad_move_finished.emit(pad_id, x, y)
+                return True
             if self._ruler_enabled and event.button() == Qt.MouseButton.LeftButton:
                 if not self._label.rect().contains(point):
                     return True
@@ -476,6 +525,19 @@ class ImageView(
                 )
                 self._drag_position = current
             return True
+        if event.type() == QEvent.Type.MouseMove and self._moving_pad_id is not None:
+            point = self._clamp_point(
+                self._label_point(watched, event.position().toPoint()),
+                self._label.rect(),
+            )
+            if (
+                self._pad_move_press_point is not None
+                and (point - self._pad_move_press_point).manhattanLength() > 2
+            ):
+                self._pad_move_dragged = True
+            x, y = self._normalized_point(point)
+            self.pad_move_updated.emit(self._moving_pad_id, x, y)
+            return True
         if event.type() == QEvent.Type.MouseMove and not (
             self._temporary_pan
             or self._ruler_enabled
@@ -532,6 +594,18 @@ class ImageView(
                 self._temporary_pan = False
                 self._drag_position = None
                 self.unsetCursor()
+                return True
+            if self._moving_pad_id is not None and self._pad_move_dragged:
+                point = self._clamp_point(
+                    self._label_point(watched, event.position().toPoint()),
+                    self._label.rect(),
+                )
+                x, y = self._normalized_point(point)
+                pad_id = self._moving_pad_id
+                self._moving_pad_id = None
+                self._pad_move_press_point = None
+                self._pad_move_dragged = False
+                self.pad_move_finished.emit(pad_id, x, y)
                 return True
             point = self._clamp_point(
                 self._label_point(watched, event.position().toPoint()),
@@ -1061,9 +1135,9 @@ class ImageView(
                     "new_connected_pad"
                     if is_nc_net(pad.net)
                     else (
-                    "connected_pad_1"
-                    if pad.device_id is not None and pad.number == "1"
-                    else "connected_pad"
+                        "connected_pad_1"
+                        if pad.device_id is not None and pad.number == "1"
+                        else "connected_pad"
                     )
                 )
             else:
@@ -1074,15 +1148,12 @@ class ImageView(
                 )
             painter.setBrush(self._color(pad_color))
             highlighted = (
-                (
-                    self._connection_highlight_ids is not None
-                    and pad.pad_id in self._connection_highlight_ids
-                )
-                or (
-                    self._connection_net is not None
-                    and not is_nc_net(self._connection_net)
-                    and pad.net == self._connection_net
-                )
+                self._connection_highlight_ids is not None
+                and pad.pad_id in self._connection_highlight_ids
+            ) or (
+                self._connection_net is not None
+                and not is_nc_net(self._connection_net)
+                and pad.net == self._connection_net
             )
             painter.setOpacity(1.0 if highlighted else 0.45)
             if highlighted:
@@ -1099,9 +1170,11 @@ class ImageView(
                         else self._color("unconnected_pad_1")
                     )
                 ),
-                2.5
-                if pad.pad_id == self._connection_origin_id
-                else (2.0 if highlighted else 1.0),
+                (
+                    2.5
+                    if pad.pad_id == self._connection_origin_id
+                    else (2.0 if highlighted else 1.0)
+                ),
             )
             pad_pen.setCosmetic(True)
             painter.setPen(pad_pen)

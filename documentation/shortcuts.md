@@ -20,7 +20,7 @@ on other platforms).
 | `T` | Show the Top board view. |
 | `B` | Show the Bottom board view. |
 | Press `T` twice or `B` twice within 0.4 seconds | Show the dual Top + Bottom view. |
-| `Esc` | Leave the active temporary mode: Delete, Measure, Add Pad, Connect, or Add Component. |
+| `Esc` | Leave the active temporary mode: Delete, Measure, Move, Add Pad, Connect, or Add Component. |
 
 ## Board navigation and selection
 
@@ -93,6 +93,27 @@ Activate **Add a Pad** in the Tools palette.
 | `Esc` | Stop continuous pad placement. |
 
 Creating a pad never changes the active tab, zoom, or pan.
+
+## Move mode
+
+Activate **Move** (`↔️`) in the Tools palette. The first click selects **Dual
+face move**; click the checked tool again to select **Single face move**. Further
+clicks alternate these two scopes, and the active scope is printed in the status
+bar.
+
+| Input | Action |
+| --- | --- |
+| `Shift` + left-drag a pad | Select its footprint, move it live, and place it when the mouse button is released. |
+| `Shift` + left-click a pad | Select its footprint as a move handle; move the pointer, then left-click to place it. |
+| `Esc` | Leave Move mode. |
+
+**Dual face move** moves every pad in the footprint on both faces. Horizontal
+movement is mirrored across the board's right-edge flip, while vertical movement
+is shared. **Single face move** moves only the pads visible on the selected face;
+their face-specific offset is persisted in the project. Independent pads without
+a component footprint are moved individually.
+
+Movement is clamped to the board image and never changes zoom or pan.
 
 ## Add Component mode
 

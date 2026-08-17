@@ -137,6 +137,7 @@ from .lib.history_actions import HistoryActionsMixin
 from .lib.image_editor import CropOverlay, ImageEditDialog
 from .lib.image_import import ImageImportMixin
 from .lib.image_view import ImageView
+from .lib.move_actions import MoveActionsMixin
 from .lib.pad_actions import PadActionsMixin
 from .lib.project_io import ProjectIOMixin
 from .lib.schematic_tab import SchematicCanvas, SchematicView
@@ -146,6 +147,7 @@ from .lib.config_tab import ConfigPage
 
 class MainWindow(
     BoardControlsMixin,
+    MoveActionsMixin,
     FootprintActionsMixin,
     PadActionsMixin,
     HistoryActionsMixin,
@@ -168,6 +170,7 @@ class MainWindow(
         # the event filter must therefore see a valid default immediately.
         self._connection_mode = False
         self._nc_mode = False
+        self._move_mode: str | None = None
         super().__init__()
         application = QApplication.instance()
         if application is not None:
@@ -187,6 +190,7 @@ class MainWindow(
         self._connection_mode = False
         self._pending_connection_terminals: list[tuple[str, str, str | None]] = []
         self._connection_trace_pairs: tuple[tuple[str, str], ...] | None = None
+        self._moving_pad_context: dict | None = None
         self._pending_pad: Pad | None = None
         self._pending_device: PendingDevice | None = None
         self._add_device_pending = False
@@ -319,6 +323,19 @@ class MainWindow(
             view.pad_connection_requested.connect(
                 lambda x, y, side=side: self._select_board_connection_pad(side, x, y)
             )
+            view.pad_move_started.connect(
+                lambda pad_id, x, y, side=side: self._start_pad_move(side, pad_id, x, y)
+            )
+            view.pad_move_updated.connect(
+                lambda pad_id, x, y, side=side: self._update_pad_move(
+                    side, pad_id, x, y
+                )
+            )
+            view.pad_move_finished.connect(
+                lambda pad_id, x, y, side=side: self._finish_pad_move(
+                    side, pad_id, x, y
+                )
+            )
             view.device_placed.connect(
                 lambda x, y, side=side: self._place_device(side, x, y)
             )
@@ -347,6 +364,19 @@ class MainWindow(
             )
             view.pad_connection_requested.connect(
                 lambda x, y, side=side: self._select_board_connection_pad(side, x, y)
+            )
+            view.pad_move_started.connect(
+                lambda pad_id, x, y, side=side: self._start_pad_move(side, pad_id, x, y)
+            )
+            view.pad_move_updated.connect(
+                lambda pad_id, x, y, side=side: self._update_pad_move(
+                    side, pad_id, x, y
+                )
+            )
+            view.pad_move_finished.connect(
+                lambda pad_id, x, y, side=side: self._finish_pad_move(
+                    side, pad_id, x, y
+                )
             )
             view.device_placed.connect(
                 lambda x, y, side=side: self._place_device(side, x, y)

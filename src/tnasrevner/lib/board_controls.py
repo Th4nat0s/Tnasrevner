@@ -262,6 +262,17 @@ class BoardControlsMixin:
         pad_button.setIcon(_pad_tool_icon())
         pad_button.setCheckable(True)
         self._add_pad_button = pad_button
+        move_button = add_button(
+            "Move",
+            QStyle.StandardPixmap.SP_ArrowForward,
+            "Move footprint: click for Dual face, click again for Single face",
+            self._cycle_move_mode,
+        )
+        move_button.setIcon(QIcon())
+        move_button.setText("↔️")
+        move_button.setFont(QFont(".AppleSystemUIFont", 18))
+        move_button.setCheckable(True)
+        self._move_button = move_button
         connect_button = add_button(
             "Connect",
             QStyle.StandardPixmap.SP_DialogApplyButton,
@@ -377,6 +388,7 @@ class BoardControlsMixin:
             show_pads_button,
             device_button,
             pad_button,
+            move_button,
             info_button,
             connect_button,
             nc_button,
@@ -398,6 +410,8 @@ class BoardControlsMixin:
         if hasattr(self, "_optimize_schematic_button"):
             self._optimize_schematic_button.setVisible(tab_index == _SCHEMATIC_TAB)
             self._optimize_schematic_button.setEnabled(tab_index == _SCHEMATIC_TAB)
+        if hasattr(self, "_move_button"):
+            self._move_button.setEnabled(tab_index in (0, 1, 2))
 
     def _optimize_schematic(self) -> None:
         """Run the explicit optimizer with a live non-blocking progress dialog."""
@@ -451,6 +465,7 @@ class BoardControlsMixin:
 
     def _rotate_board_90(self) -> None:
         """Rotate both board images and all placed geometry by 90 degrees."""
+        self._set_move_mode(None)
         self._exit_connection_mode()
         if not self.project or not self.store or not self.project.images:
             return
@@ -525,6 +540,7 @@ class BoardControlsMixin:
     def _set_connection_mode(self, enabled: bool) -> None:
         """Set global terminal-selection mode and cursor."""
         if enabled:
+            self._set_move_mode(None)
             self._set_delete_mode(False)
             self._set_nc_mode(False)
             self._disable_ruler()
@@ -551,6 +567,7 @@ class BoardControlsMixin:
             enabled: Whether Shift-click should assign ``NC``.
         """
         if enabled:
+            self._set_move_mode(None)
             self._set_delete_mode(False)
             self._set_connection_mode(False)
             self._disable_ruler()
@@ -660,6 +677,7 @@ class BoardControlsMixin:
 
     def _show_info(self) -> None:
         """Show selected terminal info and exit any active connection mode."""
+        self._set_move_mode(None)
         self._exit_connection_mode()
         if not self.project:
             QMessageBox.information(self, "Info", "No project loaded.")
@@ -689,6 +707,7 @@ class BoardControlsMixin:
     def _set_delete_mode(self, enabled: bool) -> None:
         """Enable or disable deletion mode on every board view."""
         if enabled:
+            self._set_move_mode(None)
             self._exit_connection_mode()
             self._set_nc_mode(False)
             self._disable_ruler()
@@ -754,6 +773,7 @@ class BoardControlsMixin:
         if not enabled:
             self._disable_ruler()
             return
+        self._set_move_mode(None)
         self._set_delete_mode(False)
         self._set_nc_mode(False)
         self._exit_connection_mode()
@@ -789,6 +809,9 @@ class BoardControlsMixin:
 
     def _show_pad_hover(self, pad: object) -> None:
         """Display pad, device, footprint, and net information on hover."""
+        if self._move_mode is not None:
+            self._show_move_status()
+            return
         if pad is None or not isinstance(pad, Pad):
             if self._pending_pad is None and self._pending_device is None:
                 self.statusBar().clearMessage()
@@ -949,6 +972,9 @@ class BoardControlsMixin:
         Args:
             ratio: Zoom relative to the complete-image or overview scale.
         """
+        if self._move_mode is not None:
+            self._show_move_status()
+            return
         self.statusBar().showMessage(f"Zoom: {ratio:.2f}x")
 
     def _actual_size(self) -> None:

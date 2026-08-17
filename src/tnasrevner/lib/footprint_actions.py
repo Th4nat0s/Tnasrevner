@@ -161,6 +161,7 @@ class FootprintActionsMixin:
 
     def add_device(self) -> None:
         """Select a footprint, collect its reference, and arm placement."""
+        self._set_move_mode(None)
         self._exit_connection_mode()
         self._set_delete_mode(False)
         if not self.project or not self.store:
