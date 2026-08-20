@@ -474,10 +474,22 @@ class ImageImportMixin:
         self._next_picture_side = None
         if side not in {"top", "bottom"}:
             return
-        QTimer.singleShot(0, lambda requested=side: self._open_picture_side(requested))
+        generation = getattr(self, "_project_context_generation", 0)
+        QTimer.singleShot(
+            0,
+            lambda requested=side, context=generation: self._open_picture_side(
+                requested, context
+            ),
+        )
 
-    def _open_picture_side(self, side: str) -> None:
+    def _open_picture_side(
+        self, side: str, context_generation: int | None = None
+    ) -> None:
         """Edit an existing face or import it when it has no photo yet."""
+        if context_generation is not None and context_generation != getattr(
+            self, "_project_context_generation", 0
+        ):
+            return
         if not self.project or not self.store:
             return
         if any(image.side == side for image in self.project.images):

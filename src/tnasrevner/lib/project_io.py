@@ -159,6 +159,7 @@ class ProjectIOMixin:
         dialog = ProjectDetailsDialog(self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
+        self._invalidate_project_context()
         project_name = dialog.project_name.text()
         safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", project_name).strip("._")
         safe_name = safe_name or "project"
@@ -200,6 +201,7 @@ class ProjectIOMixin:
         except ProjectFormatError as error:
             QMessageBox.critical(self, "Open failed", str(error))
             return
+        self._invalidate_project_context()
         self.store, self.project, self._dirty = store, project, False
         self._project_needs_save_as = False
         self._load_history_backup()
@@ -527,6 +529,7 @@ class ProjectIOMixin:
         """Close current project after resolving pending changes."""
         if not self._confirm_pending_changes():
             return
+        self._invalidate_project_context()
         self.project = None
         self.store = None
         self._project_needs_save_as = False
@@ -537,6 +540,17 @@ class ProjectIOMixin:
         self._reset_history()
         self._refresh_views()
         self._update_title()
+
+    def _invalidate_project_context(self) -> None:
+        """Invalidate deferred work associated with the previous project.
+
+        Incrementing the context prevents queued image-setup callbacks from
+        acting on a project that has since been created, opened, or closed.
+        """
+        self._project_context_generation = (
+            getattr(self, "_project_context_generation", 0) + 1
+        )
+        self._next_picture_side = None
 
     def _confirm_pending_changes(self) -> bool:
         """Ask how to handle unsaved changes before changing project context."""

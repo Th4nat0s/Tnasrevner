@@ -122,6 +122,71 @@ def test_create_save_close_reopen_project(
     assert window.project.board_name == "Description"
 
 
+def test_new_project_keeps_empty_project_when_image_editor_is_canceled(
+    window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Canceling new-project image setup cannot restore the old project."""
+    window.project = ProjectDocument("Previous", "Previous board")
+    window.store = ProjectStore(tmp_path / "previous.revp")
+
+    class FakeDialog:  # pylint: disable=too-few-public-methods
+        """Replacement project dialog accepting the new project details."""
+
+        project_name = SimpleNamespace(text=lambda: "Replacement")
+        description = SimpleNamespace(text=lambda: "Replacement board")
+
+        def __init__(self, _parent) -> None:
+            pass
+
+        def exec(self) -> QDialog.DialogCode:
+            """Pretend the new project details were accepted."""
+            return QDialog.DialogCode.Accepted
+
+    source = tmp_path / "board.png"
+    image = QImage(10, 10, QImage.Format.Format_RGB32)
+    image.fill(0xFFFFFF)
+    assert image.save(str(source))
+    monkeypatch.setattr("tnasrevner.lib.project_io.ProjectDetailsDialog", FakeDialog)
+    monkeypatch.setattr(window, "_last_project_directory", lambda: tmp_path)
+    monkeypatch.setattr(window, "_choose_image_side", lambda: "top")
+    monkeypatch.setattr(
+        "tnasrevner.lib.image_import.QFileDialog.getOpenFileName",
+        lambda *_args: (str(source), ""),
+    )
+    monkeypatch.setattr(window, "_edit_imported_image", lambda *_args, **_kwargs: None)
+
+    window.new_project()
+
+    assert window.project is not None
+    assert window.project.project_name == "Replacement"
+    assert window.project.board_name == "Replacement board"
+    assert window.project.images == []
+    assert window.project.pads == []
+    assert window.project.devices == []
+    assert window.project.nets == []
+
+
+def test_deferred_picture_setup_is_ignored_after_project_context_changes(
+    window: MainWindow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A queued Top/Bottom callback cannot act after a project transition."""
+    opened: list[str] = []
+    monkeypatch.setattr(
+        window, "edit_picture", lambda side=None: opened.append(side or "edit")
+    )
+    monkeypatch.setattr(
+        window, "import_picture", lambda side=None: opened.append(side or "import")
+    )
+    window.project = ProjectDocument("Project", "Board")
+    window.store = ProjectStore(Path("project.revp"))
+    window._next_picture_side = "bottom"
+    window._continue_picture_setup()
+    window._invalidate_project_context()
+    QApplication.processEvents()
+
+    assert opened == []
+
+
 def test_main_window_has_application_icon(window: MainWindow) -> None:
     """Linux taskbars need a non-empty window icon."""
     assert not window.windowIcon().isNull()
