@@ -223,9 +223,6 @@ class BomTabMixin:
                 current_type = device.object_type or _footprint_family(
                     device.footprint_library
                 )
-                object_item = QTableWidgetItem(current_type)
-                object_item.setFlags(object_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-                self._bom_table.setItem(row, 1, object_item)
                 combo.setCurrentText(current_type)
                 combo.currentTextChanged.connect(
                     lambda text, device_id=device.device_id, combo=combo: self._bom_object_changed(

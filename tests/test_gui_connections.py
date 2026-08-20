@@ -971,7 +971,7 @@ def test_shift_click_device_edits_bom_value_and_deletes_whole_footprint(
 
     assert window.project.devices[0].value == "100 nF"
     assert window._bom_table.item(0, 0).text() == "C1"
-    assert window._bom_table.item(0, 1).text() == "Capacitor"
+    assert window._bom_table.cellWidget(0, 1).currentText() == "Capacitor"
     assert window._bom_table.item(0, 2).text() == "C_0603"
     assert window._bom_table.item(0, 3).text() == "100 nF"
     if window._pad_menu is not None:
@@ -1159,7 +1159,7 @@ def test_bom_value_and_object_dropdown_are_editable(
     window._refresh_bom_table()
 
     assert window._bom_table.item(0, 0).flags() & Qt.ItemFlag.ItemIsEditable
-    assert not window._bom_table.item(0, 1).flags() & Qt.ItemFlag.ItemIsEditable
+    assert window._bom_table.item(0, 1) is None
     assert window._bom_table.item(0, 3).flags() & Qt.ItemFlag.ItemIsEditable
     assert not window._bom_table.item(0, 4).flags() & Qt.ItemFlag.ItemIsEditable
     assert window._bom_table.item(0, 5).flags() & Qt.ItemFlag.ItemIsEditable
