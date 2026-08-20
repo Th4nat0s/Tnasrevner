@@ -58,6 +58,8 @@ from PySide6.QtGui import (
 )
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QAbstractSpinBox,
     QApplication,
     QDialog,
     QDialogButtonBox,
@@ -87,6 +89,7 @@ from PySide6.QtWidgets import (
     QProgressDialog,
     QRubberBand,
     QStyle,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -351,10 +354,36 @@ class HistoryActionsMixin:
             getattr(self, "_connection_mode", False)
             and event.type() == QEvent.Type.KeyRelease
             and event.key() == Qt.Key.Key_Shift
+            and not self._text_input_has_focus()
         ):
             self._finish_connection_selection()
             return True
         return super().eventFilter(watched, event)
+
+    @staticmethod
+    def _text_input_has_focus() -> bool:
+        """Return whether focus belongs to a text-oriented widget.
+
+        Returns:
+            ``True`` when the focused widget is an editor, input control, or
+            item-view table; otherwise ``False``.
+        """
+        focused = QApplication.focusWidget()
+        while focused is not None:
+            if isinstance(
+                focused,
+                (
+                    QAbstractItemView,
+                    QAbstractSpinBox,
+                    QComboBox,
+                    QLineEdit,
+                    QPlainTextEdit,
+                    QTextEdit,
+                ),
+            ):
+                return True
+            focused = focused.parentWidget()
+        return False
 
     def keyPressEvent(self, event) -> None:  # noqa: N802
         """Switch board view with `T`, `B`, or a double press."""
@@ -363,6 +392,7 @@ class HistoryActionsMixin:
             self._connection_mode
             and key == Qt.Key.Key_Shift
             and not event.isAutoRepeat()
+            and not self._text_input_has_focus()
         ):
             self._connection_trace_pairs = ()
             self._refresh_views_preserving_state()

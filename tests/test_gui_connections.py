@@ -15,8 +15,16 @@ from types import SimpleNamespace
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtCore import QPoint, QPointF, QSettings, Qt
-from PySide6.QtGui import QColor, QImage, QPainter, QPixmap, QValidator, QWheelEvent
+from PySide6.QtCore import QEvent, QPoint, QPointF, QSettings, Qt
+from PySide6.QtGui import (
+    QColor,
+    QImage,
+    QKeyEvent,
+    QPainter,
+    QPixmap,
+    QValidator,
+    QWheelEvent,
+)
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
     QApplication,
@@ -209,6 +217,27 @@ def test_connections_table_reuses_existing_net_name(window: MainWindow) -> None:
     assert not window._net_table.item(0, 2).flags() & Qt.ItemFlag.ItemIsEditable
     assert window._net_table.item(0, 3).flags() & Qt.ItemFlag.ItemIsEditable
     assert not window._net_table.item(0, 4).flags() & Qt.ItemFlag.ItemIsEditable
+
+
+def test_shift_is_not_captured_in_text_tabs(window: MainWindow) -> None:
+    """Connection Shift handling does not intercept text-oriented tabs."""
+    window.show()
+    window._set_connection_mode(True)
+
+    for table in (window._net_table, window._nets_table, window._bom_table):
+        window._tabs.setCurrentWidget(table)
+        table.setFocus()
+        QApplication.processEvents()
+        event = QKeyEvent(
+            QEvent.Type.KeyRelease,
+            Qt.Key.Key_Shift,
+            Qt.KeyboardModifier.ShiftModifier,
+        )
+
+        assert window._text_input_has_focus()
+        assert not window.eventFilter(window, event)
+
+    window._exit_connection_mode()
 
 
 def test_net_summary_renames_every_assignment_and_counts_connections(
