@@ -523,6 +523,9 @@ class ImageImportMixin:
 
     def _refresh_views(self) -> None:
         """Refresh all views from one composed pixmap per board side."""
+        current_tab = self._tabs.currentIndex()
+        if current_tab < _CONNECTIONS_TAB:
+            self._capture_graphical_viewport(current_tab)
         images = {side: self._pixmap_for_asset(side) for side in ("top", "bottom")}
         for side, view in self._views.items():
             view.set_trace_selection(

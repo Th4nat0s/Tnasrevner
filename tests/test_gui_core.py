@@ -397,6 +397,18 @@ def test_board_view_sync_defers_hidden_views(
     assert deferred == list(followers)
 
 
+def test_graphical_viewports_survive_tab_switches(window: MainWindow) -> None:
+    """Board view zoom and pan are restored after visiting another tab."""
+    window._views["top"].apply_view_state((2.0, 0.75, 0.25))
+    top_state = window._views["top"].view_state()
+    window._tabs.setCurrentIndex(1)
+    QApplication.processEvents()
+    window._tabs.setCurrentIndex(0)
+    QApplication.processEvents()
+
+    assert window._views["top"].view_state() == pytest.approx(top_state, abs=0.01)
+
+
 def test_image_view_mouse_and_zoom_mapping(app: QApplication) -> None:
     """Wheel zooms; pad clicks route actions; empty-space drag pans."""
     view = ImageView("No image")

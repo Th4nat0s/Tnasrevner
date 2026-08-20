@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Preserved zoom and pan when switching between Top, Bottom, dual-board, Both,
+  and Schematic views.
 - Added a configurable light-gray color for schematic pin and function labels.
 - Pad and pin identifiers now use natural numeric ordering in Connections and
   Schematic views, so `C1.2` appears before `C1.10`.

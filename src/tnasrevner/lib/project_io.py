@@ -231,6 +231,53 @@ class ProjectIOMixin:
         self._dirty = True
         self._update_title(record_history=False)
 
+    def _graphical_views_for_tab(self, index: int) -> tuple[ImageView, ...]:
+        """Return board image views belonging to one graphical tab.
+
+        Args:
+            index: Tab index to resolve.
+
+        Returns:
+            Image views rendered by the requested Top, Bottom, dual, or Both
+            tab; an empty tuple for text and Schematic tabs.
+        """
+        if index == 0:
+            return (self._views["top"],)
+        if index == 1:
+            return (self._views["bottom"],)
+        if index == 2:
+            return tuple(self._side_views.values())
+        if index == 3:
+            return (self._overlay_view,)
+        return ()
+
+    def _capture_graphical_viewport(self, index: int) -> None:
+        """Remember the current zoom and pan for one board view tab.
+
+        Args:
+            index: Graphical tab index whose viewport should be captured.
+        """
+        views = self._graphical_views_for_tab(index)
+        if views:
+            self._graphical_view_states[index] = views[0].view_state()
+
+    def _restore_graphical_viewport(self, index: int) -> None:
+        """Restore a previously captured board viewport after tab activation.
+
+        Args:
+            index: Graphical tab index whose viewport should be restored.
+        """
+        state = self._graphical_view_states.get(index)
+        views = self._graphical_views_for_tab(index)
+        if state is None or not views:
+            return
+        self._syncing_views = True
+        try:
+            for view in views:
+                view.apply_view_state(state)
+        finally:
+            self._syncing_views = False
+
     def _schematic_viewport_state(self) -> tuple[float, int, int] | None:
         """Return persisted schematic viewport or no-state legacy fallback."""
         if not self.project:
@@ -257,10 +304,14 @@ class ProjectIOMixin:
         """Capture schematic viewport on tab changes and restore on entry."""
         if self._last_tab_index == _SCHEMATIC_TAB:
             self._capture_schematic_viewport()
+        elif self._last_tab_index < _CONNECTIONS_TAB:
+            self._capture_graphical_viewport(self._last_tab_index)
         self._last_tab_index = index
         self._update_view_tools(index)
         if index == _SCHEMATIC_TAB:
             QTimer.singleShot(0, self._restore_schematic_viewport)
+        elif index < _CONNECTIONS_TAB:
+            self._restore_graphical_viewport(index)
 
     def _last_project_directory(self) -> Path:
         """Return remembered project directory, falling back if it vanished."""
@@ -550,6 +601,7 @@ class ProjectIOMixin:
         self._project_context_generation = (
             getattr(self, "_project_context_generation", 0) + 1
         )
+        self._graphical_view_states.clear()
         self._next_picture_side = None
 
     def _confirm_pending_changes(self) -> bool:

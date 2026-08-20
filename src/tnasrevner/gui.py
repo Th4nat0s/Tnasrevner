@@ -202,6 +202,7 @@ class MainWindow(
         self._pad_display_mode = "both"
         self._pad_refresh_pending = False
         self._pending_pad_view_state: tuple[float, float, float] | None = None
+        self._graphical_view_states: dict[int, tuple[float, float, float]] = {}
         self._schematic_optimization_viewport: tuple[float, int, int] | None = None
         self._image_cache: dict[str, QPixmap] = {}
         self._device_footprint_cache: dict[str, Footprint] = {}
