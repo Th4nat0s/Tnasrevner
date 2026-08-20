@@ -44,6 +44,7 @@ from tnasrevner.gui import (
     SchematicView,
 )
 from tnasrevner.kicad import CacheResult, FootprintReference, parse_footprint
+from tnasrevner.lib.app_support import _natural_sort_key
 from tnasrevner.project import (
     ComponentPin,
     Device,
@@ -91,6 +92,41 @@ def test_net_view_and_right_click_assignment(window: MainWindow) -> None:
 
     assert window.project.pads[0].name == "P1"
     assert window.project.pads[0].net == "GND"
+
+
+def test_natural_identifier_sort_key_orders_multi_digit_pins() -> None:
+    """Natural identifier sorting keeps pin numbers in numeric order."""
+    identifiers = ["C1.10", "C1.2", "C1.1", "C1.2.bottom", "C1.10.bottom"]
+
+    assert sorted(identifiers, key=_natural_sort_key) == [
+        "C1.1",
+        "C1.2",
+        "C1.2.bottom",
+        "C1.10",
+        "C1.10.bottom",
+    ]
+
+
+def test_connections_table_naturally_sorts_pad_identifiers(
+    window: MainWindow,
+) -> None:
+    """Connections displays multi-digit pad identifiers in numeric order."""
+    window.project = ProjectDocument(
+        "Project",
+        "Board",
+        pads=[
+            Pad("C1.10", "top", 0.1, 0.1, "pad-10"),
+            Pad("C1.2", "top", 0.2, 0.1, "pad-2"),
+            Pad("C1.1", "top", 0.3, 0.1, "pad-1"),
+        ],
+    )
+
+    window._refresh_net_table()
+
+    assert [
+        window._net_table.item(row, 0).text()
+        for row in range(window._net_table.rowCount())
+    ] == ["C1.1", "C1.2", "C1.10"]
 
 
 def test_connections_table_can_edit_pad_net(window: MainWindow) -> None:

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Pad and pin identifiers now use natural numeric ordering in Connections and
+  Schematic views, so `C1.2` appears before `C1.10`.
 - Fixed macOS BOM object-type dropdown sizing so available choices remain
   readable without overlapping text.
 - New-project image setup callbacks are now invalidated across project changes,

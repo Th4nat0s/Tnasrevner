@@ -114,7 +114,7 @@ from ..project import (
 
 # pylint: disable=unused-import
 
-from .app_support import _footprint_family, _reference_sort_key
+from .app_support import _footprint_family, _natural_sort_key, _reference_sort_key
 from .app_config import (
     AppConfig,
     DEFAULT_COLORS,
@@ -1686,7 +1686,7 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
                 _reference_sort_key(device.reference),
             ),
         )
-        pads = sorted(self._project.pads, key=lambda pad: pad.name)
+        pads = sorted(self._project.pads, key=lambda pad: _natural_sort_key(pad.name))
         self._terminal_hits = []
         self._pad_centers = {}
         net_names = sorted(

@@ -169,6 +169,7 @@ LOGGER = logging.getLogger("tnasrevner")
 _LOG_PATH: Path | None = None
 _DEVICE_REFERENCE = re.compile(r"[A-Za-z][A-Za-z0-9_.+\-]{0,63}\Z")
 _NUMBERED_DEVICE_REFERENCE = re.compile(r"([A-Za-z]+)([0-9]+)\Z")
+_NATURAL_IDENTIFIER_PARTS = re.compile(r"(\d+)")
 _RECENT_FOOTPRINTS_KEY = "kicad/recent-footprints"
 _REFERENCE_PREFIX_KEY = "kicad/reference-prefix"
 _LAST_PROJECT_DIRECTORY_KEY = "projects/last-directory"
@@ -218,6 +219,26 @@ def _reference_sort_key(reference: str) -> tuple[str, int, str]:
     if match:
         return match.group(1).casefold(), int(match.group(2)), ""
     return reference.casefold(), -1, reference.casefold()
+
+
+def _natural_sort_key(identifier: str) -> tuple[tuple[int, str | int], ...]:
+    """Return a case-insensitive natural-sort key for an identifier.
+
+    Numeric portions are compared as integers, so ``C1.2`` sorts before
+    ``C1.10`` while textual portions and suffixes remain in their original
+    order.
+
+    Args:
+        identifier: Pad, pin, or other display identifier to sort.
+
+    Returns:
+        Comparable token pairs containing text and integer portions.
+    """
+    return tuple(
+        (1, int(part)) if part.isdigit() else (0, part.casefold())
+        for part in _NATURAL_IDENTIFIER_PARTS.split(identifier)
+        if part
+    )
 
 
 def _application_data_directory(create: bool = True) -> Path:

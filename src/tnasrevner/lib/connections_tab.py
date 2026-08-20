@@ -129,6 +129,7 @@ from .app_support import (
     _save_tool_icon,
     _footprint_family,
     _footprint_family_key,
+    _natural_sort_key,
     _reference_sort_key,
     _DEVICE_REFERENCE,
     _RECENT_FOOTPRINTS_KEY,
@@ -225,7 +226,7 @@ class ConnectionsTabMixin:
                     and (pad.device_id, pad.number) in top_terminals
                 )
             ),
-            key=lambda pad: pad.name,
+            key=lambda pad: _natural_sort_key(pad.name),
         )
 
     def _edit_connection_net(self, row: int, value: str) -> None:
