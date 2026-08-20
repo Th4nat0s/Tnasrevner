@@ -5,7 +5,7 @@ from __future__ import annotations
 # PySide6 exposes Qt classes through compiled extension modules; Pylint cannot
 # inspect those names despite them being available at runtime.
 # pylint: disable=no-name-in-module,invalid-name,unused-import
-# pylint: disable=too-few-public-methods,duplicate-code
+# pylint: disable=too-few-public-methods,duplicate-code,too-many-lines
 # pylint: disable=too-many-locals,too-many-statements
 # pylint: disable=too-many-return-statements
 # pylint: disable=too-many-branches
@@ -155,11 +155,9 @@ class ConnectionsTabMixin:
     """Provide connectionstab behavior to the main window."""
 
     def _refresh_net_table(self) -> None:
-        """Show pads, logical pins, functions, and assigned nets."""
+        """Show one row per logical terminal, hiding mirrored Bottom duplicates."""
         self._ensure_component_pins()
-        pads = (
-            sorted(self.project.pads, key=lambda pad: pad.name) if self.project else []
-        )
+        pads = self._connection_table_pads()
         self._net_table.blockSignals(True)
         try:
             self._net_table.setRowCount(len(pads))
@@ -200,6 +198,35 @@ class ConnectionsTabMixin:
                     self._net_table.setItem(row, column, item)
         finally:
             self._net_table.blockSignals(False)
+
+    def _connection_table_pads(self) -> list[Pad]:
+        """Return physical pads deduplicated to their Top logical connection.
+
+        A through-hole pin has one persisted pad per face so each photograph can
+        carry its own position. When both faces exist, their electrical terminal
+        is identical; Connections therefore exposes only the Top representation.
+        Independent Bottom-only pads remain visible.
+        """
+        if not self.project:
+            return []
+        top_terminals = {
+            (pad.device_id, pad.number)
+            for pad in self.project.pads
+            if pad.side == "top" and pad.device_id is not None and pad.number
+        }
+        return sorted(
+            (
+                pad
+                for pad in self.project.pads
+                if not (
+                    pad.side == "bottom"
+                    and pad.device_id is not None
+                    and pad.number is not None
+                    and (pad.device_id, pad.number) in top_terminals
+                )
+            ),
+            key=lambda pad: pad.name,
+        )
 
     def _edit_connection_net(self, row: int, value: str) -> None:
         """Apply a net edit made directly in the Connections table.
@@ -260,14 +287,16 @@ class ConnectionsTabMixin:
         if pad is None:
             return
         self.project.pads = [
-            replace(item, net=net)
-            if item.pad_id == pad_id
-            or (
-                pad.device_id is not None
-                and item.device_id == pad.device_id
-                and item.number == pad.number
+            (
+                replace(item, net=net)
+                if item.pad_id == pad_id
+                or (
+                    pad.device_id is not None
+                    and item.device_id == pad.device_id
+                    and item.number == pad.number
+                )
+                else item
             )
-            else item
             for item in self.project.pads
         ]
         if pad.device_id and pad.number:
@@ -276,7 +305,11 @@ class ConnectionsTabMixin:
                     replace(
                         device,
                         pins=[
-                            replace(pin, net_id=net) if pin.number == pad.number else pin
+                            (
+                                replace(pin, net_id=net)
+                                if pin.number == pad.number
+                                else pin
+                            )
                             for pin in device.pins
                         ],
                     )
@@ -364,8 +397,7 @@ class ConnectionsTabMixin:
         removed = {
             name
             for name in candidates
-            if not is_nc_net(name)
-            and len(self._logical_net_terminals(name)) < 2
+            if not is_nc_net(name) and len(self._logical_net_terminals(name)) < 2
         }
         if not removed:
             self._sync_net_registry()

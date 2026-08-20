@@ -117,6 +117,66 @@ def test_connections_table_net_edit_syncs_generated_pin(window: MainWindow) -> N
     assert window.project.devices[0].pins[0].net_id == "DATA"
 
 
+def test_connections_table_hides_mirrored_bottom_pin_row(
+    window: MainWindow,
+) -> None:
+    """Connections exposes one Top row for a two-face THT logical pin."""
+    device = Device(
+        "J1",
+        "top",
+        0.5,
+        0.5,
+        "Connector_Generic",
+        "DIP-2",
+        "assets/kicad/j1.kicad_mod",
+        "a" * 40,
+        device_id="device",
+        pins=[ComponentPin("1", "1", footprint_pad="1", net_id="GND")],
+    )
+    window.project = ProjectDocument(
+        "Project",
+        "Board",
+        devices=[device],
+        pads=[
+            Pad(
+                "J1.1",
+                "top",
+                0.1,
+                0.1,
+                "top-pin",
+                net="GND",
+                device_id="device",
+                number="1",
+            ),
+            Pad(
+                "J1.1.bottom",
+                "bottom",
+                0.88,
+                0.1,
+                "bottom-pin",
+                net="GND",
+                device_id="device",
+                number="1",
+            ),
+            Pad("P1", "bottom", 0.4, 0.4, "bottom-only"),
+        ],
+    )
+
+    window._refresh_net_table()
+
+    assert window._net_table.rowCount() == 2
+    assert [window._net_table.item(row, 0).text() for row in range(2)] == [
+        "J1.1",
+        "P1",
+    ]
+    assert window._net_table.item(0, 0).data(Qt.ItemDataRole.UserRole) == "top-pin"
+
+    window._net_table.item(0, 1).setText("VCC")
+
+    assert [pad.net for pad in window.project.pads[:2]] == ["VCC", "VCC"]
+    assert window.project.devices[0].pins[0].net_id == "VCC"
+
+
 def test_connections_table_rejects_reserved_nc_edit(window: MainWindow) -> None:
     """The Connections table accepts the reserved NC annotation."""
     window.project = ProjectDocument(

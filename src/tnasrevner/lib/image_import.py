@@ -520,7 +520,7 @@ class ImageImportMixin:
                 self._trace_highlight_ids,
             )
             view.set_footprint_overlays(self._vector_footprints_for_side(side))
-            view.set_pad_labels(self._vector_labels_for_side(side))
+            view.set_pad_labels(self._display_labels_for_side(side))
             view.set_pixmap(images[side])
         self._refresh_overlay(images)
         for side, view in self._side_views.items():
@@ -531,7 +531,7 @@ class ImageImportMixin:
                 self._trace_highlight_ids,
             )
             view.set_footprint_overlays(self._vector_footprints_for_side(side))
-            view.set_pad_labels(self._vector_labels_for_side(side))
+            view.set_pad_labels(self._display_labels_for_side(side))
             view.set_pixmap(images[side])
         overlay_labels = self._overlay_pad_labels()
         self._overlay_view.set_trace_selection(
@@ -581,7 +581,7 @@ class ImageImportMixin:
         """Refresh only views affected by a newly placed device side."""
         image = self._pixmap_for_asset(side)
         footprints = self._vector_footprints_for_side(side)
-        labels = self._vector_labels_for_side(side)
+        labels = self._display_labels_for_side(side)
         views = (self._views[side], self._side_views[side])
         for view in views:
             view.set_trace_selection(
@@ -604,6 +604,21 @@ class ImageImportMixin:
         if self._pad_display_mode == "image" or not self.project:
             return ()
         return tuple(pad for pad in self.project.pads if pad.side == side)
+
+    def _display_labels_for_side(self, side: str) -> tuple[Pad, ...]:
+        """Return face-aware labels without redundant `.bottom` display text."""
+        labels = self._vector_labels_for_side(side)
+        if side != "bottom":
+            return labels
+        suffix = ".bottom"
+        return tuple(
+            (
+                replace(pad, name=pad.name[: -len(suffix)])
+                if pad.device_id is not None and pad.name.endswith(suffix)
+                else pad
+            )
+            for pad in labels
+        )
 
     def _vector_footprints_for_side(self, side: str) -> tuple[tuple, ...]:
         """Return placed footprints for vector rendering in one view."""

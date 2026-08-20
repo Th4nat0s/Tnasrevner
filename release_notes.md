@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Connections now hides duplicate Bottom THT pin rows when a Top representation
+  exists, and Bottom board views omit the redundant `.bottom` label suffix while
+  retaining the original persisted pad identity.
 - Added a `↔️` footprint Move tool with alternating **Dual face move** and
   **Single face move** scopes, Shift-selection, mirrored Top/Bottom movement,
   persisted per-face offsets, Escape exit, and undo history integration.

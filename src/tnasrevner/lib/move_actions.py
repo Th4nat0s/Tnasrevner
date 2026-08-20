@@ -238,7 +238,7 @@ class MoveActionsMixin:
     def _refresh_moved_footprint(self, sides: set[str]) -> None:
         """Redraw moved pads and footprints without touching zoom or pan."""
         for side in sides:
-            labels = self._vector_labels_for_side(side)
+            labels = self._display_labels_for_side(side)
             footprints = self._vector_footprints_for_side(side)
             for view in (self._views[side], self._side_views[side]):
                 view.set_pad_labels(labels)
