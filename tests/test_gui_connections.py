@@ -703,6 +703,25 @@ def test_nc_mode_shift_click_assigns_nc_without_connection(window: MainWindow) -
     assert window._selected_net is None
 
 
+def test_connection_can_reuse_a_pad_marked_nc(window: MainWindow) -> None:
+    """Connection mode replaces NC with an ordinary electrical net."""
+    window.project = ProjectDocument(
+        "Project",
+        "Board",
+        pads=[
+            Pad("P1", "top", 0.1, 0.1, "one", net=NC_NET),
+            Pad("P2", "top", 0.3, 0.1, "two"),
+        ],
+    )
+    window._set_connection_mode(True)
+
+    window._append_connection_terminal(("pad", "one", None))
+    window._append_connection_terminal(("pad", "two", None))
+
+    assert [pad.net for pad in window.project.pads] == ["NT1", "NT1"]
+    assert window._selected_net == "NT1"
+
+
 def test_selected_link_terminals_use_connection_preview_color() -> None:
     """Board and schematic selected terminals share the preview palette key."""
     image_view_source = Path("src/tnasrevner/lib/image_view.py").read_text(

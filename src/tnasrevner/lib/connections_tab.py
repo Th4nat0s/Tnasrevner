@@ -950,6 +950,7 @@ class ConnectionsTabMixin:
                 self._terminal_net(terminal)
                 for terminal in terminals
                 if self._terminal_net(terminal) is not None
+                and not is_nc_net(self._terminal_net(terminal))
             )
         )
         target_net = (
