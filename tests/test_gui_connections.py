@@ -18,6 +18,7 @@ import pytest
 from PySide6.QtCore import QEvent, QPoint, QPointF, QSettings, Qt
 from PySide6.QtGui import (
     QColor,
+    QFontMetrics,
     QImage,
     QKeyEvent,
     QPainter,
@@ -1142,6 +1143,15 @@ def test_bom_value_and_object_dropdown_are_editable(
     )
     combo = window._bom_table.cellWidget(0, 1)
     assert combo.findText("Transistor") >= 0
+    assert combo.view().uniformItemSizes()
+    assert not combo.view().wordWrap()
+    metrics = QFontMetrics(combo.font())
+    longest = max(
+        metrics.horizontalAdvance(combo.itemText(index))
+        for index in range(combo.count())
+    )
+    assert combo.minimumWidth() >= longest
+    assert combo.view().minimumWidth() >= combo.minimumWidth()
     combo.setCurrentText("Transistor")
     QApplication.processEvents()
     assert window.project.devices[0].object_type == "Transistor"

@@ -50,6 +50,7 @@ from PySide6.QtGui import (
     QColor,
     QCloseEvent,
     QCursor,
+    QFontMetrics,
     QIcon,
     QPainter,
     QPen,
@@ -75,6 +76,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QListWidget,
     QListWidgetItem,
+    QListView,
     QMainWindow,
     QMessageBox,
     QMenu,
@@ -152,6 +154,39 @@ from .schematic_tab import SchematicView
 class BomTabMixin:
     """Provide bomtab behavior to the main window."""
 
+    @staticmethod
+    def _configure_bom_object_combo(
+        combo: QComboBox, options: tuple[str, ...]
+    ) -> int:
+        """Size a BOM object-type combo and its popup from Qt font metrics.
+
+        Args:
+            combo: Object-type selector embedded in the BOM table.
+            options: All visible choices, including the ``NEW`` action.
+
+        Returns:
+            Minimum width required by the selector and its popup.
+        """
+        metrics = QFontMetrics(combo.font())
+        text_width = max(
+            (metrics.horizontalAdvance(option) for option in options), default=0
+        )
+        frame_width = combo.style().pixelMetric(
+            QStyle.PixelMetric.PM_ComboBoxFrameWidth, None, combo
+        )
+        scroll_width = combo.view().verticalScrollBar().sizeHint().width()
+        minimum_width = max(180, text_width + (frame_width * 2) + scroll_width + 24)
+        popup = QListView()
+        popup.setUniformItemSizes(True)
+        popup.setTextElideMode(Qt.TextElideMode.ElideNone)
+        popup.setWordWrap(False)
+        popup.setMinimumWidth(max(220, minimum_width))
+        popup.setMinimumHeight(max(1, min(len(options), 8)) * (metrics.height() + 8))
+        combo.setView(popup)
+        combo.setMinimumWidth(minimum_width)
+        combo.setMinimumContentsLength(0)
+        return minimum_width
+
     def _refresh_bom_table(self) -> None:
         """Show every placed KiCad device and its BOM metadata."""
         devices = (
@@ -171,6 +206,7 @@ class BomTabMixin:
             key=str.casefold,
         )
         self._bom_table.blockSignals(True)
+        combo_width = 180
         try:
             self._bom_table.setRowCount(len(devices))
             for row, device in enumerate(devices):
@@ -181,11 +217,9 @@ class BomTabMixin:
                 combo.addItems(object_types)
                 combo.addItem("NEW")
                 combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
-                combo.setMinimumContentsLength(
-                    max((len(item) for item in (*object_types, "NEW")), default=8)
+                combo_width = self._configure_bom_object_combo(
+                    combo, (*object_types, "NEW")
                 )
-                combo.setMinimumWidth(180)
-                combo.view().setMinimumWidth(max(220, combo.sizeHint().width()))
                 current_type = device.object_type or _footprint_family(
                     device.footprint_library
                 )
@@ -217,7 +251,9 @@ class BomTabMixin:
             self._bom_table.blockSignals(False)
         self._bom_table.resizeColumnsToContents()
         header = self._bom_table.horizontalHeader()
-        self._bom_table.setColumnWidth(1, max(180, self._bom_table.columnWidth(1)))
+        self._bom_table.setColumnWidth(
+            1, max(combo_width, self._bom_table.columnWidth(1))
+        )
         for column in range(self._bom_table.columnCount()):
             header.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
 
