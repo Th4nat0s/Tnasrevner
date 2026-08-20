@@ -27,11 +27,13 @@ def test_config_round_trip_preserves_colors_and_extra_values(tmp_path: Path) -> 
     path = tmp_path / "config.yaml"
     config = AppConfig.load(path)
     assert config.set_color("connected_pad", "#123456")
+    assert config.set_color("schematic_pin_text", "#d8dee9")
     config.extra["future_setting"] = {"enabled": True}
     assert config.save()
 
     loaded = AppConfig.load(path)
     assert loaded.colors["connected_pad"] == "#123456"
+    assert loaded.colors["schematic_pin_text"] == "#d8dee9"
     assert loaded.extra["future_setting"] == {"enabled": True}
 
 

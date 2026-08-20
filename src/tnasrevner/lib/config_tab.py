@@ -28,6 +28,7 @@ COLOR_LABELS = {
     "schematic_net": "Schematic Net",
     "selected_schematic_net": "Selected Schematic Net",
     "schematic_glued": "Glued Schematic Component",
+    "schematic_pin_text": "Schematic Pin / Function Text",
 }
 
 

@@ -1614,7 +1614,7 @@ class SchematicCanvas(QWidget):  # pylint: disable=too-many-instance-attributes
             pin_color = self._color("schematic_net") if pin.net_id else QColor("#20242b")
             if self._selected_net and pin.net_id == self._selected_net:
                 pin_color = self._color("connection_preview")
-            painter.setPen(contrasting_text_color(pin_color))
+            painter.setPen(self._color("schematic_pin_text"))
             delta_x = endpoint.x() - center.x()
             delta_y = endpoint.y() - center.y()
             if kind == "uc":

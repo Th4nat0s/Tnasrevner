@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added a configurable light-gray color for schematic pin and function labels.
 - Pad and pin identifiers now use natural numeric ordering in Connections and
   Schematic views, so `C1.2` appears before `C1.10`.
 - Fixed macOS BOM object-type dropdown sizing and removed duplicate cell text

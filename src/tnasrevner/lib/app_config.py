@@ -24,6 +24,7 @@ DEFAULT_COLORS = {
     "schematic_net": "#e4b363",
     "selected_schematic_net": "#66c2ff",
     "schematic_glued": "#f5a3c7",
+    "schematic_pin_text": "#c7d0dc",
 }
 
 
