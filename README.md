@@ -15,7 +15,8 @@ electrical schematic.
 
 ## Main workflow
 
-- Import and align the top and bottom board images.
+- Import, align, and scale the top and bottom board images using a component
+  footprint as a reference.
 - Place components, footprints, pads, and pins, including through-hole devices.
 - Recreate point-to-point connections; Tna’’Srevn’Er generates and organizes
   the corresponding net connections.
@@ -52,6 +53,7 @@ electrical schematic.
 
 This project is currently in beta. Please try it out and do not hesitate to
 report bugs, usability issues, or missing features through the issue tracker.
+Pull requests and improvements are welcome too.
 
 ## Greetings and third-party data
 
