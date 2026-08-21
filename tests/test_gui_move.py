@@ -118,7 +118,8 @@ def test_move_palette_cycles_face_scope_and_escape_exits(
 
     assert window._move_mode == "dual"
     assert window._move_button.isChecked()
-    assert window._move_button.text() == "↔️"
+    assert window._move_button.text() == ""
+    assert not window._move_button.icon().isNull()
     assert window.statusBar().currentMessage() == "Dual face move"
 
     window._move_button.click()

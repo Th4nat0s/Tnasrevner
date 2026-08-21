@@ -61,34 +61,12 @@ from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
-    QDialogButtonBox,
     QDockWidget,
-    QDoubleSpinBox,
-    QComboBox,
-    QFileDialog,
-    QFrame,
-    QFormLayout,
-    QHeaderView,
-    QHBoxLayout,
-    QInputDialog,
-    QLabel,
-    QLineEdit,
-    QPlainTextEdit,
-    QListWidget,
-    QListWidgetItem,
-    QMainWindow,
+    QGridLayout,
     QMessageBox,
-    QMenu,
-    QScrollArea,
-    QSpinBox,
-    QTabWidget,
-    QTableWidget,
-    QTableWidgetItem,
     QPushButton,
     QProgressDialog,
-    QRubberBand,
     QStyle,
-    QVBoxLayout,
     QWidget,
 )
 
@@ -126,6 +104,7 @@ from .app_support import (
     _center_tool_icon,
     _pad_tool_icon,
     _save_tool_icon,
+    _tool_icon,
     _footprint_family,
     _footprint_family_key,
     _reference_sort_key,
@@ -160,7 +139,12 @@ class BoardControlsMixin:
         dock = QDockWidget("Tools", self)
         dock.setObjectName("toolsDock")
         panel = QWidget(dock)
-        layout = QVBoxLayout(panel)
+        layout = QGridLayout(panel)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setHorizontalSpacing(4)
+        layout.setVerticalSpacing(4)
+        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        palette_position = 0
 
         def add_button(
             text: str,
@@ -168,18 +152,31 @@ class BoardControlsMixin:
             tooltip: str,
             callback: Callable[[], None],
         ) -> QPushButton:
-            """Add icon, tooltip, and hover feedback to palette button."""
+            """Add one action to the next cell in the compact tool grid.
+
+            Args:
+                text: Accessible action name and fallback object-name source.
+                icon: Qt standard icon used unless the caller replaces it.
+                tooltip: Mouse hover and status-bar help text.
+                callback: No-argument action invoked when clicked.
+
+            Returns:
+                Configured push button added to the palette.
+            """
+            nonlocal palette_position
             button = QPushButton(panel)
             button.setIcon(self.style().standardIcon(icon))
             button.setAccessibleName(text)
             button.setObjectName(
                 f"tool{''.join(character for character in text.title() if character.isalnum())}"
             )
-            button.setFixedSize(40, 36)
+            button.setFixedSize(40, 34)
             button.setToolTip(tooltip)
             button.setStatusTip(tooltip)
             button.clicked.connect(lambda _checked=False, action=callback: action())
-            layout.addWidget(button)
+            row, column = divmod(palette_position, 2)
+            layout.addWidget(button, row, column)
+            palette_position += 1
             return button
 
         actual_button = add_button(
@@ -190,7 +187,7 @@ class BoardControlsMixin:
         )
         actual_button.setIcon(QIcon())
         actual_button.setText("1:1")
-        actual_button.setFixedSize(40, 36)
+        actual_button.setFixedSize(40, 34)
         fit_button = add_button(
             "FIT",
             QStyle.StandardPixmap.SP_DesktopIcon,
@@ -216,22 +213,24 @@ class BoardControlsMixin:
             "Measure Tool",
             self._toggle_ruler,
         )
-        ruler_button.setIcon(QIcon())
-        ruler_button.setText("📐")
-        ruler_button.setFont(QFont(".AppleSystemUIFont", 20))
+        ruler_button.setIcon(_tool_icon("ruler"))
         ruler_button.setCheckable(True)
         self._ruler_button = ruler_button
         show_pads_button = QPushButton(panel)
         show_pads_button.setAccessibleName("Pad display mode")
         show_pads_button.setObjectName("toolShowPads")
-        show_pads_button.setFixedSize(40, 36)
+        show_pads_button.setFixedSize(40, 34)
         show_pads_button.setText("ALL")
         show_pads_button.setToolTip("Show/Hide Layers")
         show_pads_button.setStatusTip(show_pads_button.toolTip())
         show_pads_button.clicked.connect(self._cycle_pad_display_mode)
         self._show_pads_button = show_pads_button
-        layout.addWidget(show_pads_button)
-        layout.addSpacing(12)
+        row, column = divmod(palette_position, 2)
+        layout.addWidget(show_pads_button, row, column)
+        palette_position += 1
+        group_gap_row = palette_position // 2
+        layout.setRowMinimumHeight(group_gap_row, 12)
+        palette_position += 2
         info_button = add_button(
             "Info",
             QStyle.StandardPixmap.SP_FileDialogInfoView,
@@ -268,9 +267,7 @@ class BoardControlsMixin:
             "Move footprint: click for Dual face, click again for Single face",
             self._cycle_move_mode,
         )
-        move_button.setIcon(QIcon())
-        move_button.setText("↔️")
-        move_button.setFont(QFont(".AppleSystemUIFont", 18))
+        move_button.setIcon(_tool_icon("move"))
         move_button.setCheckable(True)
         self._move_button = move_button
         connect_button = add_button(
@@ -279,8 +276,7 @@ class BoardControlsMixin:
             "Connection mode: Shift+click pads or pins",
             self._toggle_connection_mode,
         )
-        connect_button.setIcon(QIcon())
-        connect_button.setText("--")
+        connect_button.setIcon(_tool_icon("connect"))
         connect_button.setCheckable(True)
         self._connect_button = connect_button
         nc_button = add_button(
@@ -290,9 +286,7 @@ class BoardControlsMixin:
             self._toggle_nc_mode,
         )
         nc_button.setCheckable(True)
-        nc_button.setIcon(QIcon())
-        nc_button.setText("⛓️‍💥")
-        nc_button.setFont(QFont(".AppleSystemUIFont", 18))
+        nc_button.setIcon(_tool_icon("nc"))
         self._nc_button = nc_button
         optimize_button = add_button(
             "Optimize Schematic",
@@ -309,16 +303,16 @@ class BoardControlsMixin:
         )
         delete_button.setCheckable(True)
         self._delete_button = delete_button
-        layout.addStretch()
+        group_gap_row = palette_position // 2
+        layout.setRowMinimumHeight(group_gap_row, 12)
+        palette_position += 2
         image_button = add_button(
             "Image",
             QStyle.StandardPixmap.SP_DialogOpenButton,
             "Choose Top or Bottom image: load, resize, or remove",
             self.manage_picture,
         )
-        image_button.setIcon(QIcon())
-        image_button.setText("📷")
-        image_button.setFont(QFont(".AppleSystemUIFont", 18))
+        image_button.setIcon(_tool_icon("image"))
         add_button(
             "Log file",
             QStyle.StandardPixmap.SP_FileDialogInfoView,

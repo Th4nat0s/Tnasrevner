@@ -119,6 +119,18 @@ def _application_icon() -> QIcon:
     return QIcon(str(Path(__file__).parent.parent / "assets" / "tnasrevner.svg"))
 
 
+def _tool_icon(name: str) -> QIcon:
+    """Load one portable tool icon from package data.
+
+    Args:
+        name: Asset basename without its ``.svg`` extension.
+
+    Returns:
+        Icon loaded from the packaged tool asset.
+    """
+    return QIcon(str(Path(__file__).parent.parent / "assets" / f"tool-{name}.svg"))
+
+
 def _center_tool_icon() -> QIcon:
     """Create a clear crosshair icon for image centering."""
     canvas = QPixmap(24, 24)

@@ -184,12 +184,32 @@ def test_deferred_picture_setup_is_ignored_after_project_context_changes(
     window._invalidate_project_context()
     QApplication.processEvents()
 
-    assert opened == []
+    assert not opened
 
 
 def test_main_window_has_application_icon(window: MainWindow) -> None:
     """Linux taskbars need a non-empty window icon."""
     assert not window.windowIcon().isNull()
+
+
+def test_main_window_fits_short_linux_desktop_and_shows_status_bar(
+    window: MainWindow, app: QApplication
+) -> None:
+    """Tool palette must not force status information below a 700 px screen."""
+    window.resize(1100, 700)
+    window.show()
+    app.processEvents()
+
+    assert window.minimumSizeHint().height() <= 700
+    assert window.height() == 700
+    assert window.statusBar().isVisible()
+    tools = window._tools_dock.widget()
+    show_pads = tools.findChild(QPushButton, "toolShowPads")
+    info = tools.findChild(QPushButton, "toolInfo")
+    delete = tools.findChild(QPushButton, "toolDelete")
+    image = tools.findChild(QPushButton, "toolImage")
+    assert info.y() - (show_pads.y() + show_pads.height()) >= 12
+    assert image.y() - (delete.y() + delete.height()) >= 12
 
 
 def test_project_dialog_remembers_existing_directory(
@@ -996,10 +1016,16 @@ def test_tools_palette_buttons_have_icons_and_hover_help(window: MainWindow) -> 
     assert window._tools_dock.widget().findChild(QPushButton, "tool11").text() == "1:1"
     ruler = window._tools_dock.widget().findChild(QPushButton, "toolRuler")
     assert ruler is not None
-    assert ruler.text() == "📐"
+    assert not ruler.icon().isNull()
+    assert ruler.text() == ""
     assert ruler.accessibleName() == "Ruler"
     assert ruler.toolTip() == "Measure Tool"
     assert ruler.statusTip() == "Measure Tool"
+    for name in ("toolMove", "toolConnect", "toolNc", "toolImage"):
+        button = window._tools_dock.widget().findChild(QPushButton, name)
+        assert button is not None
+        assert not button.icon().isNull()
+        assert button.text() == ""
 
 
 def test_kicad_cache_failure_cancels_pending_import(
@@ -1259,7 +1285,7 @@ def test_schematic_interactive_paint_has_100x_regression_budget(
 ) -> None:
     """Interactive DakeFPV paint must stay below 100x the 10 ms baseline."""
     del app
-    project = ProjectStore(Path("Sample_Img/DakeFVP2.revp")).load()
+    project = ProjectStore(Path("Samples/DakeFVP2.revp")).load()
     canvas = SchematicCanvas()
     canvas._project = project
     canvas.resize(1600, 1000)
@@ -1279,7 +1305,7 @@ def test_schematic_optimizer_has_sparse_dake_performance_budget(
 ) -> None:
     """Sparse DakeFPV optimization must remain bounded below three seconds."""
     del app
-    project = ProjectStore(Path("Sample_Img/DakeFVP2.revp")).load()
+    project = ProjectStore(Path("Samples/DakeFVP2.revp")).load()
     canvas = SchematicCanvas()
     canvas._project = project
     canvas._auto_centers = canvas._layout_devices()
