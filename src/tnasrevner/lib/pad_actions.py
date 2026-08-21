@@ -100,6 +100,8 @@ from ..kicad import (
     KiCadCacheError,
     KiCadFootprintCache,
     KiCadFormatError,
+    KiCadSymbolCache,
+    parse_symbol_library,
     place_footprint_pads,
     parse_footprint,
 )
@@ -595,6 +597,10 @@ class PadActionsMixin:
                 swap_action = menu.addAction("Swap pins")
             component_action = menu.addAction("Edit Name…")
             value_action = menu.addAction("Set Value…")
+            symbol_action = menu.addAction("Assign KiCad Component…")
+            clear_symbol_action = None
+            if device.symbol_name:
+                clear_symbol_action = menu.addAction("Clear KiCad Component")
             description_action = menu.addAction("Edit description…")
             datasheet_action = menu.addAction("Edit datasheet…")
             delete_action.triggered.connect(
@@ -612,6 +618,13 @@ class PadActionsMixin:
             value_action.triggered.connect(
                 lambda: self._edit_device_value(device.device_id)
             )
+            symbol_action.triggered.connect(
+                lambda: self._assign_kicad_component(device.device_id)
+            )
+            if clear_symbol_action is not None:
+                clear_symbol_action.triggered.connect(
+                    lambda: self._clear_kicad_component(device.device_id)
+                )
             component_action.triggered.connect(
                 lambda: self._edit_device_component(device.device_id)
             )
@@ -910,6 +923,104 @@ class PadActionsMixin:
         )
         if accepted:
             self._rename_device(device_id, reference)
+
+    def _assign_kicad_component(self, device_id: str) -> None:
+        """Download/select a compatible KiCad symbol and map its pins."""
+        if not self.project:
+            return
+        device = next(
+            (item for item in self.project.devices if item.device_id == device_id),
+            None,
+        )
+        if device is None:
+            return
+        try:
+            cache = KiCadSymbolCache(
+                self._footprint_cache.root.parent / "kicad-symbols"
+            )
+            cache.ensure_ready()
+            candidates = []
+            pad_numbers = {
+                pad.number for pad in self.project.pads if pad.device_id == device_id
+            }
+            for reference in cache.catalog():
+                for symbol in parse_symbol_library(
+                    reference.path.read_bytes(), reference.library
+                ):
+                    if len(symbol.pins) == len(pad_numbers):
+                        candidates.append(symbol)
+            if not candidates:
+                QMessageBox.information(
+                    self, "KiCad component", "No compatible symbol was found."
+                )
+                return
+        except (OSError, KiCadCacheError, KiCadFormatError) as error:
+            QMessageBox.warning(self, "KiCad component", str(error))
+            return
+        labels = [
+            f"{symbol.name} — {symbol.library} ({len(symbol.pins)} pins)"
+            for symbol in candidates
+        ]
+        selected, accepted = QInputDialog.getItem(
+            self, "Select KiCad component", "Component:", labels, 0, True
+        )
+        if not accepted:
+            return
+        selected_index = next(
+            (index for index, label in enumerate(labels) if label == selected), None
+        )
+        if selected_index is None:
+            return
+        symbol = candidates[selected_index]
+        old_pins = {pin.number: pin for pin in device.pins}
+        pins = [
+            ComponentPin(
+                pin.number,
+                pin.name,
+                pin.name,
+                pin.number,
+                (
+                    old_pins[pin.number].net_id
+                    if pin.number in old_pins
+                    else None
+                ),
+            )
+            for pin in symbol.pins
+        ]
+        self.project.devices = [
+            replace(
+                item,
+                pins=pins,
+                symbol_library_path=str(
+                    next(
+                        reference.path
+                        for reference in cache.catalog()
+                        if reference.library == symbol.library
+                    )
+                ),
+                symbol_name=symbol.name,
+            )
+            if item.device_id == device_id
+            else item
+            for item in self.project.devices
+        ]
+        self._dirty = True
+        self._refresh_views()
+        self._update_title()
+
+    def _clear_kicad_component(self, device_id: str) -> None:
+        """Remove a KiCad symbol association while preserving footprint pins."""
+        if not self.project:
+            return
+        self.project.devices = [
+            replace(item, symbol_library_path=None, symbol_name=None)
+            if item.device_id == device_id
+            else item
+            for item in self.project.devices
+        ]
+        self._dirty = True
+        self._refresh_views()
+        self._update_title()
 
     def _assign_device_value(self, device_id: str, value: str) -> None:
         """Persist a BOM value entered for one device."""

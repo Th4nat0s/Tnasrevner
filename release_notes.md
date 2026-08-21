@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Added a first KiCad symbol-association workflow: official symbol libraries are
+  cached locally with the same refreshable offline behavior as footprints, and
+  compatible symbols can populate component pin names while preserving manual
+  Value editing.
+
 - Preserved zoom and pan when switching between Top, Bottom, dual-board, Both,
   and Schematic views.
 - Added a configurable light-gray color for schematic pin and function labels.

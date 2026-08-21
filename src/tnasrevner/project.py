@@ -523,6 +523,8 @@ class Device:  # pylint: disable=too-many-instance-attributes
     note: str = ""
     datasheet: str = ""
     footprint_definition_id: str | None = None
+    symbol_library_path: str | None = None
+    symbol_name: str | None = None
 
     def __post_init__(self) -> None:  # pylint: disable=too-many-branches
         _required_string(self.reference, "device reference")
@@ -558,6 +560,12 @@ class Device:  # pylint: disable=too-many-instance-attributes
             self.footprint_definition_id, str
         ):
             raise ProjectFormatError("device footprint_definition_id must be a string")
+        if self.symbol_library_path is not None and not isinstance(
+            self.symbol_library_path, str
+        ):
+            raise ProjectFormatError("device symbol_library_path must be a string")
+        if self.symbol_name is not None and not isinstance(self.symbol_name, str):
+            raise ProjectFormatError("device symbol_name must be a string")
         if not all(isinstance(pin, ComponentPin) for pin in self.pins):
             raise ProjectFormatError("device pins must be component pin objects")
         pin_numbers = [pin.number for pin in self.pins]
@@ -596,6 +604,8 @@ class Device:  # pylint: disable=too-many-instance-attributes
             "description": self.description,
             "note": self.note,
             "datasheet": self.datasheet,
+            "symbol_library_path": self.symbol_library_path,
+            "symbol_name": self.symbol_name,
         }
 
     @classmethod
@@ -645,6 +655,8 @@ class Device:  # pylint: disable=too-many-instance-attributes
             note=data.get("note", ""),
             datasheet=data.get("datasheet", ""),
             footprint_definition_id=data.get("footprint_definition_id"),
+            symbol_library_path=data.get("symbol_library_path"),
+            symbol_name=data.get("symbol_name"),
         )
 
 

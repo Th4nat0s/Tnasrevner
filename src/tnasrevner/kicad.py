@@ -11,6 +11,7 @@ import math
 from pathlib import Path, PurePosixPath
 import shutil
 import stat
+import re
 from typing import Any
 from urllib.request import Request, urlopen
 from uuid import uuid4
@@ -18,12 +19,21 @@ from zipfile import BadZipFile, ZipFile
 
 KICAD_FOOTPRINT_SOURCE = "https://gitlab.com/kicad/libraries/kicad-footprints"
 KICAD_FOOTPRINT_REF = "master"
+KICAD_SYMBOL_SOURCE = "https://gitlab.com/kicad/libraries/kicad-symbols"
+KICAD_SYMBOL_REF = "master"
 KICAD_COMMIT_API = (
     "https://gitlab.com/api/v4/projects/"
     "kicad%2Flibraries%2Fkicad-footprints/repository/commits/master"
 )
 KICAD_ARCHIVE_URL = (
     KICAD_FOOTPRINT_SOURCE + "/-/archive/{revision}/kicad-footprints-{revision}.zip"
+)
+KICAD_SYMBOL_COMMIT_API = (
+    "https://gitlab.com/api/v4/projects/"
+    "kicad%2Flibraries%2Fkicad-symbols/repository/commits/master"
+)
+KICAD_SYMBOL_ARCHIVE_URL = (
+    KICAD_SYMBOL_SOURCE + "/-/archive/{revision}/kicad-symbols-{revision}.zip"
 )
 CACHE_MAX_AGE = timedelta(days=30)
 METADATA_FILENAME = "metadata.json"
@@ -60,6 +70,41 @@ class FootprintReference:
     @property
     def identifier(self) -> str:
         """Return the standard `library:name` identifier."""
+        return f"{self.library}:{self.name}"
+
+
+@dataclass(frozen=True)
+class SymbolReference:
+    """One KiCad symbol library file in the local symbol cache."""
+
+    library: str
+    path: Path
+
+    @property
+    def identifier(self) -> str:
+        """Return the stable library-file identifier."""
+        return f"{self.library}:{self.path.stem}"
+
+
+@dataclass(frozen=True)
+class KiCadSymbolPin:
+    """Electrical pin exposed by a KiCad symbol."""
+
+    number: str
+    name: str
+
+
+@dataclass(frozen=True)
+class KiCadSymbol:
+    """Parsed KiCad symbol with its physical pin numbers and names."""
+
+    library: str
+    name: str
+    pins: tuple[KiCadSymbolPin, ...]
+
+    @property
+    def identifier(self) -> str:
+        """Return the stable symbol identifier."""
         return f"{self.library}:{self.name}"
 
 
@@ -492,6 +537,223 @@ class KiCadFootprintCache:
         if updated.tzinfo is None:
             updated = updated.replace(tzinfo=timezone.utc)
         return timedelta(0) <= now.astimezone(timezone.utc) - updated < CACHE_MAX_AGE
+
+
+class KiCadSymbolCache:
+    """Maintain a refreshable local snapshot of official KiCad symbols."""
+
+    def __init__(
+        self,
+        root: Path,
+        fetch_json: Callable[[str], dict[str, Any]] | None = None,
+        fetch_bytes: Callable[[str], bytes] | None = None,
+    ) -> None:
+        self.root = Path(root)
+        self._fetch_json = fetch_json or _download_json
+        self._fetch_bytes = fetch_bytes or _download_bytes
+
+    def ensure_ready(self, now: datetime | None = None) -> CacheResult:
+        """Reuse a fresh symbol cache or download a stale snapshot."""
+        now = now or datetime.now(timezone.utc)
+        metadata = self._metadata()
+        valid = metadata is not None and self._contains_symbols(self.root)
+        if valid and self._is_fresh(metadata, now):
+            return CacheResult(self.root, metadata["revision"], False)
+        try:
+            commit = self._fetch_json(KICAD_SYMBOL_COMMIT_API)
+            revision = commit.get("id")
+            if not isinstance(revision, str) or len(revision) != 40:
+                raise KiCadCacheError(
+                    "KiCad symbol repository returned invalid revision"
+                )
+            archive = self._fetch_bytes(
+                KICAD_SYMBOL_ARCHIVE_URL.format(revision=revision)
+            )
+            staging = self.root.with_name(f"{self.root.name}.tmp-{uuid4().hex}")
+            backup = self.root.with_name(f"{self.root.name}.backup-{uuid4().hex}")
+            try:
+                staging.mkdir(parents=True)
+                self._extract_symbols(archive, staging)
+                if not self._contains_symbols(staging):
+                    raise KiCadCacheError(
+                        "Downloaded KiCad archive contains no symbols"
+                    )
+                (staging / METADATA_FILENAME).write_text(
+                    json.dumps(
+                        {
+                            "source": KICAD_SYMBOL_SOURCE,
+                            "ref": KICAD_SYMBOL_REF,
+                            "revision": revision,
+                            "last_successful_update": now.astimezone(
+                                timezone.utc
+                            ).isoformat(),
+                        },
+                        indent=2,
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                if self.root.exists():
+                    self.root.rename(backup)
+                staging.rename(self.root)
+                if backup.exists():
+                    shutil.rmtree(backup)
+            finally:
+                if staging.exists():
+                    shutil.rmtree(staging)
+            return CacheResult(self.root, revision, True)
+        except (KiCadCacheError, OSError, ValueError, BadZipFile) as error:
+            if valid and metadata is not None:
+                return CacheResult(
+                    self.root,
+                    metadata["revision"],
+                    False,
+                    f"KiCad symbol update failed; using existing cache: {error}",
+                )
+            raise KiCadCacheError(
+                "Cannot download the KiCad symbol library. "
+                f"Check the network connection. Details: {error}"
+            ) from error
+
+    def catalog(self) -> tuple[SymbolReference, ...]:
+        """Return cached symbol library files sorted by name."""
+        if not self._contains_symbols(self.root):
+            raise KiCadCacheError("KiCad symbol cache is missing or corrupted")
+        return tuple(
+            SymbolReference(path.stem, path)
+            for path in sorted(self.root.glob("*.kicad_sym"))
+        )
+
+    @staticmethod
+    def _extract_symbols(content: bytes, destination: Path) -> None:
+        """Safely extract top-level KiCad symbol files from an archive."""
+        destination.mkdir(parents=True)
+        with ZipFile(BytesIO(content)) as archive:
+            for item in archive.infolist():
+                path = PurePosixPath(item.filename)
+                if path.is_absolute() or ".." in path.parts or item.is_dir():
+                    continue
+                relative = PurePosixPath(*path.parts[1:])
+                if len(relative.parts) != 1 or relative.suffix != ".kicad_sym":
+                    continue
+                if item.file_size > _MAX_FOOTPRINT_BYTES:
+                    raise KiCadCacheError("KiCad symbol file is too large")
+                (destination / relative.name).write_bytes(archive.read(item))
+
+    @staticmethod
+    def _contains_symbols(root: Path) -> bool:
+        """Return whether a cache contains at least one symbol file."""
+        return next(root.glob("*.kicad_sym"), None) is not None
+
+    def _metadata(self) -> dict[str, str] | None:
+        """Read and validate cache metadata."""
+        try:
+            data = json.loads(
+                (self.root / METADATA_FILENAME).read_text(encoding="utf-8")
+            )
+            if not isinstance(data, dict) or data.get("source") != KICAD_SYMBOL_SOURCE:
+                return None
+            if not all(
+                isinstance(data.get(key), str)
+                for key in ("revision", "last_successful_update")
+            ):
+                return None
+            return data
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return None
+
+    @staticmethod
+    def _is_fresh(metadata: dict[str, str], now: datetime) -> bool:
+        """Return whether a symbol cache is younger than the refresh interval."""
+        updated = datetime.fromisoformat(metadata["last_successful_update"])
+        if updated.tzinfo is None:
+            updated = updated.replace(tzinfo=timezone.utc)
+        return timedelta(0) <= now.astimezone(timezone.utc) - updated < CACHE_MAX_AGE
+
+
+def _symbol_tokens(content: str) -> list[str]:
+    """Tokenize the small S-expression subset needed by KiCad symbols."""
+    return re.findall(r'"(?:\\.|[^"\\])*"|[()]|[^()\s]+', content)
+
+
+def _read_sexpr(tokens: list[str], index: int = 0) -> tuple[list[Any], int]:
+    """Read one balanced KiCad S-expression."""
+    if index >= len(tokens) or tokens[index] != "(":
+        raise KiCadFormatError("KiCad symbol file has malformed S-expression")
+    result: list[Any] = []
+    index += 1
+    while index < len(tokens) and tokens[index] != ")":
+        if tokens[index] == "(":
+            child, index = _read_sexpr(tokens, index)
+            result.append(child)
+        else:
+            token = tokens[index]
+            result.append(token[1:-1] if token.startswith('"') else token)
+            index += 1
+    if index >= len(tokens):
+        raise KiCadFormatError("KiCad symbol file has unbalanced parentheses")
+    return result, index + 1
+
+
+def _symbol_pin_nodes(node: list[Any]) -> list[list[Any]]:
+    """Return all nested pin expressions from one symbol expression."""
+    pins: list[list[Any]] = []
+    for child in node[2:]:
+        if isinstance(child, list):
+            if child and child[0] == "pin":
+                pins.append(child)
+            pins.extend(_symbol_pin_nodes(child))
+    return pins
+
+
+def parse_symbol_library(content: bytes, library: str) -> tuple[KiCadSymbol, ...]:
+    """Parse KiCad symbols and their pin names from a `.kicad_sym` file."""
+    try:
+        root, index = _read_sexpr(_symbol_tokens(content.decode("utf-8")))
+    except (UnicodeError, KiCadFormatError) as error:
+        raise KiCadFormatError(f"Cannot parse KiCad symbol library: {error}") from error
+    if index == 0 or not root or root[0] != "kicad_symbol_lib":
+        raise KiCadFormatError("KiCad symbol library has an invalid root")
+    symbols: list[KiCadSymbol] = []
+    for child in root:
+        if not isinstance(child, list) or len(child) < 2 or child[0] != "symbol":
+            continue
+        pins_by_number: dict[str, str] = {}
+        for pin in _symbol_pin_nodes(child):
+            number = next(
+                (
+                    item[1]
+                    for item in pin
+                    if isinstance(item, list)
+                    and item[:1] == ["number"]
+                    and len(item) > 1
+                ),
+                None,
+            )
+            name = next(
+                (
+                    item[1]
+                    for item in pin
+                    if isinstance(item, list)
+                    and item[:1] == ["name"]
+                    and len(item) > 1
+                ),
+                None,
+            )
+            if isinstance(number, str) and isinstance(name, str):
+                pins_by_number.setdefault(number, name)
+        if pins_by_number:
+            symbols.append(
+                KiCadSymbol(
+                    library,
+                    str(child[1]),
+                    tuple(
+                        KiCadSymbolPin(number, name)
+                        for number, name in pins_by_number.items()
+                    ),
+                )
+            )
+    return tuple(symbols)
 
 
 def parse_footprint(content: bytes, library: str) -> Footprint:

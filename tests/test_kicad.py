@@ -17,9 +17,16 @@ from tnasrevner.kicad import (
     KiCadCacheError,
     KiCadFootprintCache,
     KiCadFormatError,
+    parse_symbol_library,
     place_footprint_pads,
     parse_footprint,
 )
+
+SYMBOL_LIBRARY = b'''(kicad_symbol_lib (version 20231120) (generator kicad_symbol_editor)
+  (symbol "MCU:Demo"
+    (symbol "MCU:Demo_0_1"
+      (pin input line (name "PA0") (number "1"))
+      (pin power_in line (name "VDD") (number "2")))))'''
 
 REVISION = "a" * 40
 FOOTPRINT = b"""(footprint "R_0603_1608Metric"
@@ -85,6 +92,18 @@ def test_parse_kicad_footprint_geometry_and_named_pads() -> None:
     assert [pad.number for pad in footprint.pads] == ["1", "2"]
     assert footprint.pads[1].rotation == 15
     assert {graphic.kind for graphic in footprint.graphics} == {"line", "rect"}
+
+
+def test_parse_kicad_symbol_library_maps_pin_numbers_to_names() -> None:
+    """Symbol parsing exposes one logical pin per physical pin number."""
+    symbols = parse_symbol_library(SYMBOL_LIBRARY, "MCU")
+
+    assert len(symbols) == 1
+    assert symbols[0].name == "MCU:Demo"
+    assert [(pin.number, pin.name) for pin in symbols[0].pins] == [
+        ("1", "PA0"),
+        ("2", "VDD"),
+    ]
 
 
 @pytest.mark.parametrize(
